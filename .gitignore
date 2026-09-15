@@ -226,3 +226,4 @@ __marimo__/
 Qwen3-8B-Base
 test_qbsco.sh
 test_tools.sh
+node_modules/
