@@ -1,10 +1,19 @@
+import os
 import subprocess
 from pathlib import Path
 
 from service.recon_pipeline.asset_pipelines.config import TARGET
 
 IMAGE = "projectdiscovery/chaos-client:latest"
-CHAOS_KEY = "b6701c79-73ca-4d60-b88e-267d67171c27"
+
+# Loaded from .env (set in project root). Hardcoding the key here is wrong -
+# it leaks into version control and makes rotation painful.
+CHAOS_KEY = os.getenv("CHAOS_KEY")
+if not CHAOS_KEY:
+    raise ValueError(
+        "CHAOS_KEY is not set in .env. Add it to the project root .env file "
+        "(see service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/passive/README.md)."
+    )
 
 # Output always lands in passive/output, regardless of cwd
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"

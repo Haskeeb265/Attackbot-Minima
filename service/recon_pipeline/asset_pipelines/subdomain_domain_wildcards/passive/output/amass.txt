@@ -1,3 +1,1 @@
 qbsco.net (FQDN) --> mx_record --> qbsco-net.mail.protection.outlook.com (FQDN)
-qbsco.net (FQDN) --> ns_record --> mina.ns.cloudflare.com (FQDN)
-qbsco.net (FQDN) --> ns_record --> jason.ns.cloudflare.com (FQDN)
