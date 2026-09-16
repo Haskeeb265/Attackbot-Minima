@@ -1,8 +1,50 @@
 # Attackbot_v2 — ASM Recon Pipeline Implementation Plan
 
-**Status:** Draft v1 — awaiting review
-**Source spec:** [`docs/recon_docs/recon.md`](../recon_docs/recon.md)
+**Status:** Active plan — S0–S14 **mostly unbuilt**; see
+[Implementation status](#implementation-status) for what actually exists.
+**Source spec:** [`recon.md`](recon.md)
 **Goal:** Implement the Enterprise-Grade Attack Surface Management (ASM) architecture described in the spec as a sequence of **15 chronological, independently-testable stages**, with every architectural/design decision and its trade-offs documented up front.
+
+> **Read this as intent, not inventory.** Proposed modules (`scoring/`, `queue/`,
+> `sources/dns.py`, …) do not exist yet; anything that does exist is listed in the
+> status section below and in [`IMPLEMENTATION_PLAN_V2.md`](IMPLEMENTATION_PLAN_V2.md).
+>
+> **Historical references.** The rationales below cite `scope.md` (§ numbers) and
+> `test_detail_output.json` — neither is in the repository any more. Treat those
+> citations as history; the surviving equivalents are `docs/codebase/` and this
+> document set.
+
+---
+
+## Implementation status
+
+Checked against the code on 2026-09-16. This table — not the stage sections — is
+what is true about the repository today.
+
+| Stage | Status | Where it lives today |
+|---|---|---|
+| S0 Infrastructure & config | **partial** | `docker-compose.yml` runs PostgreSQL 16 + Neo4j; **no Redis service** and no connectivity smoke test |
+| S1 Graph schema + CRUD + indexing | **built** | `service/recon_pipeline/graph/{schema,repository,client}.py`; verified by `tests/recon/test_repository.py` (script, live Neo4j) |
+| S2 Scoring engine | not started | — |
+| S3 Extraction & normalization | **partial** | hostname canonicalization/validation, provenance merge and source-output parsing in `.../passive/normalize.py`; no artifact/secret extractors and no `content_hash` |
+| S4 Seed ingestion (Postgres → graph) | not started | — |
+| S5 Passive source: crt.sh | **built, standalone** | `.../passive/crtsh.py`, with wildcard detection in `.../passive/wildcard.py`; writes files, not the graph |
+| S6 Passive source: Wayback CDX | **built, standalone** | `.../passive/wayback.py` |
+| S7 End-to-end Domain pipeline (v1 loop) | **partial** | an end-to-end asset pipeline exists — `.../main.py`, running passive → active → permutation and writing a union of live hosts — but it does not touch the graph and has no scoring |
+| S8 Redis hot cache | not started | `REDIS_URL` exists in `config.py`; no client library, no code connects |
+| S9 Queue topology + workers | not started | — |
+| S10 Active dispatcher, rate limiting, recursion gate | **partial** | `.../active/` resolves, brute-forces and recurses with its own bounded limits (validated resolver pool, capped recursion), but there is no dispatcher, token bucket or policy gate |
+| S11 Re-scoring, decay, pruning | not started | — |
+| S12 Stealth & resilience | not started | — |
+| S13 LLM classification | not started | no provider SDK, endpoint or key anywhere in the repo |
+| S14 Observability, DLQ ops, monitoring | not started | each asset-pipeline stage writes its own `report.json`; there is no monitoring or queue-ops surface |
+
+**Exists outside this plan's numbering:** the `subdomain_domain_wildcards` asset
+pipeline (`passive/`, `active/`, `permutation/` + orchestrator) and two of the
+plan-v2 techniques (S16's DNS brute force and permutation) were built there first.
+Start with the
+[pipeline README](../../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md)
+and [`../codebase/ARCHITECTURE.md`](../codebase/ARCHITECTURE.md).
 
 ---
 
@@ -89,7 +131,7 @@ All other decisions below are marked **[OPEN]** where they still need your input
 
 ## 4. Cross-Cutting Conventions & Principles
 
-These apply to *every* stage. They map the spec's requirements onto the project's existing conventions (`scope.md` §9, `docs/codebase/CONVENTIONS.md`).
+These apply to *every* stage. They map the spec's requirements onto the project's existing conventions (`docs/codebase/CONVENTIONS.md`; the `scope.md` this line originally cited is no longer in the repository).
 
 1. **Function-first, not class-first.** Existing `shared/db.py` and `db/repos/*` are plain functions. Recon modules follow the same style — no repository objects.
 2. **Module-qualified imports for infra access.** `import shared.graph as graph` / `import shared.redis_client as redis_client` — mirroring `import shared.db as db`. Never `from shared.graph import fetch_node`.
@@ -99,9 +141,10 @@ These apply to *every* stage. They map the spec's requirements onto the project'
 6. **Policy-gated active probing.** No active step executes without passing the recursion gate (S10) + rate limiter. A global `PASSIVE_ONLY` flag degrades the whole system to passive mode (spec NFR §9).
 7. **Logging:** `shared.colorlog.log` (`process`/`success`/`failed`/`info`/`warn`).
 8. **Tests:** pytest, one test file per module under `tests/`, integration tests follow the `smoke_test_db.py` rollback/sentinel pattern where applicable.
-9. **Package naming gotcha (decision):** `service/recon-pipeline/` (hyphen) is the user-requested home for this doc; **Python packages cannot contain hyphens**, so runnable code lives in `service/recon_pipeline/` (underscore) as a sibling package. Trade-off: two similarly-named dirs (mild confusion) vs. keeping docs exactly where requested. **[OPEN]** — confirm you're OK with this split.
+9. **Package naming (settled):** Python packages cannot contain hyphens, so the package is `service/recon_pipeline/` (underscore). No hyphenated sibling directory was ever created — every reference in `docs/` was corrected to the underscore path.
 
-**Proposed code layout (all under `service/recon_pipeline/`):**
+**Proposed code layout (all under `service/recon_pipeline/`)** — intent, not
+inventory:
 
 ```
 service/recon_pipeline/
@@ -129,6 +172,24 @@ service/recon_pipeline/
   llm/classifier.py         # Cerebras/Groq classification (S13)
   observability/audit.py    # score audit queries + DLQ ops (S14)
   observability/monitor.py  # differential monitoring loop (S14)
+```
+
+**What was actually built, and where:**
+
+```
+service/recon_pipeline/
+  graph/schema.py           # BUILT (labels, constraints, indexes — Python, not .cypher)
+  graph/repository.py       # BUILT (Neo4jRepository: the CRUD layer, class not free functions)
+  graph/client.py           # BUILT (driver + verify())
+  asset_pipelines/config.py # BUILT (TARGET)
+  asset_pipelines/subdomain_domain_wildcards/
+    passive/normalize.py    # BUILT (S3's hostname canonicalization/validation + provenance)
+    passive/wildcard.py     # BUILT (S5's wildcard detection, reused by two other stages)
+    passive/crtsh.py        # BUILT (S5)   ·  passive/wayback.py  # BUILT (S6)
+    passive/sources.py      # BUILT (source registry + 7 sources)
+    active/                 # BUILT (S10's resolution/bruteforce/recursion, without the gate)
+    permutation/            # BUILT (S16's permutation generator)
+    main.py                 # BUILT (S7-shaped end-to-end runner, writing files)
 ```
 
 ---
@@ -470,19 +531,26 @@ S14 ◄── needs S7+ (a functioning pipeline to observe)
 
 ## 8. Open Questions (non-blocking)
 
-1. **[S0]** Neo4j image: pin a 5.x LTS tag or use latest 2025.x?
-2. **[S3]** OK to add `tldextract` to `requirements.txt`?
-3. **[S5]** Is crt.sh free tier alone acceptable, or wire a Google CT fallback in the same stage?
-4. **[S8]** Bloom filter: plain Redis SET for v1, or add the RedisBloom module?
-5. **[S9]** Worker concurrency: threads (sync, matches current stack) vs. asyncio from the start?
-6. **[S11]** Hard prune: archive-flag only, or plan actual eviction later?
-7. **[S12]** Deferring TLS-fingerprint/HTTP-2 shaping with the proxy pools — OK?
-8. **[S14]** Log/JSON observability for v1, or do you want a dashboard stack (e.g. Grafana) now?
-9. **Global:** split between `service/recon-pipeline/` (docs, hyphen) and `service/recon_pipeline/` (code, underscore) — OK?
-10. **Post-v1 sources:** which keyed sources (VirusTotal, SecurityTrails, Rapid7 FDNS, Shodan/Censys) do you intend to obtain keys for, and when? This decides when the ASN/CIDR/PTR pipeline and IP-intel pipeline get scheduled.
-11. **[S5]** OK to add `dnspython` to `requirements.txt` (needed for wildcard detection + DNS resolution)?
-12. **[S8]** OK to add `fakeredis` as a dev/test dependency for cache unit tests?
+Answered by the implementation since this plan was written — kept for the record,
+with the answer the code gives:
+
+- ~~**[S0]** Neo4j image: pin a 5.x LTS tag or use latest?~~ → `neo4j:latest` in `docker-compose.yml`.
+- ~~**[S5]** OK to add `dnspython`?~~ → yes, and it is **used today** (lazily imported by `passive/wildcard.py`, `active/resolvers.py`, `active/axfr.py`) yet still undeclared in `requirements.txt` — see [`../codebase/CONCERNS.md`](../codebase/CONCERNS.md).
+- ~~**Global:** hyphen/underscore split~~ → settled: `service/recon_pipeline/` only.
+- **[S3]** Is `tldextract` needed? → not used: canonicalization is hand-rolled in `passive/normalize.py`. Still open if/when public-suffix logic is required.
+
+Still open:
+
+1. **[S5]** Is crt.sh free tier alone acceptable, or wire a Google CT fallback in the same stage?
+2. **[S8]** Bloom filter: plain Redis SET for v1, or add the RedisBloom module?
+3. **[S9]** Worker concurrency: threads (sync, matches current stack) vs. asyncio from the start?
+4. **[S11]** Hard prune: archive-flag only, or plan actual eviction later?
+5. **[S12]** Deferring TLS-fingerprint/HTTP-2 shaping with the proxy pools — OK?
+6. **[S14]** Log/JSON observability for v1, or do you want a dashboard stack (e.g. Grafana) now?
+7. **Post-v1 sources:** which keyed sources (VirusTotal, SecurityTrails, Rapid7 FDNS, Shodan/Censys) do you intend to obtain keys for, and when? This decides when the ASN/CIDR/PTR pipeline and IP-intel pipeline get scheduled.
+8. **[S8]** OK to add `fakeredis` as a dev/test dependency for cache unit tests?
 
 ---
 
-*End of plan. Status: draft v1 — pending review + your answers to §8.*
+*End of plan. Status: see [Implementation status](#implementation-status). The
+remaining questions in §8 are for the unbuilt stages.*

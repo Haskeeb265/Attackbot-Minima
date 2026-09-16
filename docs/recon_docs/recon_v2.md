@@ -6,6 +6,14 @@
 attack surface for wide-scope bug bounty programs, while introducing a mandatory scope-enforcement
 gate so the widened surface never authorizes work outside the program's rules of engagement.
 
+**Status:** Specification (intent). **None of the v2 mechanism is built** — the
+Scope Engine, the eleven new source classes and the takeover detector exist only
+as this design. For what is built, read
+[`IMPLEMENTATION_PLAN_V2.md`](IMPLEMENTATION_PLAN_V2.md#implementation-status)
+(the one exception: the DNS-brute/permutation techniques of plan stage S16 were
+built first, as a standalone asset pipeline that writes files rather than graph
+nodes). Module names below are *intended* locations.
+
 **Relationship to v1:** This document does not replace `recon.md`. Every mechanism defined there
 (scoring model, recursion gate, stealth layer, graph-of-record, stream-extract-discard) is
 inherited unchanged. v2 adds: (a) eleven new source classes feeding the same S3 extraction

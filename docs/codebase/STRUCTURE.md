@@ -4,106 +4,109 @@
 
 ```
 Attackbot-Minimal/
-├── main.py                     # Application entry point
-├── config.py                   # Root-level configuration (DATABASE_URL, env vars)
+├── main.py                     # entry point: runs the scraper ingestion job in a thread
+├── config.py                   # loads .env; Postgres / HackerOne / Neo4j / Redis settings
 ├── requirements.txt            # Python dependencies
-├── docker-compose.yml          # PostgreSQL service definition
-├── Dockerfile                  # Container definition (empty)
-├── alembic.ini                 # Alembic migration configuration
-├── scope.md                    # Project context & architecture reference
+├── docker-compose.yml          # postgres:16-alpine + neo4j services
+├── Dockerfile                  # EMPTY (0 bytes) — the app is not containerised
+├── alembic.ini                 # Alembic configuration
+├── package.json                # only dev-tooling (freebuff); not an app dependency
+├── subdomains.txt              # stray empty file at the root — see CONCERNS.md
 │
-├── shared/                     # Cross-cutting utilities
-│   ├── db.py                   # Database connection pool & query primitives
-│   ├── colorlog.py             # Colored logging utilities
-│   └── connectors/             # External API clients (bug bounty sources)
-│       ├── base.py             # BaseConnector — platform-agnostic source interface
-│       └── hackerone_client.py # HackerOneConnector — HackerOne API v1 client
+├── shared/                     # cross-cutting utilities
+│   ├── db.py                   # psycopg3 pool + query primitives (get_conn, atomic, fetch_*)
+│   ├── colorlog.py             # ColorLogger: success / process / failed / info / warn
+│   └── connectors/
+│       ├── base.py             # BaseConnector — platform-agnostic source interface (auth, _get, _paginate)
+│       └── hackerone_client.py # HackerOneConnector — HackerOne Hacker API v1
 │
-├── service/                    # Business logic services
-│   └── scraper/                # Data ingestion from HackerOne
-│       ├── config.py           # Scraper-specific configuration
-│       ├── ingest.py           # Ingestion orchestrator
-│       ├── program_scraper.py  # Fetches program handles (via connector)
-│       ├── program_detail_scraper.py  # Fetches program details (via connector)
-│       ├── __init__.py
-│       └── helpers/
-│           └── __init__.py
+├── service/
+│   ├── scraper/                # HackerOne ingestion
+│   │   ├── program_scraper.py         # fetch + filter program handles (high/low priority)
+│   │   ├── program_detail_scraper.py  # per-handle scopes / weaknesses / exclusions
+│   │   ├── ingest.py                  # orchestrator: handles → details → map → persist
+│   │   └── helpers/                   # currently only __init__.py
+│   └── recon_pipeline/
+│       ├── graph/                     # Neo4j layer (built)
+│       │   ├── client.py              # Neo4jClient — driver + verify()
+│       │   ├── schema.py              # labels, relationship types, constraints, indexes
+│       │   └── repository.py          # Neo4jRepository — run_query / merge_node / get_node / merge_relation / get_relation
+│       └── asset_pipelines/
+│           ├── config.py              # TARGET (default target), loaded from .env
+│           └── subdomain_domain_wildcards/   # the built asset pipeline
+│               ├── main.py            # orchestrator: runs stages, writes output/live_hosts.txt
+│               ├── env.py             # shared env parsing (env_flag / env_int)
+│               ├── Dockerfile         # the 11-tool image, smoke-tested at build time
+│               ├── commands.txt       # raw per-tool Docker commands
+│               ├── README.md          # pipeline overview
+│               ├── passive/           # stage 1: OSINT + CT sources → known names
+│               ├── active/            # stage 2: DNS resolution, bruteforce, recursion, AXFR
+│               ├── permutation/       # stage 3: names derived from known names
+│               └── output/            # (gitignored) union of live hosts + summary.json
 │
-├── db/                         # Database layer
-│   ├── init/
-│   │   └── 001_schema.sql      # Initial schema (runs on container boot)
-│   ├── mapper/
-│   │   └── hackerone_mapper.py # Maps HackerOne data to internal format
-│   ├── persistence/
-│   │   └── persistence.py      # Persistence logic for mapped data
-│   ├── migrations/             # Alembic migrations
-│   │   ├── env.py
-│   │   ├── script.py.mako
-│   │   └── versions/
-│   │       ├── 0001_baseline_schema.py
-│   │       └── 0002_moving_max_severity_to_bounty_detail_table.py
-│   └── repos/                  # Query modules (one per table)
-│       ├── bounty_master.py
-│       ├── bounty_detail.py
-│       ├── bounty_weaknesses.py
-│       └── bounty_exclusions.py
+├── db/                         # PostgreSQL layer
+│   ├── init/001_schema.sql     # schema, auto-runs on a fresh container volume
+│   ├── init/models.py          # SQLAlchemy mirror of the schema (Alembic metadata)
+│   ├── mapper/hackerone_mapper.py   # API response → internal dicts
+│   ├── persistence/persistence.py   # persist_program(conn, mapped) — one atomic block
+│   ├── repos/                  # query modules, one per table
+│   │   ├── bounty_master.py · bounty_detail.py · bounty_weaknesses.py · bounty_exclusions.py
+│   └── migrations/             # Alembic env + versions 0001, 0002, 0003
 │
-├── tests/                      # Test suite
-│   ├── scraper_test.py
-│   ├── smoke_test_db.py
-│   ├── test_hackerone_mapper.py
-│   └── test_persistence.py
+├── tests/
+│   ├── conftest.py             # makes the repo root importable for pytest
+│   ├── recon/                  # hermetic suite (253 tests) — no Docker, DNS or network
+│   └── scraper/                # script-style tests needing a live PostgreSQL
 │
-├── docs/                       # Documentation
-│   └── codebase/               # Generated codebase documentation
-│       ├── STACK.md
-│       ├── STRUCTURE.md
-│       ├── ARCHITECTURE.md
-│       ├── CONVENTIONS.md
-│       ├── INTEGRATIONS.md
-│       ├── TESTING.md
-│       └── CONCERNS.md
+├── docs/                       # see docs/README.md for the map
+│   ├── README.md · codebase/ · recon_docs/ · scraper_docs/
 │
-└── ai-agent-workspace/         # Skills and agent configuration
-    └── SKILLS/
-        └── acquire-codebase-knowledge/
-            └── SKILL.md
+└── ai-agent-workspace/         # agent + skill definitions (tooling, not project docs)
 ```
 
 ## Entry Points
 
-| File | Purpose | How to Run |
-|------|---------|------------|
-| `main.py` | Application entry point | `python main.py` |
-| `tests/smoke_test_db.py` | Database lifecycle test | `python -m tests.smoke_test_db` |
+| File | Purpose | How to run |
+|---|---|---|
+| `main.py` | Scraper ingestion job (runs it on a thread and joins) | `python main.py` |
+| `.../main.py` | All three recon stages + union artifact | `python -m service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.main -t <target>` |
+| `.../passive/pipeline.py` | Passive stage only | `python -m ...subdomain_domain_wildcards.passive.pipeline -t <target>` |
+| `.../active/pipeline.py` | Active stage only | `python -m ...subdomain_domain_wildcards.active.pipeline -t <target>` |
+| `.../permutation/pipeline.py` | Permutation stage only | `python -m ...subdomain_domain_wildcards.permutation.pipeline -t <target>` |
+| `.../permutation/dnsgen.py` | Candidate generation only (no resolution) | `python -m ...subdomain_domain_wildcards.permutation.dnsgen -t <target>` |
+| `tests/recon/test_repository.py` | Neo4j graph integration test (script, needs a live Neo4j) | `python tests/recon/test_repository.py` |
+
+Every recon CLI supports `--help`, and `--list` where there is something to list
+(sources, engines, tools, generators).
 
 ## Key Files
 
-### Core Infrastructure
-- **`config.py`** - Loads environment variables, constructs `DATABASE_URL`
-- **`shared/db.py`** - Database connection pool, query primitives (`get_conn`, `atomic`, `fetch_one`, etc.)
-- **`shared/colorlog.py`** - Colored logging for terminal output
+### Scraper
+- `service/scraper/ingest.py` — `run_ingestion_job()` (owns the connection) and
+  `ingest_program()` (owns one atomic block per program).
+- `shared/connectors/base.py` — `BaseConnector` ABC; the scraper depends only on
+  this, so another platform is a new subclass and nothing else.
+- `db/mapper/hackerone_mapper.py` — `map_program()` and the per-section mappers.
+- `db/persistence/persistence.py` — `persist_program()`, the only writer.
 
-### Scraper Service
-- **`service/scraper/ingest.py`** - Orchestrates ingestion job (main workflow)
-- **`service/scraper/program_scraper.py`** - Fetches and filters program handles
-- **`service/scraper/program_detail_scraper.py`** - Fetches full program details per handle
-- **`shared/connectors/base.py`** - `BaseConnector` abstract source interface; the scraper depends only on this, never on platform specifics
-- **`shared/connectors/hackerone_client.py`** - `HackerOneConnector` — HackerOne API v1 implementation of `BaseConnector`
-
-### Database Layer
-- **`db/repos/*.py`** - Query modules (one per table): `bounty_master`, `bounty_detail`, `bounty_weaknesses`, `bounty_exclusions`
-- **`db/mapper/hackerone_mapper.py`** - Maps HackerOne API response to internal format
-- **`db/persistence/persistence.py`** - Persists mapped data to database
-- **`db/init/001_schema.sql`** - Initial schema (auto-runs on container boot)
-
-### Configuration
-- **`docker-compose.yml`** - PostgreSQL service definition
-- **`alembic.ini`** - Alembic migration configuration
+### Recon
+- `service/recon_pipeline/graph/repository.py` — all graph I/O; labels are always
+  a **list**, and writes go through `MERGE` on identity properties
+  (see `docs/recon_docs/graph_crud_contract.md`).
+- `.../active/tools.py` — the tool registry: images, pure argument builders and
+  the shared Docker runner. The only place that knows a tool's command line.
+- `.../passive/sources.py`, `.../active/wordlist.py`, `.../active/resolve.py`,
+  `.../permutation/generate.py` — the four registries (sources, wordlist
+  providers, engines, generators).
+- `.../passive/wildcard.py` — wildcard detection/suppression, reused by all
+  three stages so they cannot disagree about what a wildcard is.
+- `.../passive/normalize.py` — canonicalization and validation, shared by every
+  stage.
 
 ## Evidence
-- File tree exploration via `list_directory` and `glob`
-- `main.py` - entry point implementation
-- `shared/db.py` - database connection pool
-- `service/scraper/ingest.py` - ingestion orchestrator
-- `db/repos/` - all four query modules
+
+- File tree: `find`/`git ls-files` over the repo (see the pipeline READMEs for the
+  stage internals)
+- `main.py`, `service/scraper/ingest.py`, `service/recon_pipeline/graph/repository.py`
+- `db/repos/` (four modules), `db/migrations/versions/` (0001–0003)
+- `tests/` layout as listed

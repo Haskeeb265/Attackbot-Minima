@@ -1,144 +1,162 @@
 # Concerns
 
-## Tech Debt
+Current, verified gaps. Everything here was checked against the code on
+2026-09-16 unless marked otherwise. Items that older revisions of this document
+listed and that no longer apply are noted at the bottom — do not re-add them
+without checking.
 
-### 1. Incomplete Ingestion Pipeline
-**Status:** In progress  
-**Location:** `service/scraper/ingest.py`  
-**Issue:** Ingestion orchestrator is partially implemented. `ingest_program()` calls `persist_program()` but the mapping and persistence logic may not fully align with scraper output contract.  
-**Impact:** May cause data loss or incorrect storage during ingestion.  
-**Reference:** `scope.md` §6.2 (field mapping contract)
+## Blocking
 
-### 2. Missing Schema Validation
-**Status:** Not implemented  
-**Location:** `db/mapper/hackerone_mapper.py`  
-**Issue:** No validation that mapped data matches expected schema before persistence.  
-**Impact:** Invalid data could corrupt database state.  
-**Reference:** `scope.md` §6 (scraper output contract)
+### 1. The scraper test suite does not collect
 
-### 3. No Retry Logic for API Calls
-**Status:** Not implemented  
-**Location:** `service/scraper/helpers/send_request.py`  
-**Issue:** No retry logic for HackerOne API failures (rate limits, network errors).  
-**Impact:** Single API failure stops entire ingestion for that program.  
-**Reference:** `scope.md` §6.1 (rate limit requirements)
+`python -m pytest tests/scraper --collect-only` → **1 error**, and because
+pytest aborts the whole collection on an import error, `pytest tests/` (or a bare
+`pytest`) runs **nothing**:
 
-### 4. Hardcoded Test Data
-**Status:** Temporary  
-**Location:** `test_detail_output.json`  
-**Issue:** Test data file contains real HackerOne data (may become stale).  
-**Impact:** Tests may fail if HackerOne data structure changes.  
-**Reference:** `test_detail_output.json`
+```
+ERROR tests/scraper/test_hackerone_mapper.py - FileNotFoundError:
+      [Errno 2] No such file or directory: 'test_detail_output.json'
+```
 
-## Known Bugs (from scope.md §8)
+`test_hackerone_mapper.py` reads a fixture file that is not in the repository
+(it appears to have been deleted; the file is not tracked and not on disk). The
+other three files in that directory are script-style and collect as zero tests.
 
-### 1. `weakness_id` Sourced from Wrong Field
-**Status:** ✅ Resolved  
-**Issue:** Previously used `attributes.external_id` instead of the top-level `id` for `weakness_id`.  
-**Fix:** `db/mapper/hackerone_mapper.py` → `_map_weaknesses` now stores the HackerOne API **top-level `id`** in `weakness_id`; the CWE identifier from `attributes.weakness_id` is stored in the nullable `hackerone_weakness_id` column (added by migration `0003` and present in the baseline schema/migration `0001`). Verified consistent across `001_schema.sql`, `db/init/models.py`, `db/repos/bounty_weaknesses.py`, and the smoke test (`tests/scraper/smoke_test_db.py` asserts the `CWE-79` round-trip).  
-**Reference:** `docs/scaper_docs/schema.md` (Table: `bounty_weaknesses`)
+**Impact:** the repo has no working default test command — every suite must be
+invoked by path (`pytest tests/recon`). Anyone who runs `pytest` sees a
+collection failure.
 
-### 2. `max_severity` Reduction Using Equality
-**Status:** Documented, may still exist  
-**Issue:** Using equality check instead of rank comparison for severity.  
-**Impact:** Incorrect max_severity computation (only promotes to "critical").  
-**Reference:** `scope.md` §8.2
+**Fix options:** inline a small fixture (or a `conftest.py` fixture) for the
+mapper test, or mark it `pytest.importorskip`-style skip when its fixture is
+absent.
 
-### 3. Missing Per-Program Transaction Boundary
-**Status:** Documented, may still exist  
-**Issue:** No `atomic()` block wrapping entire `ingest_program()` body.  
-**Impact:** Half-ingested programs on failure (master + some scopes committed).  
-**Reference:** `scope.md` §8.3
+### 2. Dependencies are not declared
 
-## Security Risks
+`requirements.txt` is a single commented-out line:
 
-### 1. Environment Variables in Code
-**Status:** Current implementation  
-**Location:** `config.py`  
-**Risk:** `DATABASE_URL` printed to stdout (includes credentials).  
-**Impact:** Credentials exposed in logs/terminal output.  
-**Mitigation:** Remove print statement or mask credentials.
+```
+#pip install "psycopg[binary]" psycopg_pool sqlalchemy alembic --break-system-packages
+```
 
-### 2. No API Credential Rotation
-**Status:** Not implemented  
-**Risk:** HackerOne API credentials stored in environment variables without rotation.  
-**Impact:** Stale credentials could cause authentication failures.
+Not declared but imported by shipped code: `python-dotenv` (implicitly, via
+`config.py`), `requests`, `dnspython`, `neo4j`, `pytest`. `pip install -r
+requirements.txt` therefore installs nothing.
 
-### 3. Database Credentials in Docker Compose
-**Status:** Current implementation  
-**Location:** `docker-compose.yml`  
-**Risk:** Credentials passed via environment variables (visible in `docker inspect`).  
-**Impact:** Credentials accessible to anyone with Docker access.
+**Impact:** a fresh checkout cannot be set up from the declared manifest; failures
+appear as `ModuleNotFoundError` at runtime and degrade silently for `dnspython`
+(imported lazily, so DNS features disappear rather than raising).
 
-## Performance Bottlenecks
+## High
 
-### 1. Sequential Program Processing
-**Status:** Current implementation  
-**Location:** `service/scraper/ingest.py`  
-**Issue:** Programs processed sequentially (one at a time).  
-**Impact:** Slow ingestion for large number of programs.  
-**Note:** Deliberate design choice (per `scope.md` §7.3)
+### 3. No rate-limit or retry handling against the HackerOne API
 
-### 2. No Connection Pool Tuning
-**Status:** Current implementation  
-**Location:** `shared/db.py`  
-**Issue:** Default pool settings (`min_size=2`, `max_size=10`).  
-**Impact:** May be suboptimal for high-concurrency scenarios.
+`shared/connectors/` contains no retry, backoff, `sleep` or 429 handling, and
+`config.py` has no rate-limit settings despite the plans describing centrally
+managed limits.
 
-### 3. No Caching for Repeated API Calls
-**Status:** Not implemented  
-**Issue:** Same program data may be fetched multiple times across runs.  
-**Impact:** Unnecessary API calls and rate limit consumption.
+**Impact:** a transient API error drops that program (per-program `try/except`) or
+fails the run during the program-list fetch; sustained rate limiting means partial
+ingestion with no backoff to absorb it.
 
-## Maintenance Issues
+### 4. The recon pipeline's results never reach the graph
 
-### 1. Empty Dockerfile
-**Status:** Current implementation  
-**Location:** `Dockerfile`  
-**Issue:** Dockerfile is empty (no container build instructions).  
-**Impact:** Cannot build application container (only PostgreSQL via Docker Compose).
+The asset pipeline (`subdomain_domain_wildcards`) is complete and writes files
+under `output/`, but nothing maps those results into Neo4j. Seed ingestion and the
+end-to-end pipeline stages (S4, S7) are unbuilt.
 
-### 2. No CI/CD Pipeline
-**Status:** Not implemented  
-**Issue:** No automated testing or deployment pipeline.  
-**Impact:** Manual testing required for all changes.
+**Impact:** the graph layer is exercised only by its own integration script;
+discovered assets are not correlated, scored or queryable. The pipeline's value
+is currently per-run files.
 
-### 3. Incomplete Documentation
-**Status:** Current implementation  
-**Location:** `README.md`  
-**Issue:** README file is empty.  
-**Impact:** No onboarding documentation for new contributors.
+## Medium
 
-## Risk Assessment
+### 5. `docker/` is empty and the root `Dockerfile` is 0 bytes
 
-| Category | High Risk | Medium Risk | Low Risk |
-|----------|-----------|-------------|----------|
-| **Security** | Credential exposure | API credential rotation | Database credential visibility |
-| **Reliability** | Missing retry logic | Sequential processing | Pool tuning |
-| **Maintainability** | No CI/CD | Empty Dockerfile | Incomplete docs |
-| **Data Integrity** | Transaction boundary | Schema validation | Hardcoded test data |
+`docs` and older notes refer to a container definition; there is none. The
+application runs from the host, only datastores and the recon toolchain are
+containerised.
 
-## Recommendations
+### 6. No CI
 
-### Immediate Actions
-1. Remove `DATABASE_URL` print statement from `config.py`
-2. Add retry logic for HackerOne API calls
-3. Implement schema validation in mapper
+No workflow configuration exists, so the 253 hermetic recon tests are never run
+automatically. They are fast (≈3 s) and dependency-light, which makes them the
+cheapest thing to wire into CI first.
 
-### Short-term Improvements
-1. Add CI/CD pipeline with pytest
-2. Implement API response caching
-3. Add connection pool monitoring
+### 7. Config/code drift for planned subsystems
 
-### Long-term Considerations
-1. Implement parallel program processing
-2. Add API credential rotation
-3. Create comprehensive README
+`config.py` exposes `REDIS_URL`, and `requirements.txt` names `sqlalchemy`
+(used only for Alembic metadata), while no code connects to Redis and no LLM
+provider SDK or key exists anywhere — yet the plans (S8, S9, S13) assume both.
+Config keys that nothing reads invite the assumption that a feature exists.
+
+### 8. The Neo4j integration test is not part of the suite
+
+`tests/recon/test_repository.py` needs a live Neo4j, so it is excluded from the
+253 and easy to forget. It is also the only coverage for the multi-label write
+contract that every future graph writer must follow.
+
+### 9. Graph writes are only as idempotent as their label sets
+
+`MERGE` matches on the full label set, so writing the same
+`(asset_type, canonical_value)` under a *different* set of labels raises a
+constraint violation instead of updating. This is by design (documented in
+`graph_crud_contract.md`) but it is a sharp edge for every new writer: typed
+labels must not drift for one identity.
+
+## Low
+
+### 10. Stray and unreferenced files in the repo root
+
+- `subdomains.txt` — tracked, 0 bytes, nothing reads or writes it (outputs live
+  under each stage's `output/`).
+- `package.json` / `package-lock.json` — a single dev-tooling dependency
+  (`freebuff`), unrelated to the application; confusing next to
+  `requirements.txt`.
+- `tests/recon/test_qbsco.sh` and `tests/recon/test_tools.sh` — untracked,
+  gitignored scratch scripts that reference an image name
+  (`attackbot/subdomain-wildcards-tools:latest`) which no longer exists and write
+  a `test.md`; superseded by the stage CLIs and `commands.txt`.
+- `service/scraper/helpers/` contains only `__init__.py`.
+
+### 11. Schema exists in two places
+
+`db/init/001_schema.sql` (fresh containers) and the Alembic chain
+(`db/migrations/versions/0001`–`0003`, existing databases) must be kept in step by
+hand; `db/init/models.py` mirrors the schema for autogenerate. They agree today
+(verified for `hackerone_weakness_id` and the `bounty_weaknesses` naming), but
+nothing enforces it.
+
+### 12. Line endings and shell assumptions
+
+Some files are CRLF and some LF, and the documented commands assume a POSIX shell
+(Git Bash on Windows). The recon stages handle the Windows path-mangling case
+themselves (`MSYS_NO_PATHCONV=1`); ad-hoc Docker commands need it set manually.
+
+## Resolved — do not re-list
+
+These appeared in earlier revisions of this document and are fixed or were never
+true of the current code:
+
+- **`DATABASE_URL` printed to stdout** — `config.py` has no print statement.
+- **Missing per-program transaction boundary** — `ingest_program()` wraps each
+  program in `db.atomic(conn)` inside a run-scoped connection, with failures
+  caught per program.
+- **`weakness_id` sourced from the wrong field** — the API's top-level `id` is
+  stored in `weakness_id`; the CWE identifier goes to `hackerone_weakness_id`.
+- **`max_severity` computed by equality** — no severity ranking logic exists any
+  more: per-scope severity comes straight from the API (`_map_scopes`) and there
+  is no aggregate computation to get wrong.
+- **Empty README** — the root README is written (2026-09-16).
+- **`LABEL_WEAKNESSSES` typo**, **`program_weaknesses` table name**, **`is_active`
+  cascade gap**, **smoke test calling non-existent functions** — all fixed; see
+  `docs/scraper_docs/schema.md` §Known issues.
+- **`service/recon-pipeline` (hyphen) paths** — the package is
+  `service/recon_pipeline`; all references in `docs/` were corrected.
 
 ## Evidence
-- `scope.md` §8 (known-bad patterns)
-- `config.py` (credential exposure)
-- `service/scraper/ingest.py` (sequential processing)
-- `shared/db.py` (pool configuration)
-- `Dockerfile` (empty)
-- `README.md` (empty)
+
+- `python -m pytest tests/scraper --collect-only -q` (error 1), `pytest tests/recon` (253 passed)
+- `requirements.txt`, `config.py`, `shared/connectors/*`, `service/scraper/*`
+- `Dockerfile` (0 bytes), `docker/` (empty), `docker-compose.yml`
+- `service/recon_pipeline/graph/*` and `tests/recon/test_repository.py`
+- `git ls-files subdomains.txt`, `git check-ignore -v tests/recon/test_qbsco.sh`

@@ -1,160 +1,129 @@
 # Conventions
 
-## Naming Conventions
+Conventions as the code actually follows them. Where a rule is enforced by
+something (a validator, a test), that is noted — those are the ones worth
+trusting.
 
-### Files & Modules
-- **snake_case** for all Python files: `program_scraper.py`, `bounty_master.py`
-- **One module per database table** in `db/repos/`: `bounty_master.py`, `bounty_detail.py`, etc.
-- **Test files** prefixed with `test_` or suffixed with `_test.py`: `test_persistence.py`, `scraper_test.py`
+## Naming
 
-### Functions & Variables
-- **snake_case** for functions and variables: `run_ingestion_job()`, `high_handles`
-- **UPPER_SNAKE_CASE** for constants: `_SEVERITY_RANK`, `DATABASE_URL`
-- **Private/internal** functions prefixed with underscore: `_compute_max_severity()`
+- **snake_case** modules and functions; **UPPER_SNAKE_CASE** module constants
+  (`DATABASE_URL`, `RESOLVER_MIN_VALID`, `LABEL_ASSET`).
+- **`_leading_underscore`** for module-private helpers
+  (`_label_clause`, `_utc_now`, `_build_parser`).
+- **One module per database table** in `db/repos/`
+  (`bounty_master.py`, `bounty_detail.py`, `bounty_weaknesses.py`,
+  `bounty_exclusions.py`).
+- **Python module names never contain hyphens.** The passive chaos wrapper is
+  `chaos.py` (not `chaos-client.py`, which cannot be imported); the *image* is
+  still `projectdiscovery/chaos-client`.
+- Test files are `test_*.py` under `tests/<suite>/`.
 
-### Database
-- **Table names**: snake_case, plural for collections: `bounty_master`, `bounty_detail`
-- **Column names**: snake_case: `scope_count`, `max_severity`, `scope_identifier`
-- **Primary keys**: `id` (integer, auto-increment)
-- **Foreign keys**: `{table}_id` pattern: `master_id` (references `bounty_master.id`)
+## Imports
 
-## Import Style
+Order is standard library → third-party → local, and DB-touching modules use the
+module-qualified form so call sites are visibly database code:
 
-### Module-Qualified Imports (Required for DB Access)
 ```python
-# ✅ Correct - module-qualified
 import shared.db as db
 
-def some_query(conn, ...):
-    row = db.fetch_one(conn, "SELECT ...")
-    return row
-
-# ❌ Wrong - direct import
-from shared.db import fetch_one
-
-def some_query(conn, ...):
-    row = fetch_one(conn, "SELECT ...")  # Not obvious this touches DB
-```
-
-**Rationale:** Module-qualified imports make call sites obviously DB-touching at a glance.
-
-### Import Order
-1. Standard library imports
-2. Third-party imports
-3. Local imports (project modules)
-
-## Function Design
-
-### Function-First, Not Class-First
-```python
-# ✅ Correct - plain functions
-def add_program(conn, handle, scope_count):
-    ...
-
-def upsert_program(conn, handle, scope_count):
-    ...
-
-# ❌ Wrong - unnecessary class
-class ProgramRepository:
-    def __init__(self, conn):
-        self.conn = conn
-    
-    def add(self, handle, scope_count):
-        ...
-```
-
-### Query Functions Take `conn` as Parameter
-```python
-# ✅ Correct - receives conn from caller
 def get_program_by_id(conn, master_id):
     return db.fetch_one(conn, "SELECT ...", (master_id,))
-
-# ❌ Wrong - opens own connection
-def get_program_by_id(master_id):
-    with db.get_conn() as conn:
-        return db.fetch_one(conn, "SELECT ...", (master_id,))
 ```
 
-**Exception:** `replace_weaknesses()` and `replace_exclusions()` call `db.atomic(conn)` internally (safe to nest due to savepoints).
+Recon modules are imported absolutely from the repo root
+(`from service.recon_pipeline.asset_pipelines... import ...`), which is why the
+CLIs are run with `python -m ...` from the project root. Relative imports are used
+*within* a stage package (`from ..passive.normalize import canonicalize_host`).
 
-### Transaction Boundary Ownership
+**Lazy imports for optional dependencies.** `dnspython` is imported inside the
+functions that need it (`.../passive/wildcard.py`, `.../active/resolvers.py`,
+`.../active/axfr.py`), so a missing dnspython degrades one feature instead of
+breaking every import.
+
+## Database access
+
+- **`conn` is always a parameter.** Query functions never open their own
+  connection; only top-level orchestrators call `db.get_conn()` /
+  `db.atomic()`.
+- **One transaction per unit of work.** `ingest_program()` wraps one program;
+  `persist_program()` nests (safe — savepoints). Failures roll back that unit and
+  the caller continues.
+- **Writes are idempotent by construction**: `INSERT ... ON CONFLICT DO UPDATE`
+  for master/detail rows, full delete-then-insert for weaknesses/exclusions, and
+  `MERGE` on identity properties for graph nodes.
+- **Pass parameters, never interpolate** — every query takes a params tuple.
+  Identifiers that must be interpolated (Neo4j labels, `SET` keys) go through a
+  dedicated escaping helper (`_label_clause`).
+
+## Function-first, registry-driven
+
+Plain functions and dataclasses over class hierarchies. Reusable "kinds of thing"
+are declared in a registry, and per-tool modules are thin facades over it:
+
 ```python
-# ✅ Correct - top-level orchestrator owns connection and transaction
-def run_ingestion_job():
-    with db.get_conn() as conn:
-        for handle in handles:
-            try:
-                with db.atomic(conn):
-                    persist_program(conn, mapped)
-            except Exception as e:
-                log.failed(f"[{handle}] failed: {e}")
-
-# ❌ Wrong - query function opens own connection
-def persist_program(mapped):
-    with db.get_conn() as conn:
-        with db.atomic(conn):
-            # ... inserts
+register_provider(WordlistProvider("builtin", builtin_words, "..."))   # active/wordlist.py
+register_generator(Generator("dnsgen", _dnsgen_generator, "..."))      # permutation/generate.py
+register_engine(...)                                                  # active/resolve.py
+register_source(...)                                                  # passive/sources.py
 ```
 
-## Error Handling
+Registries reject duplicate names unless `replace=True`, so shadowing cannot
+depend on import order.
 
-### Exception Propagation
-- Let exceptions propagate naturally from query functions
-- Catch at the orchestration level (e.g., `run_ingestion_job()`)
-- Use `logger.exception` for tracebacks
+## Settings modules
 
-### Transaction Rollback
-- Rely on context managers for automatic rollback
-- Don't manually call `rollback()` - let `atomic()` handle it
-- Named sentinel exceptions for test rollback (see `smoke_test_db.py`)
+Every recon stage has `settings.py` as its single source of paths and tunables:
 
-## Logging
+- paths derived from `__file__` exactly once (never from cwd);
+- every knob is an environment variable (`PASSIVE_*`, `ACTIVE_*`,
+  `PERMUTATION_*`) read through `env_flag` / `env_int` with a documented default,
+  so a run is reproducible from the CLI alone;
+- settings shared across stages are **imported**, not duplicated (the active and
+  permutation stages import the passive stage's wildcard tunables on purpose).
 
-### Use Project's Color Logger
-```python
-from shared.colorlog import log
+## Errors and logging
 
-log.process(f"Starting ingestion job — {len(handles)} handles queued")
-log.success(f"[{handle}] ingested")
-log.failed(f"[{handle}] ingestion failed: {e}")
-```
+- Logging goes through `shared/colorlog.py`:
+  `log.success()` / `log.process()` / `log.info()` / `log.warn()` / `log.failed()`
+  (and the stdlib `logging` module inside the recon stages, which log through
+  module loggers such as `active.pipeline`).
+- **Stage failures are reported, not raised**: a stage writes `report.json` with
+  `ok: false` plus the reason, and the orchestrator records the failure and keeps
+  going. The process exit code carries the verdict (`0` clean, `1` degraded,
+  `2` aborted). Full stage reports also include a `fatal` string when a run
+  could not start.
+- **Abort, don't half-do.** Conditions that make results meaningless — no usable
+  resolver pool, missing tool image, systemic foreign-domain leakage — abort with
+  an actionable message instead of emitting partial output.
 
-### Log Levels
-- `log.process()` - informational progress
-- `log.success()` - successful operations
-- `log.failed()` - failures and errors
+## Docstrings and comments
 
-## Documentation
-
-### Docstrings
-- Use triple-quoted strings for function docstrings
-- Document parameters, return values, and exceptions
-- Keep docstrings concise but informative
-
-### Inline Comments
-- Explain "why" not "what"
-- Document non-obvious decisions
-- Reference design documents (e.g., `scope.md` sections)
+- Module docstrings carry the design rationale ("why this exists", trade-offs,
+  spec section references). This is the dominant documentation style in the repo:
+  read the module docstring before the code.
+- Comments explain *why*, and where a decision came from a measurement, they carry
+  the measurement (e.g. resolver rot, generator determinism, cap sizing).
+- Public functions have parameter/return docstrings; trivial helpers do not.
 
 ## Testing
 
-### Test Organization
-- Test files in `tests/` directory
-- Use pytest conventions: `test_` prefix for test functions
-- One test file per module: `test_persistence.py` for `persistence.py`
-
-### Test Patterns
-```python
-# Smoke test with rollback
-def test_database_lifecycle():
-    with db.get_conn() as conn:
-        with db.atomic(conn):
-            # ... test operations
-            raise _ForceRollback  # Rollback, don't commit
-```
+- **Hermetic by default.** The recon suite touches no Docker, DNS, or network,
+  and never reads a stage's `output/` directory; external effects are injected
+  (query functions, resolvers, engines, generators) and faked in
+  `tests/recon/conftest.py`.
+- **Assert on the contract**: what a stage writes, what it reports, and which
+  abort paths it takes — not internal call order.
+- Integration tests that need real services are written as standalone scripts
+  (`tests/recon/test_repository.py`, the `tests/scraper/` scripts) and are run
+  explicitly.
 
 ## Evidence
-- `shared/db.py` - module-qualified imports, function-first design
-- `db/repos/*.py` - query functions taking `conn` parameter
-- `service/scraper/ingest.py` - transaction boundary ownership
-- `scope.md` - coding conventions section (§9)
+
+- `shared/db.py`, `db/repos/*.py`, `db/persistence/persistence.py`
+- `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/*/settings.py`
+- `.../passive/sources.py`, `.../active/wordlist.py`, `.../active/resolve.py`,
+  `.../permutation/generate.py` (the four registries)
+- `.../active/output/resolvers.txt` vs the curated seed files in `.../active/resolvers/`
+  (validated pool vs. candidates)
+- `service/recon_pipeline/graph/repository.py` (`_label_clause`, `TypeError`/`ValueError`)
+- `tests/recon/conftest.py` (fakes), `tests/recon/*` (hermetic suite)

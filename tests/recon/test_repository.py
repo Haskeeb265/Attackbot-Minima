@@ -41,12 +41,16 @@ from pathlib import Path
 from neo4j import exceptions
 
 # Make the repo root AND the recon graph package importable regardless of the
-# cwd the script is launched from. NOTE: `service.recon-pipeline` cannot be
-# imported as a dotted module name (the hyphen is invalid in Python identifiers),
-# so we add the graph dir directly to sys.path, matching the convention used by
-# service/recon-pipeline/graph/repository.py itself.
+# cwd the script is launched from.  The directory is added to sys.path directly
+# rather than imported as a dotted module because this file is also run as a
+# standalone script (see the Usage note above).
+#
+# NOTE: the package directory is `service/recon_pipeline/graph` — underscore, not
+# hyphen.  An earlier revision of this file pointed at `service/recon-pipeline`,
+# which does not exist, so these imports failed and the module could not even be
+# collected by pytest.
 _ROOT = Path(__file__).resolve().parents[2]
-_GRAPH_DIR = _ROOT / "service" / "recon-pipeline" / "graph"
+_GRAPH_DIR = _ROOT / "service" / "recon_pipeline" / "graph"
 for _path in (_ROOT, _GRAPH_DIR):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))

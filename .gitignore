@@ -156,6 +156,22 @@ activemq-data/
 
 # Recon tool configs with API keys (amass datasources)
 service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/passive/config/
+
+# subdomain_domain_wildcards pipeline run artifacts: raw per-tool output,
+# per-tool logs, the normalized/resolved host lists, validated resolver pools,
+# zone-transfer results, and report.json. All of it is reproduced by running the
+# stages (`python -m ...passive.pipeline`, `...active.pipeline`,
+# `...permutation.pipeline`) or the orchestrator (`...main`), so none of it
+# belongs in git. The curated seed data (active/resolvers/, active/wordlists/)
+# is NOT ignored - that is source.
+service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/passive/output/
+service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/active/output/
+service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/permutation/output/
+service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/output/
+
+# Scratch directories used for ad-hoc live verification runs (wordlist/resolver
+# experiments, temporary mounts). Never source.
+.tmp_*/
 .venv
 env/
 venv/

@@ -1,172 +1,135 @@
 # Architecture
 
-## System Overview
-
-Attackbot_v2 is an autonomous vulnerability discovery engine targeting public HackerOne bug bounty programs. The system is built around four top-level operations:
-
-1. **Scraping** - Pulls program metadata from HackerOne's Hacker API
-2. **Recon** - Five-stage internal pipeline (not yet started)
-3. **Pentesting** - Not yet started
-4. **Reporting** - Not yet started
-
-## Current Implementation
-
-### Scraping Operation
-The scraping operation is functionally complete and consists of two scrapers:
+Attackbot is an attack surface management tool for bug bounty programs. Today it
+has two built subsystems — a **scraper** that ingests HackerOne program data into
+PostgreSQL, and a **recon asset pipeline** that turns an in-scope domain into a
+list of live hosts — plus a **graph layer** (Neo4j schema + CRUD) that the recon
+results are not yet written into.
 
 ```
-program_scraper.py          → Fetches and filters program handles
+HackerOne API ──▶ scraper ──▶ PostgreSQL ──▶ (planned) seed ingestion ──▶ Neo4j
+                                                                          ▲
+in-scope domain ──▶ recon asset pipeline ──▶ live hosts (files) ──────────┘
+                                            (not wired into the graph yet)
+```
+
+## 1. Scraper (built)
+
+```
+program_scraper.py          fetch all programs → filter into priority tiers
         ↓
-program_detail_scraper.py   → Takes handles one at a time, fetches full detail
+program_detail_scraper.py   per handle: scopes, weaknesses, exclusions
         ↓
-ingest.py                   → Orchestrates scraping → mapping → persistence
+ingest.py                   orchestrate: map → persist, one atomic block per program
+        ↓
+db/mapper/hackerone_mapper.py → db/persistence/persistence.py → db/repos/*.py
+        ↓
+PostgreSQL (bounty_master, bounty_detail, bounty_weaknesses, bounty_exclusion)
 ```
 
-All program data is fetched through a `BaseConnector` source
-(`shared/connectors/`) — the scrapers depend only on that interface, never on
-platform-specific URLs/auth. `HackerOneConnector` is the current
-implementation; Bugcrowd and other platforms plug in as new connector
-subclasses.
-
-### Data Flow
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        main.py                                   │
-│  (Entry point - starts ingestion thread)                         │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              service/scraper/ingest.py                           │
-│  (Orchestrator - owns ONE connection for entire run)             │
-│                                                                  │
-│  run_ingestion_job()                                             │
-│    ├── get_filtered_handles()  (program_scraper)                 │
-│    └── for handle in handles:                                    │
-│          ├── scrape_program_detail(handle)                       │
-│          └── ingest_program(conn, handle)  [ONE atomic per prog] │
-│                ├── bounty_master.upsert_program                  │
-│                ├── bounty_detail.upsert_scope (looped)           │
-│                ├── bounty_weaknesses.replace_weaknesses         │
-│                └── bounty_exclusions.update_exclusions           │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              db/mapper/hackerone_mapper.py                       │
-│  (Transforms HackerOne API response → internal format)           │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              db/persistence/persistence.py                       │
-│  (Persists mapped data to database)                              │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              db/repos/*.py                                       │
-│  (Query modules - one per table)                                 │
-│    ├── bounty_master.py                                          │
-│    ├── bounty_detail.py                                          │
-│    ├── bounty_weaknesses.py                                      │
-│    └── bounty_exclusions.py                                      │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              PostgreSQL 16 (via Docker)                          │
-│  Tables: bounty_master, bounty_detail,                          │
-│          bounty_weaknesses, bounty_exclusion                    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-## Transaction Boundary Pattern
-
-The system follows a strict transaction boundary pattern:
+**Transaction boundary rule.** `run_ingestion_job()` owns *one*
+`db.get_conn()` for the whole run and catches failures per program;
+`ingest_program()` wraps each program in its own `db.atomic(conn)`. A failing
+program rolls back alone and the loop continues:
 
 ```python
-# One connection for entire run
-with db.get_conn() as conn:
+with db.get_conn() as conn:                 # one connection for the run
     for handle in handles:
         try:
-            # One atomic block per program
-            with db.atomic(conn):
-                persist_program(conn, mapped)
-            # Commit happens here if no exception
+            ingest_program(conn, handle, detail_scraper)   # db.atomic inside
         except Exception as e:
-            # Rollback happens here, loop continues
             log.failed(f"[{handle}] ingestion failed: {e}")
 ```
 
-**Key Invariants:**
-- ONE connection for the entire ingestion run
-- ONE transaction per program (atomic block)
-- Failures in one program don't affect others
-- Connection stays clean after rollback (savepoints)
+`persist_program()` also opens `db.atomic(conn)`; nesting is safe because psycopg
+uses savepoints, and the unit-of-work rule is that only top-level code calls
+`get_conn()`/`atomic()` — query functions in `db/repos/*` always receive `conn`.
 
-## Database Patterns
+**Platform abstraction.** The scraper talks only to `BaseConnector`
+(`_get`, `_paginate`, `fetch_programs`, `fetch_program_scopes`,
+`fetch_program_weaknesses`, `fetch_program_scope_exclusions`).
+`HackerOneConnector` is the only implementation; another platform is a subclass.
 
-### Write Patterns by Table
+## 2. Recon asset pipeline (built)
 
-| Table | Pattern | Reason |
-|-------|---------|--------|
-| `bounty_master` | UPSERT (ON CONFLICT DO UPDATE) | Dedup via unique constraint on `handle` |
-| `bounty_detail` | UPSERT (ON CONFLICT DO UPDATE) | Preserves row identity for downstream FK references |
-| `bounty_weaknesses` | DELETE-then-INSERT (full replace) | No historical continuity needed |
-| `bounty_exclusion` | DELETE-then-INSERT (full replace) | No historical continuity needed |
-
-### Connection Management
-
-```python
-# shared/db.py
-pool = ConnectionPool(
-    conninfo=DATABASE_URL,
-    min_size=2,
-    max_size=10,
-    kwargs={"row_factory": dict_row},
-)
-
-@contextmanager
-def get_conn():
-    with pool.connection() as conn:
-        yield conn
-
-@contextmanager
-def atomic(conn):
-    with conn.transaction():
-        yield conn
-```
-
-**Unit-of-Work Rule:**
-- Only top-level orchestrating code calls `get_conn()` / `atomic()`
-- Query functions in `db/repos/*.py` always receive `conn` as parameter
-- Query functions never open their own connection
-
-## Future Architecture: Recon Operation
-
-The recon operation (not yet started) will use a five-stage pipeline:
+`service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/` — three
+independently runnable stages plus an orchestrator. Each stage owns an `output/`
+directory, a `report.json`, and a README with measured numbers.
 
 ```
-Stage 0: Deterministic program ingestion (no LLM)
-    ↓
-Stage 1: LLM classification and plan generation (reads from DB)
-    ↓
-Stage 2: Enumeration / horizontal
-    ↓
-Stage 3: Validation and fingerprinting
-    ↓
-Stage 4: Vulnerability testing / vertical
+passive     OSINT/CT sources → normalized, provenance-tagged known names
+   ↓
+active      validate resolvers → resolve → bruteforce → recurse → AXFR
+            → wildcard filter → record enrichment → live hosts + records
+   ↓
+permutation known names → dnsgen candidates → resolve (active's engine) → live hosts
+   ↓
+main.py     union of live hosts + summary.json
 ```
 
-**GoalAct Loop** wraps the recon pipeline with:
-- Full plan rewrite every iteration
-- Three-state result system: CONFIRMED_FINDING, CONFIRMED_EMPTY, EXECUTION_FAILED
-- Scratchpad as sole intra-run memory channel
+Design rules that the code enforces:
+
+- **One definition of "resolves"** — the permutation stage calls the active
+  stage's engine rather than re-implementing resolution.
+- **One definition of "wildcard"** — `.../passive/wildcard.py` is imported by the
+  other two stages, including its tunables, so they cannot disagree.
+- **Registry + thin facade.** Coverage is added by declaring it: sources
+  (`.../passive/sources.py`), wordlist providers (`.../active/wordlist.py`), engines
+  (`.../active/resolve.py`), generators (`.../permutation/generate.py`). Per-tool modules
+  are facades over the registry, not separate implementations.
+- **Validate the pool, not the seeds.** Every resolver is probed for a positive
+  answer *and* a clean NXDOMAIN for a `.invalid` name; a resolver that answers
+  everything makes the tools' wildcard heuristics discard real results, so a bad
+  pool aborts the run instead of producing a half-resolved list.
+- **Provenance is load-bearing.** Resolved hosts carry the steps that found them
+  (`passive`/`bruteforce`/`recursive`/`axfr`), because the wildcard filter keeps a
+  name outright when two independent steps corroborate it.
+- **Footprint is a code-level distinction.** DNS steps are on by default; the one
+  step that sends application traffic (HTTP probing) is behind `--http`.
+
+Detailed contracts, flags and measured yields live in the
+[pipeline README](../../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md)
+and each stage's README.
+
+## 3. Graph layer (built, not fed yet)
+
+`service/recon_pipeline/graph/` holds the Neo4j design and its CRUD:
+
+- `schema.py` — `LABEL_*` constants (base `:Asset` + typed labels such as
+  `:Domain`, `:Wildcard`, `:IP`, `:Other`), relationship types
+  (`BELONGS_TO`, `DERIVED_FROM`, `RESOLVES_TO`, `HAS_CERTIFICATE`, …),
+  constraints and indexes.
+- `repository.py` — `run_query`, `merge_node`, `get_node`, `merge_relation`,
+  `get_relation`. Labels are always a **list** (`TypeError` for a bare string,
+  `ValueError` for an empty list) and every write `MERGE`s on identity
+  properties, which is what makes re-runs idempotent.
+- `client.py` — `Neo4jClient` (driver construction + `verify()`).
+
+The contract every future writer must follow is
+[`graph_crud_contract.md`](../recon_docs/graph_crud_contract.md). Verified by
+`tests/recon/test_repository.py` against a live instance.
+
+## 4. Planned (not built)
+
+The spec family describes a much larger system: a scoring engine, seed ingestion
+from Postgres into the graph, Redis queues and a hot cache, an active dispatcher
+with a recursion gate, a stealth/transport layer, LLM classification, and
+observability — then a v2 extension adding a Scope Engine and eleven new source
+classes.
+
+None of that exists in code. The stage-by-stage status is maintained in the plans
+themselves:
+[`IMPLEMENTATION_PLAN.md`](../recon_docs/IMPLEMENTATION_PLAN.md) (S0–S14) and
+[`IMPLEMENTATION_PLAN_V2.md`](../recon_docs/IMPLEMENTATION_PLAN_V2.md)
+(S15–S26), with the design in [`recon.md`](../recon_docs/recon.md) and
+[`recon_v2.md`](../recon_docs/recon_v2.md).
 
 ## Evidence
-- `service/scraper/ingest.py` - orchestrator implementation
-- `shared/db.py` - connection pool and transaction management
-- `db/repos/*.py` - query module patterns
-- `scope.md` - architecture decisions and invariants
+
+- `service/scraper/ingest.py`, `db/persistence/persistence.py`, `db/repos/*.py`
+- `shared/connectors/base.py`
+- `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/*/pipeline.py`
+  and the stage READMEs
+- `service/recon_pipeline/graph/{schema,repository,client}.py`,
+  `tests/recon/test_repository.py`
+- `docs/recon_docs/*` for the planned stages (explicitly marked as intent)

@@ -3,6 +3,14 @@
 **Implementation Specification**  
 **Objective:** Maximum attack surface discovery for bug bounty programs via recursive, graph-backed reconnaissance.
 
+> **This is a specification, not a description of the repository.** It defines the
+> intended system; only a small part of it exists in code. For what is actually
+> built, read [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md#implementation-status)
+> and [`../codebase/ARCHITECTURE.md`](../codebase/ARCHITECTURE.md). Where this
+> document names a module, treat the name as the intended home unless the plan's
+> status section says otherwise. [`recon_v2.md`](recon_v2.md) extends this document
+> without replacing it.
+
 ---
 
 ## 1. Strategic Context
@@ -247,7 +255,7 @@ These scenarios serve both as acceptance tests and as educational walk-throughs 
 
 ## Appendix A — Graph Schema (Neo4j)
 
-**Source:** `service/recon-pipeline/graph/schema.py` · `service/recon-pipeline/graph/repository.py` · `docs/recon_docs/IMPLEMENTATION_PLAN.md` Stage 1
+**Source:** `service/recon_pipeline/graph/schema.py` · `service/recon_pipeline/graph/repository.py` · `IMPLEMENTATION_PLAN.md` Stage 1 (this appendix is the one part of this spec that **is** implemented — see [Implementation status](IMPLEMENTATION_PLAN.md#implementation-status))
 
 ### Node Labels
 

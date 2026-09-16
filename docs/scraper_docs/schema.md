@@ -1,7 +1,7 @@
 # Attackbot_v2 — Scraper Database Schema
 
-**Status:** Documented (July 2026)
-**Source spec:** `db/init/001_schema.sql` · `db/init/models.py` · `db/migrations/versions/0001_baseline_schema.py` · `db/migrations/versions/0002_moving_max_severity_to_bounty_detail_table.py`
+**Status:** Current — verified against the schema files and repos on 2026-09-16.
+**Sources of truth:** `db/init/001_schema.sql` (fresh containers) · `db/init/models.py` (SQLAlchemy mirror used by Alembic) · `db/migrations/versions/0001_baseline_schema.py`, `0002_moving_max_severity_to_bounty_detail_table.py`, `0003_add_hackerone_weakness_id_and_rename_weakness_table.py`
 **Data source:** HackerOne API via `service/scraper/` → mapped by `db/mapper/hackerone_mapper.py` → persisted by `db/persistence/persistence.py`
 
 ---
@@ -204,7 +204,7 @@ Table renamed to `bounty_weaknesses` across `001_schema.sql`, `models.py`, migra
 
 ### 4. `LABEL_WEAKNESSSES` typo — **✅ Fixed**
 
-Renamed to `LABEL_WEAKNESSES` in `service/recon-pipeline/graph/schema.py` and `docs/recon_docs/recon.md`.
+Renamed to `LABEL_WEAKNESSES` in `service/recon_pipeline/graph/schema.py` and `docs/recon_docs/recon.md`.
 
 ### 5. `is_active` cascade gap — **✅ Fixed**
 

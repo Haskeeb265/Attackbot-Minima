@@ -2,126 +2,103 @@
 
 ## Test Framework
 
-- **Framework:** pytest (implied by file naming conventions)
-- **Test Location:** `tests/` directory at project root
-- **No explicit pytest configuration found** (uses default settings)
+- **pytest**, with `tests/conftest.py` putting the repo root on `sys.path` so
+  absolute `service.*` / `shared.*` imports work from any invocation directory.
+- No pytest configuration file or `pyproject.toml` section: defaults apply.
+- Two suites with completely different characters:
 
-## Test Files
+| Suite | Style | Runs where | Count |
+|---|---|---|---|
+| `tests/recon/` | hermetic pytest tests | anywhere — no Docker, DNS, network, or `output/` reads | **253** |
+| `tests/scraper/` | script-style, live PostgreSQL | needs `docker compose up -d postgres` | 0 collected (see below) |
 
-| File | Purpose | Key Patterns |
-|------|---------|--------------|
-| `tests/scraper_test.py` | Tests for `ProgramDetailScraper` service | Fetch scopes, exclusions, weaknesses |
-| `tests/smoke_test_db.py` | Full database lifecycle test | Insert → read → update → replace → delete |
-| `tests/test_hackerone_mapper.py` | Tests for `HackerOneMapper` | Data transformation validation |
-| `tests/test_persistence.py` | Tests for `persist_program` function | Database interactions |
+```bash
+python -m pytest tests/recon -q        # the suite that is expected to be green
+```
 
-## Test Patterns
+## `tests/recon/` — the hermetic suite
 
-### Smoke Test with Rollback
+Per file (253 tests total):
 
-The database smoke test uses a **named sentinel exception** for guaranteed rollback:
+| File | Tests | Covers |
+|---|---|---|
+| `test_passive_normalize.py` | 47 | canonicalization, validation, provenance merge, foreign-domain policy, amass relation parsing |
+| `test_passive_wildcard.py` | 18 | wildcard detection and suppression branches, budget caps |
+| `test_passive_sources.py` | 36 | Docker argument construction, timeouts and cleanup, crt.sh/Wayback parsing |
+| `test_passive_pipeline.py` | 16 | the passive stage contract end to end |
+| `test_active_resolvers.py` | 18 | resolver admission rules (positive + `.invalid` negative probe), rejection reasons |
+| `test_active_wordlist.py` | 32 | label normalization, provider registry, dedup |
+| `test_active_tools.py` | 20 | argument builders for every tool |
+| `test_active_axfr.py` | 26 | zone-transfer parsing, hostile nameserver names |
+| `test_active_pipeline.py` | 17 | stage contract with a fake engine: pool prep, step order, provenance, abort paths |
+| `test_permutation_pipeline.py` | 15 | candidate normalization, novelty rule, caps and accounting, wildcard filter scope |
+| `test_main_pipeline.py` | 8 | the orchestrator: union artifact contents, partial failure, `--stages` selection |
+
+**Design patterns that make this possible** (`tests/recon/conftest.py`):
+
+- **Dependency injection over monkeypatching** — stages take their engine,
+  resolver-validation query, wordlist, generator and DNS resolver as parameters,
+  so tests pass in-process fakes instead of patching internals.
+- **Fakes that record calls** — `FakeEngine` records the exact candidate sets it
+  was asked to resolve, which is how candidate selection and caps are asserted.
+- **No network by construction** — the wildcard layer's resolver and the engines
+  are injected, so no test can reach the internet even by accident.
+- **Assertions on artifacts and reports** — tests read what the stage wrote
+  (`resolved.txt`, `report.json`, counts) rather than internal state.
+
+`tests/recon/conftest.py` (shared fixtures) is layered on top of the root
+`tests/conftest.py` (import path setup).
+
+## `tests/scraper/` — script-style tests
+
+These are standalone scripts, not pytest tests: they define `main()` and are run
+with `python tests/scraper/<file>.py` against a live PostgreSQL with `.env`
+credentials. They cover the mapper (`test_hackerone_mapper.py`), persistence
+(`test_persistence.py`), the detail scraper (`scraper_test.py`) and a full
+database lifecycle with a forced rollback (`smoke_test_db.py`).
+
+**Current state — the directory does not collect:**
+
+| File | `pytest --collect-only` | Why |
+|---|---|---|
+| `test_hackerone_mapper.py` | **ERROR** | reads `test_detail_output.json`, a fixture file that is not in the repo → `FileNotFoundError` at import |
+| `test_persistence.py` | no tests collected | script (no `test_*` functions); needs a live DB |
+| `scraper_test.py` | no tests collected | script; needs a live DB and HackerOne credentials |
+| `smoke_test_db.py` | no tests collected | script; needs a live DB |
+
+Consequence: `pytest tests/` (or bare `pytest`) **fails collection** and runs
+nothing. Use explicit paths (`pytest tests/recon`) until the scraper suite is
+fixed. See [CONCERNS.md](CONCERNS.md).
+
+### The rollback pattern in `smoke_test_db.py`
+
+The database lifecycle test operates inside a transaction and aborts it with a
+named sentinel exception, so real assertion failures still surface:
 
 ```python
 class _ForceRollback(Exception):
     """Sentinel exception to force transaction rollback."""
-    pass
 
-def test_database_lifecycle():
-    with db.get_conn() as conn:
-        with db.atomic(conn):
-            # ... perform all test operations ...
-            raise _ForceRollback  # Forces rollback without catching
-
-# Catch the sentinel at the top level
-try:
-    test_database_lifecycle()
-except _ForceRollback:
-    pass  # Expected - test passed, transaction rolled back
+with db.get_conn() as conn:
+    with db.atomic(conn):
+        # ... all test operations ...
+        raise _ForceRollback
 ```
 
-**Why this pattern:**
-- Bare `finally: raise SystemExit(...)` silently swallows real assertion failures
-- Named sentinel lets genuine test failures surface normally
-- Guarantees rollback via the exception path
+A bare `finally: raise SystemExit(...)` would swallow genuine failures; the
+sentinel lets them propagate normally.
 
-### Integration Tests
+## Not covered
 
-Tests interact with real PostgreSQL database (not mocked):
-- Use Docker Compose PostgreSQL instance
-- Run inside single transaction that gets rolled back
-- Test actual SQL queries and constraints
-
-### Unit Tests
-
-- `test_hackerone_mapper.py` - tests data transformation logic
-- No mocking observed (tests use real data structures)
-
-## Test Organization
-
-```
-tests/
-├── scraper_test.py           # Service-level tests
-├── smoke_test_db.py          # Database lifecycle test
-├── test_hackerone_mapper.py  # Unit tests for mapper
-└── test_persistence.py       # Integration tests for persistence
-```
-
-**Naming Conventions:**
-- Test files: `test_*.py` or `*_test.py`
-- Test functions: `test_*` (pytest convention)
-- Test classes: `Test*` (if used)
-
-## Running Tests
-
-### Database Tests
-```bash
-# Ensure PostgreSQL is running via Docker
-docker-compose up -d
-
-# Run smoke test
-python -m tests.smoke_test_db
-```
-
-### All Tests
-```bash
-# Run with pytest (if configured)
-pytest tests/
-
-# Or run individual test files
-python tests/test_persistence.py
-python tests/test_hackerone_mapper.py
-```
-
-## Mocking Strategy
-
-**Minimal mocking observed:**
-- Database tests use real PostgreSQL connection
-- Mapper tests use real data structures
-- No external API mocking observed (scraper tests may call real API)
-
-**Future considerations:**
-- HackerOne API mocking needed for offline testing
-- Rate limit mocking for scraper tests
-- LLM provider mocking for recon tests (when implemented)
-
-[TODO] Investigate if there are any mock fixtures or test utilities in the codebase
-
-## Test Coverage
-
-**Current coverage areas:**
-- ✅ Database CRUD operations (all four tables)
-- ✅ Data transformation (HackerOne mapper)
-- ✅ Persistence logic (persist_program)
-- ✅ Scraper service (program detail fetching)
-
-**Missing coverage:**
-- ❌ Ingestion orchestrator (`run_ingestion_job`)
-- ❌ Connection pool behavior
-- ❌ Error handling and rollback scenarios
-- ❌ Rate limiting logic
+- **No CI configuration** (no workflow files) — nothing runs the suite
+  automatically.
+- `tests/recon/test_repository.py` (Neo4j CRUD + constraint enforcement) is a
+  script requiring a live Neo4j, so it is not part of the 253.
+- No coverage measurement is configured; there is no coverage report to cite.
 
 ## Evidence
-- `tests/smoke_test_db.py` - database lifecycle test with rollback pattern
-- `tests/test_persistence.py` - persistence integration tests
-- `tests/test_hackerone_mapper.py` - mapper unit tests
-- `tests/scraper_test.py` - scraper service tests
+
+- `python -m pytest tests/recon -q` → `253 passed`
+- `python -m pytest tests/scraper --collect-only -q` →
+  `ERROR tests/scraper/test_hackerone_mapper.py - FileNotFoundError: ... 'test_detail_output.json'`
+- `tests/conftest.py`, `tests/recon/conftest.py`, and the per-file test lists

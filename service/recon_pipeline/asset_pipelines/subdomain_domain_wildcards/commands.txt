@@ -4,22 +4,59 @@
 #
 # Image:  subdomain_domain_wildcards_image
 # Build:  docker build -t subdomain_domain_wildcards_image \
-#           service/recon-pipeline/asset_pipelines/subdomain_domain_wildcards/
+#           service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/
 #
-# Replace `example.com` with your target. Tools that read from stdin need
-# `docker run -i ...` and a pipe (`cat file | ...`).
+# -----------------------------------------------------------------------------
+# RUN THE PIPELINE, NOT THE TOOLS (read this first)
+# -----------------------------------------------------------------------------
+# This file exists to reproduce or debug ONE tool by hand. The supported way to
+# run this stage is the Python modules, which already do everything below in the
+# right order with validated resolvers, wildcard filtering, provenance and a
+# machine-readable report:
 #
-# Persisting output on your host — mount your cwd:
-#   docker run --rm -v "$PWD:/workspace" subdomain_domain_wildcards_image \
-#     subfinder -d example.com -silent > subfinder.txt
+#   # all three stages + the union of live hosts
+#   python -m service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.main -t example.com
+#
+#   # one stage at a time
+#   python -m ...subdomain_domain_wildcards.passive.pipeline     -t example.com
+#   python -m ...subdomain_domain_wildcards.active.pipeline      -t example.com
+#   python -m ...subdomain_domain_wildcards.permutation.pipeline -t example.com
+#
+# See README.md, active/README.md and permutation/README.md for flags, outputs
+# and measured yields.
+#
+# -----------------------------------------------------------------------------
+# RESOLVERS: THE BUNDLED massdns LIST IS DEAD — DO NOT USE IT
+# -----------------------------------------------------------------------------
+# The image bundles /usr/local/share/massdns/resolvers.txt (8,477 addresses,
+# ~2019 vintage). Measured on 2026-09-16 it resolved NONE of three test names,
+# and a hand-checked sample of 60 was ~88% dead. Handing it to puredns/massdns
+# silently produces "nothing resolves".
+#
+# Worse, a single hijacking resolver (captive portal, ISP search page) answers
+# names that do not exist — and the tools' wildcard heuristics work by probing a
+# random label and expecting NXDOMAIN. Point puredns at a resolver that answers
+# everything and it concludes the whole zone is a wildcard and DISCARDS REAL
+# RESULTS.
+#
+# So: let the active stage validate and write the pool, then point the tools at
+# that. It probes both halves of the contract (resolves a name that exists; must
+# return NXDOMAIN for <random>.invalid) and records rejects with reasons.
+#
+#   python -m ...subdomain_domain_wildcards.active.pipeline -t example.com --no-bruteforce
+#   # -> active/output/resolvers.txt          (the validated pool)
+#   # -> active/output/resolvers-trusted.txt  (high-trust subset, for poisoning checks)
+#   # -> active/output/resolvers_rejected.txt (with reasons)
 #
 # Windows / Git Bash notes:
-#   - If `-v "$PWD:/workspace"` fails to mount (path conversion), use
-#     `-v "$(pwd -W):/workspace"` instead.
-#   - For absolute Windows paths, export MSYS_NO_PATHCONV=1 first so Git Bash
-#     stops mangling `/workspace` into `C:/Program Files/Git/...`.
+#   - If `-v "$PWD:/work"` fails to mount (path conversion), use
+#     `-v "$(pwd -W):/work"` instead.
+#   - For absolute paths inside the container, export MSYS_NO_PATHCONV=1 first so
+#     Git Bash stops mangling `/work` into `C:/Program Files/Git/work`. The
+#     pipeline sets this for its own calls.
 #   - Long-running tools can be capped with `timeout 600 docker run ...`
 #     (amass has its own `-timeout N`, in minutes).
+#   - The image has no ENTRYPOINT — the tool name is the first argument.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -52,8 +89,8 @@ docker run --rm subdomain_domain_wildcards_image amass enum -d example.com -time
 docker run --rm subdomain_domain_wildcards_image assetfinder --subs-only example.com
 
 # chaos — ProjectDiscovery Chaos dataset. Requires a ProjectDiscovery key:
-# the chaos-client binary reads PDCP_API_KEY; your key lives in the repo root
-# `.env` as CHAOS_API_KEY. Load it from there:
+# chaos-client reads PDCP_API_KEY; your key lives in the repo root `.env` as
+# CHAOS_API_KEY. Load it from there:
 #   KEY=$(grep '^CHAOS_API_KEY=' .env | head -1 | cut -d= -f2- | tr -d '"' | tr -d '\r')
 #   docker run --rm -e PDCP_API_KEY=$KEY subdomain_domain_wildcards_image chaos -d example.com -silent
 #
@@ -72,47 +109,108 @@ docker run --rm subdomain_domain_wildcards_image subfinder -d example.com -silen
 cat findomain.txt assetfinder.txt subfinder.txt 2>/dev/null | sort -u > subdomains.txt
 
 # -----------------------------------------------------------------------------
-# ACTIVE — DNS resolution / brute force (sends DNS queries)
+# ACTIVE — DNS resolution / brute force / zone transfers
 # -----------------------------------------------------------------------------
 
-# amass (active) — zone transfers + cert name grabs (`-active`; DNS brute
-# forcing is a separate flag: `-brute`). Same graph-relations stdout output.
+# puredns resolve — the stage's default engine: bulk-resolve a list with
+# wildcard filtering + poisoning validation against trusted resolvers.
+# `--write-wildcards` records what it decided was a wildcard (auditable).
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -v "$(pwd -W)/service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/active/output:/work" \
+  subdomain_domain_wildcards_image \
+  puredns resolve /work/candidates.txt \
+    -r /work/resolvers.txt --resolvers-trusted /work/resolvers-trusted.txt \
+    --wildcard-tests 3 --write-wildcards /work/puredns-wildcards.txt -w /work/puredns.txt
+
+# puredns bruteforce — wordlist enumeration under one apex (the tool streams the
+# wordlist, so a 110k-word SecLists file needs no local pre-processing)
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -v "$(pwd -W)/service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/active/output:/work" \
+  subdomain_domain_wildcards_image \
+  puredns bruteforce /work/wordlist.txt example.com \
+    -r /work/resolvers.txt --resolvers-trusted /work/resolvers-trusted.txt \
+    --write-wildcards /work/puredns-bruteforce-wildcards.txt -w /work/puredns-bruteforce.txt
+
+# shuffledns — the alternative engine. `-mode resolve` takes a name list (`-l`),
+# `-mode bruteforce` takes a wordlist (`-w`). `-m` points at the massdns binary.
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -v "$(pwd -W)/service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/active/output:/work" \
+  subdomain_domain_wildcards_image \
+  shuffledns -d example.com -r /work/resolvers.txt -m /usr/local/bin/massdns \
+    -mode bruteforce -w /work/wordlist.txt -silent -nc -duc
+
+# massdns — raw bulk A resolution (no wildcard handling at all: use it only when
+# you have already filtered, or you accept wildcard noise)
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -v "$(pwd -W)/service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/active/output:/work" \
+  subdomain_domain_wildcards_image \
+  massdns -r /work/resolvers.txt -t A -o S -w /work/massdns.txt /work/tool-input.txt
+
+# dnsx — record enrichment as JSONL, resolvers EXPLICITLY set:
+#   -r  resolver file to use
+#   -a -aaaa -cname -ns -mx -txt  the record types this stage asks for
+#   -duc disables the self-update check (a run should not need GitHub)
+#   WARNING: `-wd` is mutually exclusive with the record-type flags in the
+#   bundled version — combining them silently narrows the query set. This stage
+#   deliberately does not use it. Also avoid `-recon` here: it fires an AXFR at
+#   every host.
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -v "$(pwd -W)/service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/active/output:/work" \
+  subdomain_domain_wildcards_image \
+  dnsx -silent -json -l /work/tool-input.txt -r /work/resolvers.txt \
+    -a -aaaa -cname -ns -mx -txt -retry 2 -duc -nc > records.jsonl
+
+# dig AXFR — one zone-transfer attempt per nameserver (one query each; almost
+# always refused, occasionally an entire authoritative zone). Validate the
+# nameserver name before passing it — it comes from a DNS answer.
+docker run --rm subdomain_domain_wildcards_image \
+  dig +time=10 +tries=1 +noall +answer AXFR example.com @ns1.example.com
+
+# amass (active) — zone transfers + cert name grabs (`-active`; DNS brute forcing
+# is a separate flag: `-brute`). Same graph-relations stdout as the passive mode.
 docker run --rm subdomain_domain_wildcards_image amass enum -d example.com -active -timeout 15
 
-# dnsx — probe a list of hostnames for live A/AAAA records (reads stdin)
-cat subdomains.txt | docker run --rm -i subdomain_domain_wildcards_image dnsx -silent -a -resp
-
-# massdns — high-speed bulk DNS resolution (wordlist / file of names)
-docker run --rm -v "$PWD:/workspace" subdomain_domain_wildcards_image \
-  massdns -r /usr/local/share/massdns/resolvers.txt -t A -o S -w /workspace/massdns.txt /workspace/subdomains.txt
-
-# puredns resolve — mass-resolve a list with wildcard filtering
-docker run --rm -v "$PWD:/workspace" subdomain_domain_wildcards_image \
-  puredns resolve /workspace/subdomains.txt -r /usr/local/share/massdns/resolvers.txt
-
-# puredns bruteforce — wordlist brute force against a domain
-docker run --rm -v "$PWD:/workspace" subdomain_domain_wildcards_image \
-  puredns bruteforce /workspace/wordlist.txt -d example.com -r /usr/local/share/massdns/resolvers.txt
-
-# shuffledns — massdns wrapper: wordlist brute force + resolve
-docker run --rm -v "$PWD:/workspace" subdomain_domain_wildcards_image \
-  shuffledns -d example.com -r /usr/local/share/massdns/resolvers.txt -w /workspace/wordlist.txt -o /workspace/shuffledns.txt
+# httpx — HTTP probing of RESOLVED hosts (status, title, tech, CNAME).
+# Opt-in in the pipeline (`--http` / ACTIVE_HTTP=1): this is the only step that
+# sends application traffic to the target rather than DNS queries.
+docker run --rm -i subdomain_domain_wildcards_image \
+  httpx -silent -json -sc -title -td -cname -rl 100 -t 50 -duc -nc \
+  < resolved.txt > http.jsonl
 
 # -----------------------------------------------------------------------------
 # PERMUTATION — generate new candidate subdomains from known names
 # -----------------------------------------------------------------------------
 
-# dnsgen — read known subdomains from stdin, print permutations
+# dnsgen — permutations of known hosts, one per line. DNSGen 2.x takes a FILE
+# argument (`-` reads stdin), and PYTHONHASHSEED=0 is what makes the output
+# ORDER stable: the tool shuffles its input through sets, so three runs over one
+# identical file produce three different orderings — and since the pipeline keeps
+# a prefix of that output, an unseeded run makes the cap a lottery. The pipeline
+# always sets it; set it by hand too if you care about reproducibility.
+PYTHONHASHSEED=0 MSYS_NO_PATHCONV=1 docker run --rm \
+  -e PYTHONHASHSEED=0 \
+  -v "$(pwd -W)/service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/permutation/output:/work" \
+  subdomain_domain_wildcards_image dnsgen /work/known.txt > dnsgen-raw.txt
+
+# ...or feed it from stdin
 cat subdomains.txt | docker run --rm -i subdomain_domain_wildcards_image dnsgen -
 
-# dnsgen — or pass a file directly
-docker run --rm -v "$PWD:/workspace" subdomain_domain_wildcards_image dnsgen /workspace/subdomains.txt
+# Extra words, and a faster/lighter pass:
+#   docker run ... dnsgen /work/known.txt --wordlen 4 --wordlist /work/extra-words.txt
+#   docker run ... dnsgen /work/known.txt --fast
 
 # -----------------------------------------------------------------------------
 # ONE-LINER CHAIN — passive -> permutations -> live host resolution
 # -----------------------------------------------------------------------------
 
-# subfinder -> dnsgen -> dnsx -> live subdomains.txt
+# subfinder -> dnsgen -> puredns -> live hosts.
+# Note the chain resolves with the VALIDATED pool from the active stage, not the
+# bundled list — see the warning at the top of this file.
 docker run --rm subdomain_domain_wildcards_image subfinder -d example.com -silent \
-  | docker run --rm -i subdomain_domain_wildcards_image dnsgen - \
-  | docker run --rm -i subdomain_domain_wildcards_image dnsx -silent -a -resp > live-subs.txt
+  | docker run --rm -i -e PYTHONHASHSEED=0 subdomain_domain_wildcards_image dnsgen - \
+  | sort -u > candidates.txt
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -v "$(pwd -W)/service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/active/output:/work" \
+  subdomain_domain_wildcards_image \
+  puredns resolve /work/candidates.txt -r /work/resolvers.txt \
+    --resolvers-trusted /work/resolvers-trusted.txt -w /work/live-hosts.txt

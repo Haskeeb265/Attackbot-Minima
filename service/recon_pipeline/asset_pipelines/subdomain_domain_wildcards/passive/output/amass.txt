@@ -1,1 +1,0 @@
-qbsco.net (FQDN) --> mx_record --> qbsco-net.mail.protection.outlook.com (FQDN)

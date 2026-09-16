@@ -1,8 +1,11 @@
 # Python vs Rust — ASM Recon Pipeline Implementation Comparison
 
-**Status:** Decision support document (Stage 0 companion)
-**Source spec:** [`../IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md) (15 stages, S0–S14)
-**Context:** The Attackbot_v2 recon pipeline is currently specified against the existing **Python 3.14** stack (`STACK.md`). This document evaluates implementing the same pipeline in **Python** vs **Rust**, stage by stage, covering trade-offs and implementation complexity so the language decision is made on evidence, not vibes.
+**Status:** Decision support — **the decision is Python** and has been acted on: the
+recon code that exists (`service/recon_pipeline/`) is Python, as is the scraper,
+the database layer and the tests. Nothing has been implemented in Rust. Kept as the
+record of *why* the comparison came out that way.
+**Source spec:** [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) (15 stages, S0–S14 — mostly unbuilt; see its status section)
+**Context:** The Attackbot_v2 recon pipeline is specified against the existing **Python 3.14** stack ([`../codebase/STACK.md`](../codebase/STACK.md)). This document evaluates implementing the same pipeline in **Python** vs **Rust**, stage by stage, covering trade-offs and implementation complexity so the language decision is made on evidence, not vibes.
 
 ---
 
@@ -67,7 +70,7 @@ The plan's **open question #5** — *threads (sync stack) vs asyncio (big rewrit
 | | Python | Rust |
 |---|---|---|
 | **Iteration speed** | Fast — 15 stages of pure functions + fixtures is quick to write | Slower — borrow checker + type ceremony + compile times; every stage takes meaningfully longer |
-| **Team skill** | All-Python codebase today (`STACK.md`) | New language for the whole team; learning curve is real |
+| **Team skill** | All-Python codebase today ([`../codebase/STACK.md`](../codebase/STACK.md)) | New language for the whole team; learning curve is real |
 | **Windows dev** | Native, zero friction | Requires MSVC toolchain via rustup; workable but an extra moving part |
 | **Testing** | `pytest` — plan's convention, all fixtures/fake-clock patterns map 1:1 | `cargo test` + `proptest` — arguably **better** for S2 scoring math (property-based boundary tests) and S3 normalization rules |
 

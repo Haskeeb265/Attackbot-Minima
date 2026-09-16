@@ -1,7 +1,7 @@
 # Graph CRUD Contract — Multi-Label Writes
 
-**Status:** Settled (implemented in `service/recon-pipeline/graph/repository.py`, Stage 1)
-**Applies to:** every stage that writes or reads graph nodes — S4 (seeding), S7 (e2e pipeline), S13 (LLM enrichment). **Read this before writing S7.**
+**Status:** Settled and built — `service/recon_pipeline/graph/repository.py` (plan stage S1).
+**Applies to:** every graph writer — S4 (seeding), S7 (e2e pipeline), S13 (LLM enrichment) when they are built. **Read this before writing any of them.** No production code writes to the graph yet (see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md#implementation-status)), so today the contract is enforced by the repository layer and proven by the script below.
 
 The graph is multi-label by design (schema.py): every asset carries the **base `:Asset` label** plus a **typed label** (`:Domain`, `:IP`, `:URL`, `:Other`, …). The CRUD layer in `repository.py` enforces this via a single rule — **you pass a *list* of labels, not a string.**
 
@@ -53,6 +53,7 @@ This ensures no scope type is silently dropped — every asset lands in the grap
 `tests/recon/test_repository.py` section 7 proves the contract: multi-label nodes are created, `MATCH (a:Asset)` finds them, re-`MERGE` is idempotent, and a raw `CREATE` duplicating `(asset_type, canonical_value)` is **rejected** by the constraint. Run it after any CRUD change.
 
 ## References
-- `service/recon-pipeline/graph/repository.py` — `_label_clause()` + the 4 CRUD methods
-- `service/recon-pipeline/graph/schema.py` — multi-label design, `:Asset` identity constraint, `LABEL_OTHER` fallback, `LABEL_*` typed-label constants
+- `service/recon_pipeline/graph/repository.py` — `_label_clause()` + the five CRUD methods (`run_query`, `merge_node`, `get_node`, `merge_relation`, `get_relation`); raises `TypeError` for a bare-string label list and `ValueError` for an empty one
+- `service/recon_pipeline/graph/schema.py` — multi-label design, `:Asset` identity constraint, `LABEL_OTHER` fallback, `LABEL_*` typed-label constants, relationship types
+- `service/recon_pipeline/graph/client.py` — `Neo4jClient` (driver + `verify()`)
 - `IMPLEMENTATION_PLAN.md` Stage 1 — "Node identity & labels" decision

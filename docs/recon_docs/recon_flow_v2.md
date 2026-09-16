@@ -1,6 +1,11 @@
 # Recon Pipeline v2 — Maximizing Attack Surface (Scope-Bound)
 
-**Base:** [`recon_flow.md`](recon_flow.md) (Attackbot_v2, S0–S14)
+**Base:** [`recon_flow.md`](recon_flow.md) (Attackbot_v2, S0–S14 — the v1 diagrams carry a per-component `Status` column; almost everything in both sets is unbuilt)
+
+> **Status: intent, not inventory.** The Scope Engine and every v2 source in these
+> diagrams are unbuilt. `pipeline/scope.py` and the other module names here are
+> proposed locations. See
+> [`IMPLEMENTATION_PLAN_V2.md`](IMPLEMENTATION_PLAN_V2.md#implementation-status).
 **Goal of this revision:** add the passive OSINT source classes that most bug-bounty programs
 explicitly *permit* and that materially widen discovered surface — **without** turning the
 pipeline into an out-of-scope scanner. Every new source is a **passive/OSINT node feeding S3**,

@@ -1,54 +1,39 @@
-import subprocess
+"""
+amass — graph relations (DNS / MX / NS / ASN), not a subdomain list.
+
+amass v4 is intentionally thin on plain subdomains for small targets; the other
+sources cover discovery.  amass's value here is the *relations* it prints, e.g.::
+
+    qbsco.net (FQDN) --> mx_record --> qbsco-net.mail.protection.outlook.com (FQDN)
+    autodiscover.qbsco.net (FQDN) --> cname_record --> autodiscover.outlook.com (FQDN)
+
+``amass.txt`` therefore holds one relation per line and is **never** merged as a
+host list.  Hosts that appear in those relations are extracted separately by
+:func:`..normalize.relation_subdomains`, so amass still contributes names the
+list-based tools may have missed — including CNAME/NS targets.
+
+Requires ``passive/config/`` (gitignored) holding ``config.yaml`` with datasource
+API keys.  Without it amass still runs, but keyless-only and with much thinner
+output; the wrapper logs a warning rather than failing.
+
+    python -m service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive.amass
+"""
+
+from __future__ import annotations
+
 from pathlib import Path
 
 from service.recon_pipeline.asset_pipelines.config import TARGET
-import shared.colorlog as colorlog
 
-AMASS_IMAGE = "caffix/amass"
+from .sources import run_source_checked
 
-# Output/config always resolve relative to this file, regardless of cwd
-OUTPUT_DIR = Path(__file__).resolve().parent / "output"
-CONFIG_DIR = Path(__file__).resolve().parent / "config"  # holds config.yaml + datasources.yaml (API keys)
-OUTPUT_FILE = OUTPUT_DIR / "amass.txt"
-LOG_FILE = OUTPUT_DIR / "amass.log"
+NAME = "amass"
 
 
 def run(domain: str = TARGET) -> Path:
-    """Run amass passive enum via Docker; write results to passive/output/amass.txt."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    cmd = [
-        "docker", "run", "--rm",
-        "--dns", "8.8.8.8",
-        "--dns", "1.1.1.1",
-        "-v", f"{CONFIG_DIR}:/home/user/.config/amass:ro",
-        AMASS_IMAGE,
-        "enum", "-config", "/home/user/.config/amass/config.yaml",
-        "-passive", "-nocolor",
-        "-d", domain,
-    ]
-
-    colorlog.log.info(f"Running amass passive enum (Docker) for {domain}")
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        colorlog.log.failed(f"amass Docker run failed for {domain}: {e.stderr}")
-        raise
-
-    OUTPUT_FILE.write_text(result.stdout, encoding="utf-8")
-    LOG_FILE.write_text(result.stderr, encoding="utf-8")
-    colorlog.log.info(f"amass passive results written to {OUTPUT_FILE}")
-
-    return OUTPUT_FILE
+    """Run amass passive enum for *domain*; return the relations file path."""
+    return run_source_checked(NAME, domain)
 
 
 if __name__ == "__main__":
-    run()
-    print(f"Amass results saved to: {OUTPUT_FILE}")
+    print(f"amass results saved to: {run()}")

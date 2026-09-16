@@ -1,12 +1,46 @@
 # Attackbot_v2 — ASM Recon Pipeline Implementation Plan (v2 Extension)
 
-**Status:** Draft v1 — awaiting review
+**Status:** Active plan — **no v2 stage is built**, with one exception carved out
+below; see [Implementation status](#implementation-status).
 **Source spec:** [`recon_v2.md`](recon_v2.md) (v2 widened-attack-surface spec, extends [`recon.md`](recon.md))
 **Flow reference:** [`recon_flow_v2.md`](recon_flow_v2.md)
-**Base plan:** [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) (Stages S0–S14, this document assumes S0–S14 are complete or in progress)
+**Base plan:** [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) (Stages S0–S14 — **mostly unbuilt**; this document assumes they are complete or in progress, so read its status section first)
 **Goal:** Implement the v2 widened-surface additions — the Scope Engine and eleven new source
 classes — as **12 chronological, independently-testable stages (S15–S26)**, continuing the
 numbering and conventions of the base plan.
+
+> **Read this as intent, not inventory.** Proposed modules (`scope/engine.py`,
+> `lightactive/`, `extract/secrets.py`, …) do not exist.
+>
+> **Historical references.** The rationales below cite `scope.md` (§ numbers) — a
+> document that is **no longer in the repository**. Treat those citations as history;
+> the surviving equivalents are `docs/codebase/` and this document set.
+
+---
+
+## Implementation status
+
+Checked against the code on 2026-09-16. **No stage in this plan is built**, except
+that S16's *techniques* were implemented ahead of the plan — as a standalone asset
+pipeline rather than as a graph-writing source:
+
+| Stage | Status | Notes |
+|---|---|---|
+| S15 Scope Engine | not started | the safety chokepoint of the whole v2 design; nothing depends on it yet because no v2 source exists |
+| S16 DNS-brute + resolver sweep | **partial — built elsewhere** | resolution, wordlist bruteforce, bounded recursion and permutation all exist in `.../subdomain_domain_wildcards/active/` and `/permutation/`; the resolver pool is **validated per run** (positive answer + NXDOMAIN for `.invalid`), which supersedes this stage's "static 3-5 resolver list" proposal; none of it writes candidates to the graph |
+| S17 Alt CT / aggregator APIs | not started | — |
+| S18 ASN / BGP pivot | not started | — |
+| S19 Reverse WHOIS pivot | not started | — |
+| S20 Fingerprint clustering | not started | — |
+| S21 Code-host dorking | not started | — |
+| S22 Cloud bucket enumeration | not started | — |
+| S23 Mobile app teardown | not started | — |
+| S24 JS bundle crawl | not started | — |
+| S25 SaaS footprint + takeover detector | not started | the asset pipeline *collects* CNAME records (`active/output/records.*`), which is the raw material a takeover detector needs, but no detector exists |
+| S26 Content discovery | not started | — |
+
+The built pipeline this exception refers to is documented in
+[the pipeline README](../../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md).
 
 ---
 
@@ -231,10 +265,14 @@ pipeline value (candidates need a scope decision before scoring).
   coupling to the v1 module vs. code duplication — reuse wins per the project's existing
   code-reuse convention.
 - **Trusted resolver list.** Use a small, curated list of public DNS resolvers (not a single
-  resolver, to avoid a single point of rate-limiting or poisoning) — a static config list for v1,
-  no dynamic resolver-health scoring yet (that level of sophistication belongs to the stealth layer
-  philosophy but isn't needed for a bulk resolution task). **[OPEN]** — is a static 3-5 resolver
-  list acceptable, or is resolver-health tracking wanted now?
+  resolver, to avoid a single point of rate-limiting or poisoning). ~~**[OPEN]** — static list vs.
+  resolver-health tracking?~~ **Answered by the implementation (2026-09-16):** neither extreme. The
+  shipped active stage probes a curated candidate list (45 addresses) before every run and admits
+  only resolvers that prove *both* halves of the DNS contract — a positive answer for a name that
+  exists **and** a clean NXDOMAIN for a random `.invalid` label — then points the tools at the
+  validated set (`.../active/output/resolvers.txt`). A hijacking resolver would otherwise make
+  puredns' wildcard heuristics discard real results. Measured: 32–38 of 45 admitted per run, i.e.
+  the curated lists rot fast enough that per-run validation is the minimum viable policy.
 - **Wordlist sourcing.** Combine a small built-in generic wordlist with dynamically-derived terms
   from S6 (Wayback endpoint paths) and S21/S24 (discovered paths, once those stages exist) —
   implemented as a pluggable wordlist-provider function so later stages can register more sources
@@ -689,8 +727,8 @@ infrastructure.
 
 1. **[S15]** Confirm it's acceptable to retrofit the existing v1 S7/S9 wiring so v1 sources
    (crt.sh, Wayback) also flow through the new Scope Engine, not just v2 sources.
-2. **[S16]** Static 3-5 public-resolver list acceptable for DNS-brute, or is resolver-health
-   tracking wanted at this stage?
+2. ~~**[S16]** Static 3-5 public-resolver list acceptable, or is resolver-health tracking wanted?~~
+   → answered by the shipped active stage: per-run validation of a curated candidate list (see S16).
 3. **[S17]** Which specific alternate CT/aggregator source(s) to integrate first — affects
    whether a new API key needs procurement.
 4. **[S18]** Confirm the /24-or-smaller cutoff for full IP-level expansion of large announced
@@ -705,11 +743,12 @@ infrastructure.
    teardown — which fidelity/complexity trade-off is preferred?
 9. **[S25]** Cadence for refreshing the takeover-vulnerable-service fingerprint list — quarterly
    manual review acceptable, or pull from a community-maintained feed automatically?
-10. **Global:** confirm the twelve v2 stages (S15–S26) should be numbered as a direct continuation
-    of the v1 plan's S0–S14 numbering (as done throughout this document) rather than a separate
-    numbering scheme, to keep single-source-of-truth stage references consistent across
-    `recon_v2.md`, this plan, and `recon_flow_v2.md`.
+10. ~~**Global:** confirm the twelve v2 stages (S15–S26) should be numbered as a direct
+    continuation of the v1 plan's S0–S14 numbering.~~ → settled: this numbering is used
+    consistently across `recon_v2.md`, this plan and `recon_flow_v2.md`, and is referenced that
+    way by [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
 ---
 
-*End of plan. Status: draft v1 — pending review + answers to §8.*
+*End of plan. Status: see [Implementation status](#implementation-status). Nothing here is
+built except S16's techniques, which live in the standalone asset pipeline.*

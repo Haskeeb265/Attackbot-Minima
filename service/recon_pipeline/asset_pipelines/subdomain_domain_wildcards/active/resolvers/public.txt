@@ -1,0 +1,108 @@
+# =============================================================================
+# Public resolver candidates (seed list)
+# =============================================================================
+# These are CANDIDATES, not truth.  Every entry is probed at run time by
+# active/resolvers.py before it is used, because published resolver lists rot
+# fast: the list bundled with massdns (8,477 addresses, ~2019) resolved
+# nothing at all when tested, and a hand-checked 60-address sample of it was
+# ~88% dead.
+#
+# Each resolver must pass two probes to make the working pool:
+#
+#   1. POSITIVE - it resolves a name that definitely exists.
+#   2. NEGATIVE - it returns NXDOMAIN for a random label under `.invalid`
+#      (RFC 6761 reserves that TLD and forbids it from ever resolving).
+#      A resolver that *answers* the negative probe is hijacking NXDOMAIN
+#      (captive portals, ISP search pages, ad-blocking wildcards) and is
+#      rejected: on a hijacking resolver, "this wildcard is real" and "this
+#      resolver invents answers" are indistinguishable.
+#
+# Deliberately a mix of filtering and unfiltered resolvers.  Filtering
+# resolvers (AdGuard, CleanBrowsing, Quad9's filtered set, ...) can return
+# NXDOMAIN for names in their blocklists, but resolution is satisfied when ANY
+# resolver answers, and this pool always contains unfiltered members - so a
+# filtered answer can only ever cost a duplicate query, never a missed host.
+#
+# Format: one IPv4 address per line; `#` starts a comment; blank lines ignored.
+# Validated output is written to active/output/resolvers.txt, never edited here.
+#
+# Want more capacity?  Append addresses (or a maintained list such as
+# github.com/trickest/resolvers) to this file, or pass --resolvers at run time.
+# =============================================================================
+
+# --- Cloudflare -------------------------------------------------------------
+1.1.1.1
+1.0.0.1
+1.1.1.2
+1.0.0.2
+1.1.1.3
+1.0.0.3
+
+# --- Google -----------------------------------------------------------------
+8.8.8.8
+8.8.4.4
+
+# --- Quad9 ------------------------------------------------------------------
+9.9.9.9
+149.112.112.112
+9.9.9.10
+149.112.112.10
+
+# --- OpenDNS (Cisco) --------------------------------------------------------
+208.67.222.222
+208.67.220.220
+
+# --- AdGuard ----------------------------------------------------------------
+94.140.14.14
+94.140.15.15
+94.140.14.140
+94.140.14.141
+
+# --- Control D --------------------------------------------------------------
+76.76.2.0
+76.76.10.0
+
+# --- CleanBrowsing ----------------------------------------------------------
+185.228.168.9
+185.228.169.9
+
+# --- Yandex -----------------------------------------------------------------
+77.88.8.8
+77.88.8.1
+
+# --- Neustar / Vercara UltraDNS --------------------------------------------
+64.6.64.6
+64.6.65.6
+156.154.70.1
+156.154.71.1
+
+# --- DNS.WATCH --------------------------------------------------------------
+84.200.69.80
+84.200.70.40
+
+# --- SafeDNS ----------------------------------------------------------------
+195.46.39.39
+195.46.39.40
+
+# --- Lumen / Level3 ---------------------------------------------------------
+4.2.2.1
+4.2.2.2
+209.244.0.3
+209.244.0.4
+205.171.3.65
+205.171.2.65
+
+# --- Comodo -----------------------------------------------------------------
+8.26.56.26
+8.20.247.20
+
+# --- UncensoredDNS ----------------------------------------------------------
+91.239.100.100
+89.233.43.71
+
+# --- FreeDNS ----------------------------------------------------------------
+37.235.1.174
+37.235.1.177
+
+# --- Hurricane Electric -----------------------------------------------------
+74.82.42.42

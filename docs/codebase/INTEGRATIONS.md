@@ -1,144 +1,106 @@
 # Integrations
 
-## External APIs
+## HackerOne Hacker API v1
 
-### HackerOne Hacker API v1
+Used by the scraper (`shared/connectors/hackerone_client.py`) through
+`BaseConnector`. Base URL: `https://api.hackerone.com/v1/`.
 
-**Purpose:** Fetch bug bounty program metadata, scopes, weaknesses, and exclusions.
+| Method | Endpoint | Returns |
+|---|---|---|
+| `fetch_programs(page_size, max_pages)` | `hackers/programs` (paginated) | all programs, used for the handle lists |
+| `fetch_program_scopes(handle)` | `hackers/programs/{handle}/structured_scopes` | the program's scopes (paginated) |
+| `fetch_program_weaknesses(handle)` | `hackers/programs/{handle}/weaknesses` | weakness rulesets |
+| `fetch_program_scope_exclusions(handle)` | `hackers/programs/{handle}/scope_exclusions` | exclusion rulesets |
 
-**Key Endpoints:**
-| Endpoint | Purpose | Rate Limit |
-|----------|---------|------------|
-| `/hackers/programs` | List all programs (paginated) | General read limit |
-| `/{handle}/structured_scopes` | Fetch program scopes | **Separate** rate limit |
-| `/{handle}/scope_exclusions` | Fetch program exclusions | General read limit |
-| `/{handle}/weaknesses` | Fetch program weaknesses | General read limit |
+**Auth:** HTTP basic (`HACKERONE_AUTH` tuple built in `config.py` from
+`HACKERONE_USERNAME` / `HACKERONE_TOKEN`).
 
-**Client Implementation:**
-- `shared/connectors/base.py` - `BaseConnector` — platform-agnostic source interface (HTTP, auth, pagination plumbing)
-- `shared/connectors/hackerone_client.py` - `HackerOneConnector` — HackerOne API v1 implementation
-- `service/scraper/` - consumes any `BaseConnector`; never issues platform-specific calls itself (Bugcrowd + other platforms plug in as new connector subclasses)
+**Pagination:** `BaseConnector._paginate` follows `links.next`, taking
+`page[size]` up to `max_pages`. One `_fetch_all_programs()` call backs both
+priority filters in `program_scraper.py`, so a run does not re-list programs.
 
-**Important Notes:**
-- `/hackers/programs` requires explicit `page[number]` / `links.next` pagination handling
-- `structured_scopes` has its own separate rate limit (not shared with other endpoints)
-- Both priority-bucket filtering methods on `program_scraper` must share a single `_fetch_all_programs()` call
+**Not implemented:** there is **no retry, backoff or rate-limit handling**
+anywhere in the connector or scraper (no `sleep`/429 handling/retry). A transient
+API error fails that program — or the run, if it happens during the program list
+fetch. See [CONCERNS.md](CONCERNS.md).
 
-**Configuration:**
-- API credentials stored in environment variables (loaded via `config.py`)
-- Rate limits centrally managed via root `config.py` (shared across all services)
+## PostgreSQL 16
 
-## Databases
+Primary store for scraped program data. `postgres:16-alpine`, container
+`attackbot_postgres`, host/port from `POSTGRES_*` (default port 5432).
 
-### PostgreSQL 16 Alpine
+- **Driver:** psycopg 3 with `psycopg_pool.ConnectionPool`
+  (`min_size=2`, `max_size=10`, `row_factory=dict_row` → rows are dicts).
+- **Bootstrapping:** `./db/init` is mounted at `/docker-entrypoint-initdb.d`, so
+  `001_schema.sql` runs on a fresh volume. Existing databases are migrated with
+  Alembic (`db/migrations/versions/0001`–`0003`), whose metadata comes from
+  `db/init/models.py`.
+- **Tables:** `bounty_master`, `bounty_detail`, `bounty_weaknesses`,
+  `bounty_exclusion` — all children of `bounty_master` with
+  `ON DELETE CASCADE` and `is_active` soft-delete flags. Details and the
+  API→mapper→column mapping: [`../scraper_docs/schema.md`](../scraper_docs/schema.md).
+- **Access pattern:** raw SQL through `db/repos/*` using
+  `db.fetch_one` / `db.fetch_all` / `db.execute`; no ORM at runtime (SQLAlchemy
+  exists only so Alembic can autogenerate against the models).
 
-**Purpose:** Primary data store for program metadata, scopes, weaknesses, and exclusions.
+## Neo4j
 
-**Connection Details:**
-- **Host:** localhost (via Docker)
-- **Port:** 5432 (configurable via `POSTGRES_PORT`)
-- **Driver:** psycopg3 + psycopg_pool
-- **Connection Pool:** `min_size=2`, `max_size=10`
-- **Row Factory:** `dict_row` (returns dictionaries)
+The recon graph of record. `neo4j:latest` (Community), container `neo4j_db`,
+Bolt on `7687`, browser on `7474`; credentials and database from `NEO4J_*`.
 
-**Schema Tables:**
-| Table | Purpose | Write Pattern |
-|-------|---------|---------------|
-| `bounty_master` | One row per program | UPSERT (ON CONFLICT DO UPDATE) |
-| `bounty_detail` | Scoped assets per program | UPSERT (ON CONFLICT DO UPDATE) |
-| `bounty_weaknesses` | Weakness rulesets | DELETE-then-INSERT (full replace) |
-| `bounty_exclusion` | Exclusion rulesets | DELETE-then-INSERT (full replace) |
+- **Client:** `service/recon_pipeline/graph/client.py` (`Neo4jClient`,
+  driver + `verify()`).
+- **Schema:** `schema.py` — `:Asset` base label plus typed labels, relationship
+  types, uniqueness constraint on `(asset_type, canonical_value)` for assets,
+  and indexes.
+- **CRUD:** `repository.py` — `run_query`, `merge_node`, `get_node`,
+  `merge_relation`, `get_relation`; labels must be passed as a list.
+- **Verification:** `tests/recon/test_repository.py` exercises all five methods
+  (plus constraint enforcement) against a live instance and cleans up after
+  itself. It is a script, not part of the pytest suite:
+  `docker compose up -d neo4j && python tests/recon/test_repository.py`.
+- **Gap:** no production code writes to the graph yet — the recon asset pipeline
+  writes files (`IMPLEMENTATION_PLAN` stages S4/S7 are unbuilt).
 
-**Docker Configuration:**
-```yaml
-services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: attackbot_postgres
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./db/init:/docker-entrypoint-initdb.d
-```
+## Redis
 
-**Initialization:**
-- `db/init/001_schema.sql` auto-runs on first container boot
-- Creates all four tables with constraints and indexes
+**Planned, not integrated.** `config.py` exposes `REDIS_URL`
+(default `redis://localhost:6379/0`), but no client library is installed, no code
+connects, and there is no Redis service in `docker-compose.yml`. It belongs to
+plan stages S8 (hot cache) and S9 (queue topology).
 
-## LLM Providers
+## Recon external sources
 
-### Cerebras (Primary)
+The recon stages talk to third parties directly; none of these need credentials:
 
-**Purpose:** Primary LLM provider for recon operation (not yet started).
+| Source | Transport | Notes |
+|---|---|---|
+| crt.sh | HTTPS (`.../passive/crtsh.py`) | Certificate Transparency; keyless, no Docker |
+| Wayback CDX | HTTPS (`.../passive/wayback.py`) | historical URLs naming hosts; keyless, no Docker |
+| Docker images | one per source | subfinder, assetfinder, findomain, chaos (needs `CHAOS_API_KEY`), amass |
+| DNS | UDP/TCP 53 via the evaluated resolver pool | `dnspython` for validation/wildcard probes; `puredns`/`massdns` in the stage image for bulk |
+| Zone transfers | `dig AXFR` inside the stage image | one query per nameserver |
+| HTTP probing | `httpx` inside the stage image | **opt-in** (`--http`): the only step that sends application traffic |
 
-**Model:** llama-3.3-70b
+## LLM providers
 
-**Rate Limits:** Shared across all services, centrally managed.
+**Not configured.** The spec assigns Cerebras (primary) / Groq (fallback) with
+`llama-3.3-70b` a classification role (plan stage S13), but no provider SDK,
+endpoint or API key appears anywhere in the code or `config.py`.
 
-### Groq (Fallback)
+## Logging & health
 
-**Purpose:** Fallback LLM provider when Cerebras is unavailable.
-
-**Model:** llama-3.3-70b-versatile
-
-**Rate Limits:** Shared with Cerebras (same quota pool).
-
-**Configuration:**
-- Both providers configured in root `config.py`
-- Rate limits managed centrally (all services draw from one quota)
-
-## Authentication
-
-### HackerOne API
-
-- API credentials stored in environment variables
-- Loaded via `config.py` using `python-dotenv`
-- Never committed to version control
-
-### PostgreSQL
-
-- Credentials stored in environment variables
-- Loaded via `config.py` using `python-dotenv`
-- Docker Compose passes credentials to container
-
-## Monitoring & Logging
-
-### Application Logging
-
-- Python's standard `logging` module
-- Custom colored logging via `shared/colorlog.py`
-- Log levels: `process` (info), `success` (success), `failed` (error)
-
-### Docker Health Checks
-
-```yaml
-healthcheck:
-  test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-  interval: 5s
-  timeout: 5s
-  retries: 5
-```
-
-## Future Integrations (Planned)
-
-### Discord Webhook
-
-**Purpose:** Alert on findings (planned for recon operation).
-
-**Status:** Not yet implemented.
-
-### FastAPI
-
-**Purpose:** Frontend API layer (planned for future).
-
-**Status:** Deliberately deferred - not being built now.
+- Application logging: stdlib `logging` inside the recon stages; the scraper uses
+  `shared/colorlog.py` (`success` / `process` / `failed` / `info` / `warn`).
+- Container healthchecks exist for both datastores in `docker-compose.yml`
+  (`pg_isready` for Postgres; a `cypher-shell 'RETURN 1'` probe for Neo4j).
+- No monitoring, metrics or alerting integration exists.
 
 ## Evidence
-- `shared/connectors/base.py` - BaseConnector abstract source interface
-- `shared/connectors/hackerone_client.py` - HackerOne API client
-- `docker-compose.yml` - PostgreSQL service definition
-- `config.py` - environment variable loading
-- `scope.md` - integration decisions and rate limit notes
+
+- `shared/connectors/{base,hackerone_client}.py`, `config.py`
+- `shared/db.py`, `docker-compose.yml`, `db/init/001_schema.sql`,
+  `db/migrations/versions/`
+- `service/recon_pipeline/graph/{client,schema,repository}.py`
+- `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/passive/sources.py`
+  (upstream images) and the stage READMEs (measured yields)
