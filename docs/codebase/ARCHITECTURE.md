@@ -1,16 +1,20 @@
 # Architecture
 
 Attackbot is an attack surface management tool for bug bounty programs. Today it
-has two built subsystems — a **scraper** that ingests HackerOne program data into
-PostgreSQL, and a **recon asset pipeline** that turns an in-scope domain into a
-list of live hosts — plus a **graph layer** (Neo4j schema + CRUD) that the recon
+has three built subsystems — a **scraper** that ingests HackerOne program data into
+PostgreSQL, three **recon asset pipelines** (names, then ports/services/hosts,
+then URLs/endpoints), and a **graph layer** (Neo4j schema + CRUD) that the recon
 results are not yet written into.
 
 ```
 HackerOne API ──▶ scraper ──▶ PostgreSQL ──▶ (planned) seed ingestion ──▶ Neo4j
                                                                           ▲
-in-scope domain ──▶ recon asset pipeline ──▶ live hosts (files) ──────────┘
-                                            (not wired into the graph yet)
+in-scope domain ──▶ subdomain_domain_wildcards ──▶ live hosts (files) ────┤
+                              │                                           │
+                              ├──▶ port_service_host ──▶ ports/services ──┤
+                              │                                           │
+                              └──▶ url_endpoint ──▶ endpoints, params, JS ─┘
+                                        (no pipeline wired into the graph yet)
 ```
 
 ## 1. Scraper (built)
@@ -50,7 +54,7 @@ uses savepoints, and the unit-of-work rule is that only top-level code calls
 `fetch_program_weaknesses`, `fetch_program_scope_exclusions`).
 `HackerOneConnector` is the only implementation; another platform is a subclass.
 
-## 2. Recon asset pipeline (built)
+## 2. Names pipeline — `subdomain_domain_wildcards` (built)
 
 `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/` — three
 independently runnable stages plus an orchestrator. Each stage owns an `output/`
@@ -130,6 +134,78 @@ Detailed contracts, flags and measured yields live in the
 [pipeline README](../../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md)
 and each stage's README.
 
+## 2c. Ports/services/hosts pipeline — `port_service_host` (built)
+
+`service/recon_pipeline/asset_pipelines/port_service_host/` is the second built
+asset pipeline and the first stage that *chooses* whether to send packets. It maps
+the addresses stage 2 produced onto open ports and identified services:
+
+```
+seeds       records.jsonl (stage 1's active output) + declared CIDR/IP scope
+   ↓
+passive     Shodan InternetDB · RDAP · Team Cymru · dnsx -ptr  (no packets to target)
+   ↓
+ownership   classify each address: cdn / dedicated / unknown / hosted
+   ↓
+ladder      L0–L3 per address: only addresses that earn it are escalated
+   ↓
+scan        naabu (SYN → CONNECT degradation) at the granted rung
+   ↓
+services    nmap identification, grouped by port signature
+   ↓
+report.json full ladder decisions + stealth state + counts
+```
+
+Design rules that the code enforces:
+
+- **Passive before active.** Keyless passive intel runs first; addresses classified
+  `cdn` (or `hosted` — a target name resolving through a third-party platform's
+  tenant namespace) are not scanned, and `hosted` addresses refuse L3 escalation.
+- **One stealth chokepoint.** Active work goes through the same
+  `stealth/session.py` as the names pipeline; each run's `report.json` carries a
+  `stealth` block saying what actually ran.
+- **Share, don't re-derive.** It consumes stage 1's `records.jsonl` as its address
+  source rather than re-enumerating, and `run_recon.py` drives that ordering.
+
+Not built: keyed Censys/Shodan sources + cert pivot (its doc's P4) and graph
+writes (P5); `censys.py`/`shodan.py` do not exist. Its own R&D doc is
+[`port_service_host.md`](../recon_docs/port_service_host.md).
+
+## 2d. URLs/endpoints pipeline — `url_endpoint` (built)
+
+`service/recon_pipeline/asset_pipelines/url_endpoint/` answers the third layer of
+surface: *what did the target expose over HTTP, ever?* Its passive sources read
+third-party datasets only — nothing here touches the target.
+
+```
+passive    Wayback CDX · Common Crawl index · urlscan.io search · gau (Docker)
+   ↓       → canonical, in-scope, deduplicated URL union
+   ↓
+extract    URLs → endpoints · parameters · JS bundles · source maps · findings
+```
+
+Design rules that the code enforces:
+
+- **Identity before counting.** One canonical string per URL: lowercased/IDNA
+  host (via the names stage's `canonicalize_host`), default ports dropped, path
+  normalized, tracking parameters stripped and the rest sorted, fragment dropped.
+  Every count is a count of canonical assets.
+- **Honest source states.** "The source said no" (a 404 from the Common Crawl
+  index), "the source did not answer" and "the source was rate-limited" are kept
+  apart; collapsing them would make the report lie about coverage.
+- **Debris is dropped *and counted*.** Template placeholders (`${P}.tar.bz2`),
+  shell fragments and pasted address bars parse as URLs but are not addresses;
+  they are excluded from the union and reported under `junk`. Parameter names are
+  filtered to identifier shapes so `parameters.txt` means "names the application
+  reads".
+- **Only this run's sources count.** The merge reads only sources that succeeded
+  in this run, so a stale raw file cannot contaminate the union.
+
+Its own R&D doc is [`url_endpoint/DESIGN.md`](../../service/recon_pipeline/asset_pipelines/url_endpoint/DESIGN.md).
+**Not built:** light-active crawling of confirmed hosts (`katana`) — it sends
+ traffic to the target, so it belongs behind the unbuilt S10 dispatcher/stealth
+chokepoint — and graph writes.
+
 ## 3. Graph layer (built, not fed yet)
 
 `service/recon_pipeline/graph/` holds the Neo4j design and its CRUD:
@@ -174,6 +250,11 @@ themselves:
 - `service/recon_pipeline/graph/{schema,repository,client}.py`,
   `tests/recon/test_repository.py`
 - `service/recon_pipeline/stealth/{identity,pacing,detect,quarantine,dns_budget,transport,session}.py`,
-  `tests/recon/test_stealth_*.py` (143 hermetic tests), and the live-capture
+  `tests/recon/test_stealth_*.py` (156 hermetic tests), and the live-capture
   evidence cited in `stealth/README.md`
+- `service/recon_pipeline/asset_pipelines/port_service_host/{pipeline,seed_builder,normalize}.py`,
+  its `passive/`, `active/` and `classify/` packages, and `tests/recon/test_psh_*.py`
+- `service/recon_pipeline/asset_pipelines/url_endpoint/{main,normalize,extract}.py`,
+  its `passive/` package (wayback, commoncrawl, urlscan, gau), and
+  `tests/recon/test_url_*.py`
 - `docs/recon_docs/*` for the planned stages (explicitly marked as intent)

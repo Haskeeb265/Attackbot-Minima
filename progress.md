@@ -30,9 +30,44 @@ S17–S26 ░░░░░░░ none    All other v2 sources (CT APIs, ASN, WHOI
 ────────────────────────────────────────────────────────────────────
 XX  ████████░░░ built   port_service_host — exists OUTSIDE both plans' numbering
                         (own R&D doc; P1–P3 built, P4–P5 deferred)
+XX  ████████░░░ built   url_endpoint — URLs / endpoints / parameters, OUTSIDE both
+                        plans' numbering (passive + extract built; crawl + graph
+                        writes deferred)
 ```
 
 `*` = built as a standalone file-writing asset pipeline, **not** wired into the graph/scoring architecture the plans describe.
+
+---
+
+## Asset-type coverage vs. the spec taxonomy (code-verified 2026-09-18)
+
+`recon.md` §3 lists 17 asset types (+ a cross-asset correlation layer). Measured
+against the code, not the docs:
+
+| Asset type | State | Where |
+|---|---|---|
+| Domain | built | `subdomain_domain_wildcards/` (the `Subdomain` refinement folds in here) |
+| Wildcard | built | `.../passive/wildcard.py`, reused by all three stages |
+| IP | partial (file-only) | `port_service_host/` — passive intel, classify, ladder, scan |
+| CIDR | input-only | declared `--scope` file; no range host discovery / prefix expansion |
+| URL, Endpoint | built | `url_endpoint/` — Wayback + Common Crawl + urlscan + gau → endpoints, parameters, JS |
+| Certificate | none | CNAME chains are collected; no cert clustering (S20) |
+| Secret | none | no extractor (S21/S23) |
+| CloudResource | none | no bucket enumeration (S22) |
+| Repository (Source Code) | none | no code-host dorking (S21) |
+| MobileApp (#7–#11) | none | no mobile teardown (S23) |
+| Binary (Executable) | none | no executable pipeline |
+| Hardware/IoT (#13) | none | no label in `schema.py` (falls back to `:Other`) |
+| SmartContract (#14) | none | no pipeline |
+| AI Model (#15) | none | no label in `schema.py` (falls back to `:Other`) |
+| ASN (#17) | none | no BGP/ASN pivot (S18) |
+
+**Counts:** 3 types fully covered (Domain, Wildcard, URL/Endpoint), 2 partial (IP,
+CIDR), and **12 with no collection logic at all**. The schema also defines labels that nothing
+populates (`URL`, `Endpoint`, `Certificate`, `Secret`, `Technology`,
+`CloudResource`, `ASN`), and the v2 plan adds node types the schema lacks —
+`ThirdPartyService` and `FingerprintCluster` (`recon_v2.md` Appendix A), plus the
+`Parameter`/`Host` outputs it names without their own labels.
 
 ---
 
@@ -105,6 +140,83 @@ XX  ████████░░░ built   port_service_host — exists OUTSI
 - Tests for all of the above (ladder/classify/pipeline + active-stage enrichment); full recon suite green (866 passed); no new mypy errors.
 
 These need folding into `IMPLEMENTATION_PLAN*.md` status tables, `docs/recon_docs/port_service_host.md`'s deltas, and the pipeline READMEs' "Related" cross-references (including the S22–S24 drift noted above).
+
+## Added 2026-09-18 (this session — not yet reflected in the plans)
+
+- **Docs reconciled to the code.** Test count 397 → **866** (the count later rose to
+  **972** with the `url_endpoint` work in the entry below) (`README.md`,
+  `docs/codebase/TESTING.md`, `CONCERNS.md`, `STRUCTURE.md`, the subdomain
+  pipeline README). `port_service_host` added to `README.md`, `ARCHITECTURE.md`
+  and `STRUCTURE.md` (it was missing entirely). The port README's bogus
+  "S22–S24 (port/service enumeration)" cross-reference replaced with its real
+  authority, `recon_docs/port_service_host.md` (it maps to no numbered stage).
+  `recon.md` §3 and Appendix A now flag the v2 node types and the 13 asset types
+  with no pipeline, and the asset-type coverage table above was added.
+- Verified: `pytest tests/recon -q` → 866 passed; `pytest tests/ -q` → 866 passed,
+  1 skipped.
+
+## Added 2026-09-18 (later session) — the `url_endpoint` pipeline
+
+- **New asset pipeline, `url_endpoint`** (URLs / endpoints / parameters): passive
+  harvest from Wayback CDX, Common Crawl, urlscan.io and `gau` → one canonical
+  union → extraction of endpoints, parameters, JS bundles, source maps and
+  "interesting" files. 106 hermetic tests; a bundled `url_endpoint_image` (gau)
+  builds and runs in Docker.
+- **Wired into `run_recon.py`** as pipeline 3 (`--skip-url`), with the same
+  pre-run mtime stale-artifact guard and computed summary as the other two.
+- **Measured** on `example.com`: keyless sources 588 URLs → 580 endpoints, 7
+  parameters, 2 JS, 5 interesting (43 s); `gau` alone 291 210 URLs → 207 458
+  endpoints, 6 117 parameters, 928 JS, 5 188 interesting (393 s), with 4 449
+  template/shell debris URLs dropped by the new junk filter.
+- Test count 866 → **972**; `url_endpoint` is mypy-clean.
+- Docs updated for the third pipeline: `README.md`, `docs/README.md`,
+  `docs/codebase/{ARCHITECTURE,STRUCTURE,TESTING,CONCERNS}.md`, `.gitignore`.
+
+## Added 2026-09-18 (final session) — `url_endpoint` run against real targets and closed out
+
+- **Live runs, two real targets.** `qbsco.net` (all four sources, defaults):
+  5 697 raw URLs → 2 851 canonical → 2 577 endpoints, 3 parameters, 137 JS
+  bundles, 19 triage files, 302 junk lines dropped, 94 s. `hackerone.com`
+  (`--timeout 240`): 49 771 → 49 769 → 47 543 endpoints, 82 parameters, 5 422 JS
+  bundles, 11 triage files, 170 junk, 308 s. Both runs produced a usable union
+  while one or two sources failed, which is the designed degradation.
+- **Real bug found by the live run, fixed: an unreachable source reported a
+  successful empty harvest.** `commoncrawl` returned `[]` when
+  `index.commoncrawl.org` could not be reached (this host cannot resolve it at
+  all), so `report.json` showed `ok=true urls=0` — indistinguishable from "Common
+  Crawl has never crawled this domain". New `passive/errors.py`
+  (`SourceUnavailable`): the three keyless sources now **raise** when no answer
+  was obtained (transport failure, non-2xx, 429, or an HTML error page where CDX
+  data was expected) and the stage records the source as **failed with its
+  reason**. Tests assert both branches: an unreachable source fails the run, an
+  answered-empty one succeeds.
+- **Second real-data fix: parameter names.** The 49 k-URL harvest put
+  `hackddos.com`, `nsoad.com` and `index.html` in `parameters.txt` — hostnames and
+  filenames in the key position, from spam-injected and broken URLs. The
+  plausibility rule now rejects a **top-level dot** and an **over-long token**
+  while keeping bracketed members (`report[email]`, `filter[user.name]`); 84 → 82
+  parameters on that target.
+- **`run_recon.py` spawns stages with `-u`.** A full three-pipeline run killed
+  after 10 minutes had written a **zero-byte** subdomain log: a piped child
+  block-buffers until 8 KiB accumulate. Unbuffered children mean a long run is
+  observable and an interrupted one leaves a readable log.
+- **Integration verified end to end** against the real target:
+  `run_recon.py -t qbsco.net --skip-subdomain` → ports 105 s + URLs 94 s, and a
+  376 692-byte `RECON_qbsco.net_OUTPUT.md` whose stale-artifact guard worked live
+  (yesterday's `nmap-1.xml` and `escalated-naabu.jsonl` were labelled stale and
+  excluded rather than passed off as fresh).
+- **Measured runtime reality (now in CONCERNS §9b):** a complete three-pipeline
+  run on `qbsco.net` takes ~22 min, and the names stage is the slow part *by
+  design* — a full `passive,active,permutation` run completed in **1 123.6 s**
+  (passive 105.8, active 107.0, permutation 910.9) after the stealth DNS budget
+  spread 12 539 permuted names across 26 batches over 34 resolvers (`[OVER
+  BUDGET]` is logged, not hidden). Ports took 105 s and URLs 94 s. The earlier
+  "hung past 600 s" observation was this pacing plus the zero-byte log bug.
+- Test count 972 → **987**; `url_endpoint` remains mypy-clean. Docs updated:
+  `url_endpoint/README.md` (real-target measurements, per-source status
+  semantics, the two parameter rejections), `DESIGN.md` (honest states as an
+  enforced rule, not a principle), `docs/codebase/{TESTING,CONCERNS}.md`,
+  `STRUCTURE.md`, root `README.md`.
 
 ## Suggested next moves (dependency order from the plans)
 

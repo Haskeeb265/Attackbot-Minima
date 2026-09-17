@@ -68,6 +68,25 @@ The system supports the following asset taxonomy. Each type has dedicated extrac
 | 17 | Other (primarily ASNs) | BGP/ASN → prefix expansion into CIDR pipeline |
 | 18 | Cross-Asset Correlation Layer | Universal graph + scoring engine that links all of the above |
 
+> **How this maps to the code today.** The graph schema
+> (`service/recon_pipeline/graph/schema.py`) defines a typed label for #1 Domain,
+> #2 Wildcard, #3 URL, #4 CIDR, #5 IP, #6 Source Code (`Repository`), #7–#11
+> (`MobileApp`), #12 Executable (`Binary`), #14 Smart Contract and #17 ASN, plus
+> the artifact types `Endpoint`, `Certificate`, `Secret`, `Technology` and
+> `CloudResource`. **#13 Hardware/IoT and #15 AI Model have no dedicated label** and
+> fall back to `:Other`.
+>
+> Only #1 Domain/#2 Wildcard (and the `Subdomain` refinement) have real collection
+> logic today (`subdomain_domain_wildcards/`); #5 IP is handled partially and
+> file-only by `port_service_host/`, which consumes declared #4 CIDRs as input
+> without expanding them. The remaining **13 types have no pipeline**. Nothing in
+> either pipeline writes the graph yet.
+>
+> The v2 extension adds node types this table does not list — `ThirdPartyService`
+> and `FingerprintCluster` ([`recon_v2.md`](recon_v2.md) Appendix A) — and names
+> `Parameter` and `Host` as source outputs without giving them their own labels.
+> None of these exist in `schema.py` because no v2 stage is built.
+
 ---
 
 ## 4. Unconstrained Ideal vs. Practical Reality
@@ -291,6 +310,12 @@ These scenarios serve both as acceptance tests and as educational walk-throughs 
 | `LABEL_OTHER` | `Other` | Fallback | Catch-all for unknown/out-of-v1 asset types (e.g. HackerOne `OTHER` scopes). Written with `labels=["Asset", "Other"]`. |
 | `LABEL_WEAKNESSES` | `Weaknesses` | Meta | Reserved for HackerOne weakness metadata. |
 | `LABEL_EXCLUSIONS` | `Exclusions` | Meta | Reserved for HackerOne scope exclusion metadata. |
+
+> **Complete for v1, not for v2.** This table matches `graph/schema.py` exactly. The
+> v2 extension defines two further node types (`ThirdPartyService`,
+> `FingerprintCluster`) plus the relationships `SHARES_FINGERPRINT_WITH`,
+> `DEPENDS_ON` and `DANGLING_REFERENCE`, which `schema.py` does **not** have yet —
+> add them with the stages that need them (`recon_v2.md` Appendix A).
 
 ### Relationship Types
 

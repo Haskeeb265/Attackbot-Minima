@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Run the subdomain and ports/services pipelines against one target and write
-one combined report at the project root.
+"""Run the names, ports/services and URL/endpoint pipelines against one target and
+write one combined report at the project root.
 
 What it does, in order:
 
 1. runs ``subdomain_domain_wildcards`` (passive -> active -> permutation), whose
    ``active/output/records.jsonl`` is the address source for the port stage;
 2. runs ``port_service_host`` against the same target;
-3. assembles ``RECON_<target>_OUTPUT.md`` at the project root: a data-driven
+3. runs ``url_endpoint`` (historical URL harvest -> endpoints/parameters/JS);
+4. assembles ``RECON_<target>_OUTPUT.md`` at the project root: a data-driven
    summary (read from the stages' machine reports, never hand-written) followed
    by every curated artifact verbatim, then both console logs.
 
@@ -25,8 +26,9 @@ Usage::
 
     python run_recon.py -t qbsco.net
     python run_recon.py -t example.com --stages active,permutation   # skip passive
-    python run_recon.py -t example.com --skip-subdomain              # ports only
-    python run_recon.py -t example.com --skip-ports                  # subdomains only
+    python run_recon.py -t example.com --skip-subdomain              # ports + URLs
+    python run_recon.py -t example.com --skip-ports                  # names + URLs
+    python run_recon.py -t example.com --skip-url                    # names + ports
 
 Per-stage knobs keep working through their environment variables (``PSH_*``,
 ``ACTIVE_*``) — this script forwards nothing it does not understand, so a run is
@@ -47,9 +49,11 @@ ROOT = Path(__file__).resolve().parent
 
 SDW_MODULE = "service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.main"
 PSH_MODULE = "service.recon_pipeline.asset_pipelines.port_service_host.pipeline"
+URL_MODULE = "service.recon_pipeline.asset_pipelines.url_endpoint.main"
 
 SDW_DIR = ROOT / "service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards"
 PSH_DIR = ROOT / "service/recon_pipeline/asset_pipelines/port_service_host"
+URL_DIR = ROOT / "service/recon_pipeline/asset_pipelines/url_endpoint"
 
 #: The artifacts worth embedding, relative to each stage directory.  Anything
 #: absent or stale is skipped and reported.  The permutation stage's 26
@@ -93,6 +97,19 @@ PSH_ARTIFACTS: tuple[str, ...] = (
     "output/report.json",
 )
 
+URL_ARTIFACTS: tuple[str, ...] = (
+    "passive/output/urls.txt",
+    "passive/output/report.json",
+    "output/endpoints.txt",
+    "output/parameters.txt",
+    "output/javascript.txt",
+    "output/source_maps.txt",
+    "output/interesting.txt",
+    "output/hosts.txt",
+    "output/report.json",
+    "output/summary.json",
+)
+
 
 def _utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -110,7 +127,14 @@ def _mtimes(directory: Path) -> dict[str, float]:
 
 
 def _run_streamed(command: list[str], log_path: Path) -> int:
-    """Run *command*, teeing stdout+stderr to the console and *log_path*."""
+    """Run *command*, teeing stdout+stderr to the console and *log_path*.
+
+    The child is invoked with ``-u`` (unbuffered).  Without it Python block-buffers
+    stdout when it is a pipe, so a long stage's log stays empty for minutes and an
+    interrupted run leaves a zero-byte log — measured here: a full three-pipeline
+    run killed after 10 minutes had written nothing to the subdomain log even
+    though that stage had been running the whole time.
+    """
     print(f"[run_recon] $ {' '.join(command)}", flush=True)
     started = time.monotonic()
     with log_path.open("w", encoding="utf-8", newline="\n") as log:
@@ -193,7 +217,7 @@ def _mail_records(sdw_dir: Path, apex: str) -> list[str]:
     return rows
 
 
-def _summary_section(sdw_report: dict, psh_report: dict, apex: str,
+def _summary_section(sdw_report: dict, psh_report: dict, url_report: dict, apex: str,
                      warnings: list[str] | None = None) -> str:
     """The data-driven header of the report: what happened, from the machine reports."""
     out: list[str] = [f"# Recon output — {apex}", ""]
@@ -261,16 +285,44 @@ def _summary_section(sdw_report: dict, psh_report: dict, apex: str,
         out.append(f"Counts: `{json.dumps(counts, sort_keys=True)}`")
         out.append("")
 
-    if not sdw_report and not psh_report:
-        out.append("_Neither stage produced a readable report — see the logs below._")
+    if url_report:
+        counts = url_report.get("counts") or {}
+        out.append("## Pipeline 3 — url_endpoint")
+        out.append("")
+        out.append(
+            f"{counts.get('urls', 0)} URL(s) → {counts.get('endpoints', 0)} endpoint(s), "
+            f"{counts.get('parameters', 0)} parameter(s), "
+            f"{counts.get('javascript', 0)} JS bundle(s), "
+            f"{counts.get('interesting', 0)} interesting file(s), "
+            f"in {url_report.get('seconds', 0):.1f}s · ok={url_report.get('ok')}"
+        )
+        out.append("")
+        stages = url_report.get("stages") or []
+        if stages:
+            out.append("| Stage | Seconds | OK | Key counts |")
+            out.append("|---|---|---|---|")
+            for entry in stages:
+                stage_counts = entry.get("counts") or {}
+                key = ", ".join(f"{k} {v}" for k, v in stage_counts.items() if v)
+                out.append(
+                    f"| {entry.get('stage')} | {entry.get('seconds', 0):.1f} "
+                    f"| {entry.get('ok')} | {key or '-'} |"
+                )
+            out.append("")
+        out.append(f"Counts: `{json.dumps(counts, sort_keys=True)}`")
+        out.append("")
+
+    if not sdw_report and not psh_report and not url_report:
+        out.append("_No pipeline produced a readable report — see the logs below._")
         out.append("")
     return "\n".join(out) + "\n"
 
 
-def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool,
-             sub_log: Path, port_log: Path,
+def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
+             sub_log: Path, port_log: Path, url_log: Path,
              sdw_before: dict[str, float] | None = None,
-             psh_before: dict[str, float] | None = None) -> Path:
+             psh_before: dict[str, float] | None = None,
+             url_before: dict[str, float] | None = None) -> Path:
     """Write the combined report: computed summary + this-run artifacts + logs.
 
     ``*_before`` are the mtime snapshots taken *before* the stages ran; a file
@@ -279,6 +331,7 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool,
     """
     sdw_before = sdw_before if sdw_before is not None else _mtimes(SDW_DIR)
     psh_before = psh_before if psh_before is not None else _mtimes(PSH_DIR)
+    url_before = url_before if url_before is not None else _mtimes(URL_DIR)
 
     def fresh(directory: Path, before: dict[str, float], relative: str) -> bool:
         """True when the artifact is new or was rewritten after the snapshot."""
@@ -291,6 +344,7 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool,
 
     sdw_report = _read_json(SDW_DIR / "output/summary.json") if ran_subdomain else {}
     psh_report = _read_json(PSH_DIR / "output/report.json") if ran_ports else {}
+    url_report = _read_json(URL_DIR / "output/summary.json") if ran_url else {}
 
     # The summary is only as fresh as the machine report it was read from.  When
     # a stage was asked to run but did not rewrite its report (a crash before the
@@ -312,8 +366,15 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool,
             "pipeline 2 did not rewrite its report this run - "
             "the figures below describe a previous run"
         )
+    if ran_url and url_report and not fresh(
+        URL_DIR, url_before or {}, "output/summary.json"
+    ):
+        warnings.append(
+            "pipeline 3 did not rewrite its summary this run - "
+            "the figures below describe a previous run"
+        )
 
-    parts: list[str] = [_summary_section(sdw_report, psh_report, apex, warnings)]
+    parts: list[str] = [_summary_section(sdw_report, psh_report, url_report, apex, warnings)]
 
     if ran_subdomain:
         parts.append("---\n\n## Verbatim artifacts — subdomain_domain_wildcards\n")
@@ -349,11 +410,26 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool,
         if stale_psh:
             parts.append(f"\n_Stale artifacts excluded from embedding: {', '.join(stale_psh)}_\n")
 
+    if ran_url:
+        parts.append("---\n\n## Verbatim artifacts — url_endpoint\n")
+        stale_url: list[str] = []
+        for relative in URL_ARTIFACTS:
+            path = URL_DIR / relative
+            if path.is_file() and not fresh(URL_DIR, url_before, relative):
+                stale_url.append(relative)
+                parts.append(_fence(path, relative, stale=True))
+            else:
+                parts.append(_fence(path, relative, stale=False))
+        if stale_url:
+            parts.append(f"\n_Stale artifacts excluded from embedding: {', '.join(stale_url)}_\n")
+
     parts.append("---\n\n## Console logs\n")
     if ran_subdomain:
         parts.append(_fence(sub_log, sub_log.name, stale=False))
     if ran_ports:
         parts.append(_fence(port_log, port_log.name, stale=False))
+    if ran_url:
+        parts.append(_fence(url_log, url_log.name, stale=False))
 
     report_path = ROOT / f"RECON_{apex}_OUTPUT.md"
     report_path.write_text("".join(parts), encoding="utf-8", newline="\n")
@@ -363,14 +439,15 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run_recon.py",
-        description="Run both recon pipelines and write a combined report to the project root.",
+        description="Run every recon pipeline and write a combined report to the project root.",
     )
     parser.add_argument("-t", "--target", help="apex domain (default: TARGET from .env)")
     parser.add_argument("--stages", default="passive,active,permutation",
                         help="subdomain stages to run (forwarded to the orchestrator)")
     parser.add_argument("--skip-subdomain", action="store_true", help="skip pipeline 1")
     parser.add_argument("--skip-ports", action="store_true", help="skip pipeline 2")
-    parser.add_argument("-v", "--verbose", action="store_true", help="debug logging in both stages")
+    parser.add_argument("--skip-url", action="store_true", help="skip pipeline 3")
+    parser.add_argument("-v", "--verbose", action="store_true", help="debug logging in every stage")
     args = parser.parse_args(argv)
 
     if args.target:
@@ -388,32 +465,40 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     sub_log = ROOT / f"recon_{apex}_subdomain_{stamp}.log"
     port_log = ROOT / f"recon_{apex}_ports_{stamp}.log"
+    url_log = ROOT / f"recon_{apex}_url_{stamp}.log"
 
     exit_codes: list[int] = []
     ran_subdomain = not args.skip_subdomain
     ran_ports = not args.skip_ports
+    ran_url = not args.skip_url
 
     # Snapshot the output trees BEFORE the stages run: the stale-artifact guard
     # is "did this file's mtime move during the run", which needs a baseline.
     sdw_before = _mtimes(SDW_DIR) if ran_subdomain else None
     psh_before = _mtimes(PSH_DIR) if ran_ports else None
+    url_before = _mtimes(URL_DIR) if ran_url else None
 
     if ran_subdomain:
-        command = [sys.executable, "-m", SDW_MODULE, "-t", apex,
+        command = [sys.executable, "-u", "-m", SDW_MODULE, "-t", apex,
                    "--stages", args.stages]
         if args.verbose:
             command.append("-v")
         exit_codes.append(_run_streamed(command, sub_log))
     if ran_ports:
-        command = [sys.executable, "-m", PSH_MODULE, "-t", apex]
+        command = [sys.executable, "-u", "-m", PSH_MODULE, "-t", apex]
         if args.verbose:
             command.append("-v")
         exit_codes.append(_run_streamed(command, port_log))
+    if ran_url:
+        command = [sys.executable, "-u", "-m", URL_MODULE, "-t", apex]
+        if args.verbose:
+            command.append("-v")
+        exit_codes.append(_run_streamed(command, url_log))
 
     report_path = assemble(
-        apex, ran_subdomain=ran_subdomain, ran_ports=ran_ports,
-        sub_log=sub_log, port_log=port_log,
-        sdw_before=sdw_before, psh_before=psh_before,
+        apex, ran_subdomain=ran_subdomain, ran_ports=ran_ports, ran_url=ran_url,
+        sub_log=sub_log, port_log=port_log, url_log=url_log,
+        sdw_before=sdw_before, psh_before=psh_before, url_before=url_before,
     )
     print(f"\n[run_recon] combined report: {report_path}")
     return 0 if all(code == 0 for code in exit_codes) else 1

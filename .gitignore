@@ -175,6 +175,12 @@ service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/output/
 # stage's README for the measured yields), so they are not tracked.
 service/recon_pipeline/asset_pipelines/port_service_host/output/
 
+# url_endpoint stage run artifacts: per-source raw URL lists, the canonical union,
+# the derived endpoints/parameters/JS/interesting lists and the run reports. Same
+# rule as the siblings - reproduced by re-running the stage, never tracked.
+service/recon_pipeline/asset_pipelines/url_endpoint/passive/output/
+service/recon_pipeline/asset_pipelines/url_endpoint/output/
+
 # Scratch directories used for ad-hoc live verification runs (wordlist/resolver
 # experiments, temporary mounts). Never source.
 .tmp_*/

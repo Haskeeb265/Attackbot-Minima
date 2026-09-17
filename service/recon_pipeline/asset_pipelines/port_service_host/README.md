@@ -570,4 +570,4 @@ Both exit non-zero on any failed check, so they are usable as a pre-release gate
 - [`commands.txt`](commands.txt) — raw per-tool commands, with the scope warning.
 - `../subdomain_domain_wildcards/README.md` — the upstream stage that supplies the addresses.
 - [`../../../stealth/README.md`](../../../stealth/README.md) — the shared shaping layer.
-- `docs/recon_docs/IMPLEMENTATION_PLAN_V2.md` — stages S22–S24 (port/service enumeration), whose techniques this implements.
+- [`../../../docs/recon_docs/port_service_host.md`](../../../docs/recon_docs/port_service_host.md) — the R&D doc that is this stage's authority (marked *implemented, with deltas*). It maps to **no numbered plan stage**: plan-v2's S22–S24 are cloud buckets, mobile teardown and JS crawl, not port/service enumeration.

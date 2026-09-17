@@ -43,16 +43,32 @@ Attackbot-Minimal/
 │       │   └── repository.py          # Neo4jRepository — run_query / merge_node / get_node / merge_relation / get_relation
 │       └── asset_pipelines/
 │           ├── config.py              # TARGET (default target), loaded from .env
-│           └── subdomain_domain_wildcards/   # the built asset pipeline
-│               ├── main.py            # orchestrator: runs stages, writes output/live_hosts.txt
-│               ├── env.py             # shared env parsing (env_flag / env_int)
-│               ├── Dockerfile         # the 11-tool image, smoke-tested at build time
-│               ├── commands.txt       # raw per-tool Docker commands (incl. shaped/stealth commands)
-│               ├── README.md          # pipeline overview
-│               ├── passive/           # stage 1: OSINT + CT sources → known names
-│               ├── active/            # stage 2: DNS resolution, bruteforce, recursion, AXFR (stealth-wired)
-│               ├── permutation/       # stage 3: names derived from known names (stealth-wired)
-│               └── output/            # (gitignored) union of live hosts + summary.json
+│           ├── subdomain_domain_wildcards/   # built pipeline 1: names (passive/active/permutation)
+│           │   ├── main.py            # orchestrator: runs stages, writes output/live_hosts.txt
+│           │   ├── env.py             # shared env parsing (env_flag / env_int)
+│           │   ├── Dockerfile         # the 11-tool image, smoke-tested at build time
+│           │   ├── commands.txt       # raw per-tool Docker commands (incl. shaped/stealth commands)
+│           │   ├── README.md          # pipeline overview
+│           │   ├── passive/           # stage 1: OSINT + CT sources → known names
+│           │   ├── active/            # stage 2: DNS resolution, bruteforce, recursion, AXFR (stealth-wired)
+│           │   ├── permutation/       # stage 3: names derived from known names (stealth-wired)
+│           │   └── output/            # (gitignored) union of live hosts + summary.json
+│           ├── port_service_host/     # built pipeline 2: ports/services/hosts
+│           │   ├── pipeline.py        # orchestrator: seeds → intel → ownership → ptr → classify → ladder → scan → services
+│           │   ├── seed_builder.py     # addresses from records.jsonl + declared scope
+│           │   ├── normalize.py       # address/host canonicalization
+│           │   ├── passive/           # internetdb, rdap, ptr, httpjson
+│           │   ├── active/            # naabu ladder, nmap, webprobe, tools
+│           │   ├── classify/          # cdn.py — cdn / dedicated / unknown / hosted verdicts
+│           │   └── output/            # (gitignored) addresses, ports, services, report.json
+│           └── url_endpoint/          # built pipeline 3: URLs / endpoints / parameters
+│               ├── main.py            # orchestrator: passive → extract → derived assets
+│               ├── normalize.py       # URL canonicalization, classification, junk filter
+│               ├── extract.py         # endpoints, parameters, JS bundles, findings
+│               ├── passive/           # wayback, commoncrawl, urlscan, gau registry + stage runner
+│               ├── Dockerfile         # the gau image, smoke-tested at build time
+│               ├── DESIGN.md          # source/tool research + phased plan
+│               └── output/            # (gitignored) urls.jsonl, endpoints, parameters, reports
 │
 ├── db/                         # PostgreSQL layer
 │   ├── init/001_schema.sql     # schema, auto-runs on a fresh container volume
@@ -65,7 +81,7 @@ Attackbot-Minimal/
 │
 ├── tests/
 │   ├── conftest.py             # makes the repo root importable for pytest
-│   ├── recon/                  # hermetic suite (397 tests) — no Docker, DNS or network
+│   ├── recon/                  # hermetic suite (987 tests) — no Docker, DNS or network
 │   └── scraper/                # live-PostgreSQL scripts; one real pytest test (skips without its fixture)
 │
 ├── docs/                       # see docs/README.md for the map
@@ -84,6 +100,9 @@ Attackbot-Minimal/
 | `.../active/pipeline.py` | Active stage only | `python -m ...subdomain_domain_wildcards.active.pipeline -t <target>` |
 | `.../permutation/pipeline.py` | Permutation stage only | `python -m ...subdomain_domain_wildcards.permutation.pipeline -t <target>` |
 | `.../permutation/dnsgen.py` | Candidate generation only (no resolution) | `python -m ...subdomain_domain_wildcards.permutation.dnsgen -t <target>` |
+| `.../port_service_host/pipeline.py` | Ports/services/hosts pipeline (all layers) | `python -m ...port_service_host.pipeline -t <target>` |
+| `.../url_endpoint/main.py` | URL/endpoint pipeline (all stages) | `python -m ...url_endpoint.main -t <target>` |
+| `run_recon.py` | Every pipeline + combined report | `python run_recon.py -t <target>` |
 | `tests/recon/test_repository.py` | Neo4j graph integration test (script, needs a live Neo4j) | `python tests/recon/test_repository.py` |
 
 Every recon CLI supports `--help`, and `--list` where there is something to list

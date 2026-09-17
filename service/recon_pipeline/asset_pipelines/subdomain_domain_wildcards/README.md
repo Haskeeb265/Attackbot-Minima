@@ -184,7 +184,7 @@ and no dependence on whatever happens to sit in `output/`** (which is why they c
 run in CI and why a stale artifact cannot make them pass).
 
 ```bash
-python -m pytest tests/recon -q          # the three stages' suites (397 tests)
+python -m pytest tests/recon -q          # the whole recon suite (972 tests)
 ```
 
 `tests/recon/test_repository.py` is deliberately **not** part of that count: it is

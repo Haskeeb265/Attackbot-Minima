@@ -38,11 +38,12 @@ managed limits.
 fails the run during the program-list fetch; sustained rate limiting means partial
 ingestion with no backoff to absorb it.
 
-### 4. The recon pipeline's results never reach the graph
+### 4. The recon pipelines' results never reach the graph
 
-The asset pipeline (`subdomain_domain_wildcards`) is complete and writes files
-under `output/`, but nothing maps those results into Neo4j. Seed ingestion and the
-end-to-end pipeline stages (S4, S7) are unbuilt.
+Both built asset pipelines (`subdomain_domain_wildcards` and `port_service_host`)
+write files under their `output/` directories, but nothing maps those results into
+Neo4j — no code under `asset_pipelines/` imports the graph layer at all. Seed
+ingestion and the end-to-end pipeline stages (S4, S7) are unbuilt.
 
 **Impact:** the graph layer is exercised only by its own integration script;
 discovered assets are not correlated, scored or queryable. The pipeline's value
@@ -72,8 +73,8 @@ containerised.
 
 ### 6. No CI
 
-No workflow configuration exists, so the 397 hermetic recon tests are never run
-automatically. They are fast (≈3 s) and dependency-light, which makes them the
+No workflow configuration exists, so the 987 hermetic recon tests are never run
+automatically. They are fast (≈10 s) and dependency-light, which makes them the
 cheapest thing to wire into CI first.
 
 ### 7. Config/code drift for planned subsystems
@@ -86,7 +87,7 @@ Config keys that nothing reads invite the assumption that a feature exists.
 ### 8. The Neo4j integration test is not part of the suite
 
 `tests/recon/test_repository.py` needs a live Neo4j, so it is excluded from the
-397 and easy to forget. It is also the only coverage for the multi-label write
+987 and easy to forget. It is also the only coverage for the multi-label write
 contract that every future graph writer must follow.
 
 ### 9. Graph writes are only as idempotent as their label sets
@@ -96,6 +97,31 @@ contract that every future graph writer must follow.
 constraint violation instead of updating. This is by design (documented in
 `graph_crud_contract.md`) but it is a sharp edge for every new writer: typed
 labels must not drift for one identity.
+
+### 9b. A full three-pipeline run takes ~22 minutes, and the names stage is the slow part by design
+
+Measured end to end on `qbsco.net` (2026-09-18), all stages succeeding:
+
+| Pipeline | Time | Note |
+|---|---|---|
+| names (`passive,active,permutation`) | **1 123.6 s** | passive 105.8 s, active 107.0 s, **permutation 910.9 s** |
+| ports (`port_service_host`) | 105.4 s | |
+| URLs (`url_endpoint`) | 94.2 s | commoncrawl unreachable from this host (recorded failed, not empty) |
+
+The permutation stage is not hanging — it is **pacing itself**: 12 539 permuted
+names over 34 resolvers exceeds the stealth DNS budget, so the plan spreads them
+across 26 batches (up to 621 names per resolver, ~11 hourly windows' worth of
+budget). The log says so (`dns plan … [OVER BUDGET]`) and the stage still
+completes. The first `run_recon.py` attempt also left a **zero-byte** log,
+because a piped child block-buffers its stdout until 8 KiB accumulate —
+`run_recon.py` now invokes every stage with `-u`, so a long run streams and an
+interrupted one still leaves a readable log.
+
+**Impact:** an operator who expects "run the recon script" to finish in one
+sitting needs a ~25 min budget, most of it permutation pacing. Run the stages
+individually (each is independently runnable and writes its own `output/`), or
+widen the resolver pool / shrink the permutation wordlist to bring the names
+stage down.
 
 ## Low
 
@@ -134,7 +160,7 @@ true of the current code:
 - **The scraper test suite did not collect** (2026-09-16) —
   `test_hackerone_mapper.py` opened a fixture at import time and aborted `pytest`
   collection for the whole tree. It is now a skipping pytest test; `pytest tests/`
-  runs cleanly (397 passed, 1 skipped).
+  runs cleanly (987 passed, 1 skipped).
 - **`DATABASE_URL` printed to stdout** — `config.py` has no print statement.
 - **Missing per-program transaction boundary** — `ingest_program()` wraps each
   program in `db.atomic(conn)` inside a run-scoped connection, with failures
@@ -153,9 +179,10 @@ true of the current code:
 
 ## Evidence
 
-- `python -m pytest tests/ -q` → `397 passed, 1 skipped`; `pytest tests/scraper --collect-only -q` → 1 collected (skips by design)
+- `python -m pytest tests/ -q` → `987 passed, 1 skipped`; `pytest tests/scraper --collect-only -q` → 1 collected (skips by design)
 - `requirements.txt`, `config.py`, `shared/connectors/*`, `service/scraper/*`
 - `Dockerfile` (0 bytes), `docker/` (empty), `docker-compose.yml`
 - `service/recon_pipeline/graph/*` and `tests/recon/test_repository.py`
 - `service/recon_pipeline/stealth/*` and its README (§4 knobs, §5 measured cost, §6 not-built list)
 - `git ls-files subdomains.txt`, `git check-ignore -v tests/recon/test_qbsco.sh`
+- §9b timings: `run_recon.py -t qbsco.net --skip-subdomain` (ports 105.4 s, URLs 94.2 s, report 376 692 bytes) and a direct full names run `--stages passive,active,permutation` → 1 123.6 s, 4 live hosts, permutation 910.9 s
