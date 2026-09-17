@@ -86,6 +86,23 @@ wildcard is or which names it explains. Every suppressed name is written to
 
 ---
 
+## Stealth and resilience (spec §5.1)
+
+All three stages share one stealth layer at
+[`service/recon_pipeline/stealth/`](../../stealth/README.md): coherent per-host browser
+identities, per-host pacing with jitter and backoff, WAF/challenge detection, persistent
+quarantine (escalating to a passive-only run), and a per-resolver DNS volume budget. The active
+and permutation stages apply it to every resolve, brute force, zone-transfer sequence and HTTP
+probe; the passive stage is unchanged (it never touches the target directly).
+
+It is on by default. `PASSIVE_ONLY=1` refuses all active technique; `ACTIVE_STEALTH=0` reverts to
+the previous unshaped behaviour. Each stage's `output/report.json` carries a `"stealth"` block
+saying which transport actually ran, and what the target did about it.
+
+The design, the measurements behind it (real Chrome JA4 from `httpx -tlsi chrome`, the CLI's
+header-order limitation, the volume thresholds) and the honest limits are all in
+[`stealth/README.md`](../../stealth/README.md).
+
 ## Requirements
 
 - **Docker.** The passive stage pulls upstream images per tool; the active and
@@ -167,7 +184,7 @@ and no dependence on whatever happens to sit in `output/`** (which is why they c
 run in CI and why a stale artifact cannot make them pass).
 
 ```bash
-python -m pytest tests/recon -q          # the three stages' suites (253 tests)
+python -m pytest tests/recon -q          # the three stages' suites (397 tests)
 ```
 
 `tests/recon/test_repository.py` is deliberately **not** part of that count: it is

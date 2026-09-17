@@ -131,15 +131,22 @@ Every candidate node receives a confidence score before it may trigger active re
 
 \[
 \text{FinalScore}(N) = \operatorname{clamp}\Bigg(
-\sum_{s \in \text{Signals}} \big( w_s \cdot d_s(t) \cdot c_s \big)
+\sum_{s \in \text{Signals}} \big( w_s \cdot c_s \big)
 + \sum_{p \in \text{Penalties}} p
 ,\ 0,\ 100\Bigg)
 \]
 
-- \( w_s \) = base weight of signal \( s \)
-- \( d_s(t) = 2^{-(t / h_s)} \) = exponential decay ( \( t \) = age in days, \( h_s \) = half-life in days)
+- \( w_s \) = weight of signal \( s \)
 - \( c_s \) = observation confidence (0.0–1.0)
 - \( p \) = negative penalty values
+
+**Scores do not decay with time.** An observation is worth what it was worth when it was
+made; what changes a node's state is *new evidence*, and staleness is written down as
+*that evidence* rather than assumed from a clock. A name that stops resolving, slides onto
+a parking page, or loses its certificate is demoted by the matching penalty below — a fact
+someone observed, not a number we inferred. This keeps every score reproducible: the same
+graph and the same observations always produce the same answer, with no dependence on when
+the calculation ran.
 
 ### Node State Thresholds
 
@@ -151,17 +158,17 @@ Every candidate node receives a confidence score before it may trigger active re
 
 ### Positive Signals
 
-| Signal | Weight \( w_s \) | Half-life \( h_s \) |
-|--------|------------------|---------------------|
-| Exact subdomain / registrable domain match | 100 | ∞ (no decay) |
-| Current ASN / CIDR ownership | 100 | ∞ (no decay) |
-| Extracted from in-scope binary or source code | 70 | 180 days |
-| Appears in SAN of certificate that also covers seed | 60 | 90 days |
-| Reverse WHOIS exact org / email match | 50 | 120 days |
-| Historical DNS to dedicated (non-CDN) in-scope IP | 45 | 60 days |
-| Strong brand / string proximity in hostname | 40 | 90 days |
-| Shares non-CDN IP with high-confidence asset | 30 | 30 days |
-| Weak naming similarity only | 15 | 45 days |
+| Signal | Weight \( w_s \) |
+|--------|------------------|
+| Exact subdomain / registrable domain match | 100 |
+| Current ASN / CIDR ownership | 100 |
+| Extracted from in-scope binary or source code | 70 |
+| Appears in SAN of certificate that also covers seed | 60 |
+| Reverse WHOIS exact org / email match | 50 |
+| Historical DNS to dedicated (non-CDN) in-scope IP | 45 |
+| Strong brand / string proximity in hostname | 40 |
+| Shares non-CDN IP with high-confidence asset | 30 |
+| Weak naming similarity only | 15 |
 
 Multiple observations of the same signal type take the maximum contribution (they do not stack unboundedly).
 
@@ -183,7 +190,9 @@ Multiple observations of the same signal type take the maximum contribution (the
 - Soft prune: score < 40 → mark Cold, cancel pending active jobs.
 - Optional hard prune: score remains < 20 for > 90 days with no new signals → archive.
 
-Background re-scoring continuously refreshes decay and re-evaluates warm/cold nodes when new evidence arrives.
+Background re-scoring re-evaluates warm/cold nodes when new evidence arrives, and re-checks the
+conditions the penalties describe (does it still resolve, is the certificate still valid, has the
+CNAME started pointing somewhere unclaimed). Age alone never changes a score.
 
 ---
 
@@ -210,13 +219,13 @@ Partitioning is performed by stable hash of node identifier or by seed/organizat
 
 ### Hot Cache (Redis) — Critical Path Support
 - `sig:{node_id}` — node summary (last score, status, etc.)
-- `sigobs:{node_id}:{signal_type}` — individual signal observations (weight, half-life, confidence, observed_at)
+- `sigobs:{node_id}:{signal_type}` — individual signal observations (weight, confidence, observed_at)
 - `seed:hot:{seed_id}` — sorted set of related nodes by score
 - `node:seeds:{node_id}` — set of linked seeds
 - `penalty:{node_id}` — active penalties
 - `bloom:seen:{seed_id}` — ultra-fast membership test
 
-Scoring on the hot path uses pipelined reads + lightweight floating-point decay. A background refresher keeps long-lived `decayed_weight` values honest. New strong signals trigger immediate high-priority re-scoring. Sliding TTLs implement interest-based retention.
+Scoring on the hot path uses pipelined reads + plain weighted arithmetic (no time-dependent terms, so a cached score and a recomputed score always agree). A background refresher re-verifies the conditions behind the penalties — resolution, certificate validity, takeover state — and re-scores when one of them changed. New strong signals trigger immediate high-priority re-scoring. Sliding TTLs implement interest-based retention.
 
 ---
 
@@ -224,12 +233,12 @@ Scoring on the hot path uses pipelined reads + lightweight floating-point decay.
 
 ### Recommended Build Order
 1. Graph schema + basic CRUD and indexing
-2. Scoring engine + Redis hot cache + unit tests for decay/penalties
+2. Scoring engine + Redis hot cache + unit tests for weights/penalties
 3. One complete asset pipeline (Domain or Wildcard recommended) end-to-end
 4. Extraction → candidate → scoring → graph write path
 5. Active dispatcher + simple rate limiting
 6. Additional asset pipelines in priority order (Source Code, CIDR/IP, Mobile, etc.)
-7. Background re-scoring and decay refresher
+7. Background re-scoring and penalty re-verification
 8. Stealth layer (proxies, backoff, fingerprinting)
 9. Observability, dead-letter handling, and operational dashboards
 10. Continuous differential monitoring loops
@@ -247,7 +256,7 @@ Scoring on the hot path uses pipelined reads + lightweight floating-point decay.
 - **ASN → CIDR → PTR → Domain explosion**: Seed an organization ASN, expand prefixes, sweep PTRs, feed discovered hostnames into the Domain pipeline, and verify that previously unknown staging/admin hosts surface with high scores.
 - **Mobile binary → Cloud resource → related infrastructure**: Extract bucket or API hostnames from an APK/IPA, confirm they receive high provenance weight, and observe automatic activation and further enumeration.
 - **Certificate SAN co-occurrence**: A new certificate containing both a known seed domain and an unknown hostname should rapidly promote the unknown hostname via the +60 SAN signal.
-- **Decay & penalty behavior**: Inject a historically linked domain that later becomes a parking page or NXDOMAIN and verify it is demoted and removed from active queues.
+- **Penalty behavior**: Inject a historically linked domain that later becomes a parking page or NXDOMAIN and verify it is demoted and removed from active queues — and that an *unchanged* observation, however old, is not demoted merely for being old.
 
 These scenarios serve both as acceptance tests and as educational walk-throughs of the recursive correlation engine.
 

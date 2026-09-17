@@ -1,6 +1,6 @@
 # Recon Pipeline v2 — Maximizing Attack Surface (Scope-Bound)
 
-**Base:** [`recon_flow.md`](recon_flow.md) (Attackbot_v2, S0–S14 — the v1 diagrams carry a per-component `Status` column; almost everything in both sets is unbuilt)
+**Base:** [`recon_flow.md`](recon_flow.md) (Attackbot_v2, S0–S14 — the v1 diagrams carry a per-component `Status` column; the stealth layer, S12, is partially built in direct mode — see [`../../service/recon_pipeline/stealth/README.md`](../../service/recon_pipeline/stealth/README.md) — and almost everything else in both sets is unbuilt)
 
 > **Status: intent, not inventory.** The Scope Engine and every v2 source in these
 > diagrams are unbuilt. `pipeline/scope.py` and the other module names here are

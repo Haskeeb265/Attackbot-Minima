@@ -25,8 +25,12 @@ Environment overrides
 ``ACTIVE_AXFR``                        ``0`` disables zone-transfer attempts
 ``ACTIVE_AXFR_MAX_NAMESERVERS``        nameservers tried per zone (6)
 ``ACTIVE_HTTP``                        ``1`` enables the opt-in HTTP probe
-``ACTIVE_HTTP_RATE_LIMIT``             requests/second for the HTTP probe (100)
-``ACTIVE_HTTP_THREADS``                concurrency for the HTTP probe (50)
+``ACTIVE_HTTP_RATE_LIMIT``             requests/second for the HTTP probe (2)
+``ACTIVE_HTTP_THREADS``                concurrency for the HTTP probe (5)
+``ACTIVE_STEALTH``                     ``0`` disables the stealth layer (1)
+``ACTIVE_HTTP_IMPERSONATE``            ``0`` stops TLS impersonation (1)
+``ACTIVE_SHUFFLE_CANDIDATES``          ``0`` keeps candidate order (1)
+``ACTIVE_AXFR_SPACING``                seconds between AXFR attempts (5)
 ``ACTIVE_RESOLVER_QUERY_TIMEOUT``      seconds per resolver validation query (3)
 ``ACTIVE_RESOLVER_WORKERS``            parallel resolver probes (16)
 ``ACTIVE_RESOLVER_MIN_VALID``          abort threshold (3 valid resolvers)
@@ -41,6 +45,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from ....stealth import settings as stealth_settings
 from ..env import env_flag, env_int
 
 # Reused verbatim: the active stage must apply the *same* wildcard definition the
@@ -144,8 +149,43 @@ PUREDNS_RATE_LIMIT = env_int("ACTIVE_PUREDNS_RATE_LIMIT", 0)
 #: HTTP probing is off by default: it is the one step that sends application
 #: traffic to the target's hosts rather than DNS queries. See the README.
 HTTP_ENABLED = env_flag("ACTIVE_HTTP", False)
-HTTP_RATE_LIMIT = env_int("ACTIVE_HTTP_RATE_LIMIT", 100)
-HTTP_THREADS = env_int("ACTIVE_HTTP_THREADS", 50)
+
+#: Requests/second for the whole HTTP probe.  The default follows the shared
+#: stealth pacing (2/s) rather than httpx's own default of 150/s: a person
+#: browsing a site issues a handful of requests per page load, and a burst rate
+#: is one of the few signals a target can measure without any fingerprinting.
+HTTP_RATE_LIMIT = env_int("ACTIVE_HTTP_RATE_LIMIT", max(1, int(stealth_settings.HOST_QPS)))
+
+#: Concurrency.  Kept low on purpose: the rate limit is what matters, and a deep
+#: queue of parallel connections looks nothing like a browser.
+HTTP_THREADS = env_int("ACTIVE_HTTP_THREADS", 5)
+
+# --------------------------------------------------------------------------- #
+# Stealth (spec §5.1) — see ``service/recon_pipeline/stealth/``
+# --------------------------------------------------------------------------- #
+
+#: The stealth layer (identity, pacing, detection, quarantine, DNS budget) is on
+#: by default; ``0`` falls back to the previous unshaped behaviour.
+STEALTH_ENABLED = env_flag("ACTIVE_STEALTH", True)
+
+#: Ask the HTTP probe to impersonate this identity's TLS ClientHello
+#: (``httpx -tlsi``).  Verified to produce the real Chrome JA4.
+HTTP_IMPERSONATE = env_flag("ACTIVE_HTTP_IMPERSONATE", True)
+
+#: Shuffle candidate order before resolving, so the order does not advertise the
+#: wordlist/source layout and load spreads across resolvers.
+SHUFFLE_CANDIDATES = env_flag("ACTIVE_SHUFFLE_CANDIDATES", True)
+
+#: Seconds between zone-transfer attempts.  AXFR is one query per nameserver, so
+#: a handful of nameservers fired back-to-back look like a scanner sweep.
+AXFR_SPACING = float(env_int("ACTIVE_AXFR_SPACING", 5))
+
+#: Where quarantine state persists, so a cooldown triggered in one stage (or run)
+#: is respected by the next.  ``STEALTH_QUARANTINE_FILE`` overrides this.
+QUARANTINE_FILE = stealth_settings.QUARANTINE_FILE or (OUTPUT_DIR / "quarantine.json")
+
+#: Hard operator override (shared with the stealth layer).
+PASSIVE_ONLY = stealth_settings.PASSIVE_ONLY
 
 #: The all-in-one image built from the stage's Dockerfile.  Unlike the passive
 #: stage (which pulls upstream images), the active tools are only co-packaged

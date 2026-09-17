@@ -303,6 +303,40 @@ completed, exit 0.
 
 ---
 
+## Why the passive stage does not recurse
+
+The ASM spec's recursion engine ("new findings become new seeds until nothing
+new comes out") applies to **active** discovery, where candidate generation is
+level-by-level (bruteforce and permutation expand one apex into candidates,
+then their results into more candidates). Passive sources are a different
+shape, and the difference is verifiable:
+
+- **One query, whole subtree.** `crt.sh` is queried with `q=%.apex` — the `%`
+  suffix wildcard matches every label depth at once. Wayback uses
+  `matchType=domain`, which the CDX API defines as "this domain and all
+  subdomains". The Docker tools (subfinder, assetfinder, findomain, chaos,
+  amass) likewise take one `-d <apex>` and return whatever their datasets hold
+  beneath it. Measured on `tesla.com`: the single-pass passive output contains
+  depth-6 names (e.g. `account.apf-api.prd.vn.cloud.tesla.com`) whose
+  intermediate parents were never enumerated.
+- **Re-seeding finds nothing new — measured.** Feeding the deepest
+  "orphan" names from a real run back into crt.sh and Wayback with the same
+  query shapes returned **0 names outside the apex result set**. Their
+  subtrees were already covered; a passive recursion loop would only re-query
+  subsets of a set we already hold, at API rate-limit cost.
+- **Where recursion does live:** the active stage recurses over
+  resolved-host-derived parents (`active/README.md`), and the spec's
+  cross-source, score-gated loop is a graph-layer concern (spec §5.2, S10),
+  not a stage concern.
+
+The sources query shapes are pinned by tests (`test_crtsh_query_is_subtree_wide`,
+`test_wayback_query_is_subtree_wide`,
+`test_every_source_takes_exactly_one_seed_domain`) so a future "optimisation"
+that narrows a query to a single host fails loudly instead of silently costing
+the stage its depth coverage.
+
+---
+
 ## amass notes
 
 `amass.py` mounts `config/` read-only at `/home/user/.config/amass` inside the

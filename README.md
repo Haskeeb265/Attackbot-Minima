@@ -28,12 +28,17 @@ Be aware that the plan documents describe much more than what exists:
 - Recon asset pipeline, `subdomain_domain_wildcards`, **complete**: passive
   enumeration, active resolution/bruteforce/recursion/zone-transfers, and
   permutation — each independently runnable with its own report.
+- Stealth & resilience layer (`service/recon_pipeline/stealth/`), wired into every
+  active step: coherent per-host browser identities, pacing with jitter/backoff,
+  WAF + challenge detection, persistent quarantine with a passive-only fallback,
+  a per-resolver DNS volume budget, and transports with an honest capability
+  report. Direct mode only — no proxy pools yet.
 
 **Planned, not built**
 
 - Scoring engine, seed ingestion into the graph, Redis queues/hot cache, the
-  active dispatcher and recursion gate, stealth/transport layer, LLM
-  classification, observability (plan stages S2, S4, S8–S14).
+  active dispatcher and recursion gate, LLM classification, observability (plan
+  stages S2, S4, S8–S11, S13–S14).
 - Everything in the v2 extension (S15–S26): Scope Engine, ASN/WHOIS pivots,
   fingerprint clustering, code dorking, cloud/mobile sources, takeover detection.
 - The recon asset pipeline is **not yet wired into the Neo4j graph** — its results
@@ -54,6 +59,7 @@ carries an implementation-status section:
 | `db/` | PostgreSQL schema, mapper, persistence, repos, Alembic migrations |
 | `service/scraper/` | HackerOne ingestion |
 | `service/recon_pipeline/graph/` | Neo4j schema + CRUD repository |
+| `service/recon_pipeline/stealth/` | spec §5.1 stealth layer — identity, pacing, detection, quarantine, DNS budget, transports |
 | `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/` | the passive + active + permutation pipeline |
 | `shared/` | DB pool, color logging, API connectors |
 | `tests/` | `recon/` (hermetic pytest suite) · `scraper/` (live-DB scripts) |
@@ -126,7 +132,7 @@ Raw per-tool Docker commands (and the resolver warning that matters) are in
 ## Tests
 
 ```bash
-python -m pytest tests/recon -q      # 253 hermetic tests: no Docker, no DNS, no network
+python -m pytest tests/recon -q      # 397 hermetic tests: no Docker, no DNS, no network
 ```
 
 The recon suite is the project's real test suite: it runs anywhere and covers every

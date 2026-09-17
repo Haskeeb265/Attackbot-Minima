@@ -24,6 +24,9 @@ from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.to
 from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive.normalize import (
     ForeignDomainError,
 )
+from service.recon_pipeline.stealth.dns_budget import DnsBudget
+from service.recon_pipeline.stealth.pacing import FakeClock
+from service.recon_pipeline.stealth.session import StealthConfig, StealthSession
 
 APEX = "example.com"
 
@@ -35,6 +38,26 @@ def healthy_query(query_factory):
 
 
 RESOLVERS = ["192.0.2.1", "192.0.2.2", "192.0.2.3"]
+
+
+def fast_stealth_session(tmp_path: Path) -> StealthSession:
+    """A stealth session with an injected clock and no inter-batch waiting.
+
+    The stealth layer is on by default in the stage, and its DNS pauses are real
+    waits.  Tests own the clock, the same convention the stage's other timing
+    tests use, so a "15-second" run is instant and quarantine state stays inside
+    the test's temp directory.
+    """
+    return StealthSession(
+        StealthConfig(
+            qps=1000.0,
+            burst=1000.0,
+            jitter=0.0,
+            quarantine_path=tmp_path / "quarantine.json",
+            dns_budget=DnsBudget(batch_size=100_000, batch_spacing=0.0, jitter=0.0),
+        ),
+        clock=FakeClock(),
+    )
 
 
 def run(tmp_path: Path, **kwargs):
@@ -54,6 +77,7 @@ def run(tmp_path: Path, **kwargs):
         resolvers=RESOLVERS,
         trusted_resolvers=[],
         output_dir=tmp_path,
+        session=fast_stealth_session(tmp_path),
     )
     options.update(kwargs)
     return pipeline.run_active_stage(APEX, **options)
@@ -344,6 +368,43 @@ def test_too_few_resolvers_aborts(tmp_path: Path, query_factory, fake_engine):
     assert not report.ok
     assert "working resolver" in (report.fatal or "")
     assert (tmp_path / pipeline.REPORT_FILE).exists()
+
+
+def test_enrichment_always_includes_the_apex_and_the_dmarc_name(
+    tmp_path: Path, healthy_query, fake_engine, monkeypatch
+):
+    """Mail policy (MX/SPF/DMARC) lives on the apex, so the apex and
+    ``_dmarc.<apex>`` are enriched even when no live host is found.
+
+    Measured miss (qbsco.net, 2026-09-17): MX/TXT were only queried for four
+    subdomains that had none, while the M365 MX records answering for the apex
+    were never asked for.
+    """
+    captured: dict[str, list[str]] = {}
+
+    def fake_enrich(hosts, *, output_dir, timeout, **_kwargs):
+        captured["hosts"] = list(hosts)
+        from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.enrich import (
+            EnrichResult,
+        )
+
+        return EnrichResult(hosts=len(list(hosts)))
+
+    monkeypatch.setattr(pipeline.enrich_mod, "enrich_records", fake_enrich)
+
+    # No live host at all: the apex enrichment must happen regardless.
+    report = run(
+        tmp_path,
+        engine=fake_engine().as_engine(),
+        query=healthy_query,
+        passive_subs=None,
+        candidate_files=[],
+        from_passive=False,
+        enrich=True,
+    )
+
+    assert report.ok
+    assert captured["hosts"] == [APEX, f"_dmarc.{APEX}"]
 
 
 def test_engine_failure_is_reported(tmp_path: Path, healthy_query, fake_engine):

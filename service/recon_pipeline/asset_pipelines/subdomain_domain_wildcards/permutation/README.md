@@ -227,6 +227,23 @@ rather than picking one.
 
 ---
 
+## Stealth & resilience (spec §5.1)
+
+Permutations are generated names resolved by brute force — the most clearly *enumerating*
+traffic this stage produces — so it runs under the same shared stealth layer as the active stage
+([`service/recon_pipeline/stealth/`](../../../stealth/README.md)):
+
+* `PASSIVE_ONLY=1` (or a WAF quarantine left behind by an earlier run) **refuses to resolve
+  permutations at all**, rather than resolving them and reporting an abort.
+* Candidates are resolved in **budget-sized batches** with a jittered pause, so no single
+  resolver sees more unique names than the volume budget allows; the plan is recorded in
+  `output/report.json` under `"stealth"`.
+* The resolver tools are rate-limited from that same budget unless overridden.
+
+The batch size and spacing are the wall-clock levers: `STEALTH_DNS_BATCH_SIZE` (500) and
+`STEALTH_DNS_BATCH_SPACING` (20s). Set them lower for a quieter run and a longer one; set
+`ACTIVE_STEALTH=0` to use the pre-stealth behaviour.
+
 ## Settings
 
 | Variable | Default | Effect |

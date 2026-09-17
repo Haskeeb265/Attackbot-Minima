@@ -29,11 +29,14 @@ Three implementation notes:
 from __future__ import annotations
 
 import logging
+import random
 import re
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ....stealth.pacing import jittered
 from ..passive.docker_tool import ContainerRun
 from ..passive.normalize import canonicalize_host, is_subdomain_of
 from .settings import (
@@ -222,6 +225,8 @@ def zone_transfer(
     max_nameservers: int = AXFR_MAX_NAMESERVERS,
     timeout: float = DEFAULT_SOURCE_TIMEOUT,
     runner: Callable[..., ContainerRun] = run_tool,
+    spacing: float = 0.0,
+    sleep: Callable[[float], None] | None = None,
 ) -> list[ZoneTransfer]:
     """Attempt AXFR against every (bounded) nameserver for *apex*.
 
@@ -231,6 +236,11 @@ def zone_transfer(
         Explicit list; discovered via *discover* when omitted.
     discover:
         Injected NS lookup, so the pass is testable without DNS.
+    spacing / sleep:
+        Jittered pause between attempts.  A zone has a handful of nameservers,
+        and firing them back-to-back is a sweep pattern with no upside — the
+        queries are cheap, the *sequence* is what is loud.  ``sleep`` is injected
+        so tests and the stealth layer's fake clock stay in control of time.
     """
     candidates = list(nameservers) if nameservers is not None else list(discover(apex))
     safe = [name for name in (safe_nameserver(c) for c in candidates) if name]
@@ -241,12 +251,19 @@ def zone_transfer(
         return []
 
     log.info("attempting AXFR against %d nameserver(s): %s", len(bounded), ", ".join(bounded))
-    return [
-        attempt_transfer(
-            apex, nameserver, output_dir=output_dir, timeout=timeout, runner=runner
+    transfers: list[ZoneTransfer] = []
+    for index, nameserver in enumerate(bounded):
+        if index and spacing > 0:
+            # Jittered so the gap is not a fixed interval, which is itself a
+            # machine signature.
+            delay = jittered(spacing, 0.35, random.random())
+            (sleep or time.sleep)(delay)
+        transfers.append(
+            attempt_transfer(
+                apex, nameserver, output_dir=output_dir, timeout=timeout, runner=runner
+            )
         )
-        for nameserver in bounded
-    ]
+    return transfers
 
 
 def transfer_hosts(transfers: Iterable[ZoneTransfer]) -> set[str]:

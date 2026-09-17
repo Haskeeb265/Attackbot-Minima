@@ -45,7 +45,7 @@ import json
 import logging
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,9 +53,11 @@ import shared.colorlog as colorlog
 
 from service.recon_pipeline.asset_pipelines.config import TARGET
 
+from ....stealth.session import StealthConfig, StealthSession
 from ..active import resolvers as resolver_mod
 from ..active.resolve import DEFAULT_ENGINE, ENGINES, Engine, ResolveContext, get_engine
 from ..active.resolvers import Query, dnspython_query
+from ..active.settings import PASSIVE_ONLY, PUREDNS_RATE_LIMIT, QUARANTINE_FILE, STEALTH_ENABLED
 from ..active.tools import ToolImageMissingError, ensure_image
 from ..passive.normalize import canonicalize_host, normalize_host_list
 from ..passive.wildcard import Resolver, detect_wildcards, filter_wildcard_noise
@@ -108,6 +110,9 @@ class PermutationReport:
     counts: dict[str, int] = field(default_factory=dict)
     wildcards: list[str] = field(default_factory=list)
     suppressed: dict[str, str] = field(default_factory=dict)
+    #: Stealth layer state (transport, identities, pacing, DNS budget, quarantine).
+    #: Permutations are DNS-only work, so the DNS budget is what matters here.
+    stealth: dict[str, object] = field(default_factory=dict)
     outputs: dict[str, str] = field(default_factory=dict)
 
     def to_json(self) -> str:
@@ -208,6 +213,8 @@ def run_permutation_stage(
     output_dir: Path | str = OUTPUT_DIR,
     query: Query = dnspython_query,
     resolver: Resolver | None = None,
+    stealth: bool = STEALTH_ENABLED,
+    session: StealthSession | None = None,
 ) -> PermutationReport:
     """Generate, resolve and filter permutations of *target*'s known hosts.
 
@@ -257,6 +264,9 @@ def run_permutation_stage(
     def finish() -> PermutationReport:
         report.finished_at = _utc_now()
         report.seconds = time.monotonic() - started
+        if session is not None:
+            report.stealth = session.to_dict()
+            session.save()
         report.outputs["report"] = _write_json(output_dir / REPORT_FILE, report).as_posix()
         _log_summary(report)
         return report
@@ -267,7 +277,23 @@ def run_permutation_stage(
         report.fatal = message
         return finish()
 
-    # 1. Both the generator and the engine run out of the stage image.
+    # 1. Stealth layer first: permutations are generated names resolved by brute
+    #    force, i.e. the most clearly "enumerating" traffic this stage produces,
+    #    so the passive-only gate and the DNS budget apply before anything runs.
+    if session is None and stealth:
+        session = StealthSession(
+            StealthConfig.from_settings(
+                quarantine_path=QUARANTINE_FILE,
+                passive_only=PASSIVE_ONLY,
+            )
+        )
+    if session is not None and session.passive_only:
+        return abort(
+            "passive-only mode is active (PASSIVE_ONLY, or a WAF quarantine carried over): "
+            "refusing to resolve permutations"
+        )
+
+    # 2. Both the generator and the engine run out of the stage image.
     if engine_obj.name in ENGINES or generator_obj.name in DOCKER_GENERATORS:
         try:
             ensure_image()
@@ -276,7 +302,7 @@ def run_permutation_stage(
         except Exception as exc:
             return abort(f"Docker is not available: {exc}")
 
-    # 2. Resolver pool: reuse the active stage's validated pool when possible.
+    # 3. Resolver pool: reuse the active stage's validated pool when possible.
     pool, reused = _prepare_resolvers(
         output_dir=output_dir,
         reuse=reuse_resolvers,
@@ -326,21 +352,40 @@ def run_permutation_stage(
     _write_lines(output_dir / CANDIDATES_FILE, generation.candidates)
     report.outputs[CANDIDATES_FILE] = (output_dir / CANDIDATES_FILE).as_posix()
 
-    # 5. Resolve them with the active stage's engine.
+    # 5. Resolve them with the active stage's engine, in shuffled, budget-sized
+    #    batches when the stealth layer is active (see the active stage's
+    #    ``resolve_all``: the budget is a name *count* per resolver, so it is
+    #    enforced by batching, not by slowing one blast down).
     context = ResolveContext(
         apex=apex,
         output_dir=output_dir,
         resolvers=pool.valid,
         trusted=pool.trusted,
         timeout=timeout,
+        rate_limit=PUREDNS_RATE_LIMIT or (session.dns_rate_limit(resolver_count=len(pool.valid)) if session else 0),
     )
     resolved: set[str] = set()
     if generation.candidates:
-        verdict = engine_obj.resolve(generation.candidates, context)
-        report.steps.append(dict(verdict.to_dict(), step="resolve"))
-        if not verdict.ok:
-            report.ok = False
-        resolved = verdict.resolved
+        if session is None:
+            verdict = engine_obj.resolve(generation.candidates, context)
+            report.steps.append(dict(verdict.to_dict(), step="resolve"))
+            if not verdict.ok:
+                report.ok = False
+            resolved = verdict.resolved
+        else:
+            plan = session.plan_dns(list(generation.candidates), pool.valid, seed=apex)
+            single = len(plan.batches) <= 1
+            for batch in plan.batches:
+                if batch.index:
+                    session.pause_between_batches(batch.index)
+                batch_context = context if single else replace(context, label=f"batch-{batch.index + 1}")
+                verdict = engine_obj.resolve(list(batch.labels), batch_context)
+                report.steps.append(
+                    dict(verdict.to_dict(), step="resolve" if single else f"resolve-{batch.index + 1}")
+                )
+                if not verdict.ok:
+                    report.ok = False
+                resolved |= verdict.resolved
 
     # 6. Wildcard filter — applied only to the *generated* names.  A known host
     #    was established by an earlier stage and must not be re-argued here.

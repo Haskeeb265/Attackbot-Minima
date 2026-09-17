@@ -7,28 +7,8 @@ without checking.
 
 ## Blocking
 
-### 1. The scraper test suite does not collect
-
-`python -m pytest tests/scraper --collect-only` → **1 error**, and because
-pytest aborts the whole collection on an import error, `pytest tests/` (or a bare
-`pytest`) runs **nothing**:
-
-```
-ERROR tests/scraper/test_hackerone_mapper.py - FileNotFoundError:
-      [Errno 2] No such file or directory: 'test_detail_output.json'
-```
-
-`test_hackerone_mapper.py` reads a fixture file that is not in the repository
-(it appears to have been deleted; the file is not tracked and not on disk). The
-other three files in that directory are script-style and collect as zero tests.
-
-**Impact:** the repo has no working default test command — every suite must be
-invoked by path (`pytest tests/recon`). Anyone who runs `pytest` sees a
-collection failure.
-
-**Fix options:** inline a small fixture (or a `conftest.py` fixture) for the
-mapper test, or mark it `pytest.importorskip`-style skip when its fixture is
-absent.
+*(none — the collection-blocking scraper test was fixed on 2026-09-16; see
+"Resolved" at the bottom)*
 
 ### 2. Dependencies are not declared
 
@@ -68,6 +48,20 @@ end-to-end pipeline stages (S4, S7) are unbuilt.
 discovered assets are not correlated, scored or queryable. The pipeline's value
 is currently per-run files.
 
+### 4b. The stealth layer is direct-mode only
+
+`service/recon_pipeline/stealth/` shapes traffic, detects blocks and quarantines,
+but every request leaves from this host's IP. **No proxy pools** (the spec's D4
+defers them deliberately), no CAPTCHA solving, and quarantine state is a JSON
+file rather than shared Redis-backed state. `curl_cffi` is supported but **not
+installed** in this tree, so the run report honestly says
+`tls_impersonation: false` and TLS impersonation only happens through the httpx
+CLI (`-tlsi`) path.
+
+**Impact:** a target that blocks by IP will exhaust the single exit node. The
+capability report in each run's `report.json` is the place to check what actually
+ran.
+
 ## Medium
 
 ### 5. `docker/` is empty and the root `Dockerfile` is 0 bytes
@@ -78,7 +72,7 @@ containerised.
 
 ### 6. No CI
 
-No workflow configuration exists, so the 253 hermetic recon tests are never run
+No workflow configuration exists, so the 397 hermetic recon tests are never run
 automatically. They are fast (≈3 s) and dependency-light, which makes them the
 cheapest thing to wire into CI first.
 
@@ -92,7 +86,7 @@ Config keys that nothing reads invite the assumption that a feature exists.
 ### 8. The Neo4j integration test is not part of the suite
 
 `tests/recon/test_repository.py` needs a live Neo4j, so it is excluded from the
-253 and easy to forget. It is also the only coverage for the multi-label write
+397 and easy to forget. It is also the only coverage for the multi-label write
 contract that every future graph writer must follow.
 
 ### 9. Graph writes are only as idempotent as their label sets
@@ -137,6 +131,10 @@ themselves (`MSYS_NO_PATHCONV=1`); ad-hoc Docker commands need it set manually.
 These appeared in earlier revisions of this document and are fixed or were never
 true of the current code:
 
+- **The scraper test suite did not collect** (2026-09-16) —
+  `test_hackerone_mapper.py` opened a fixture at import time and aborted `pytest`
+  collection for the whole tree. It is now a skipping pytest test; `pytest tests/`
+  runs cleanly (397 passed, 1 skipped).
 - **`DATABASE_URL` printed to stdout** — `config.py` has no print statement.
 - **Missing per-program transaction boundary** — `ingest_program()` wraps each
   program in `db.atomic(conn)` inside a run-scoped connection, with failures
@@ -155,8 +153,9 @@ true of the current code:
 
 ## Evidence
 
-- `python -m pytest tests/scraper --collect-only -q` (error 1), `pytest tests/recon` (253 passed)
+- `python -m pytest tests/ -q` → `397 passed, 1 skipped`; `pytest tests/scraper --collect-only -q` → 1 collected (skips by design)
 - `requirements.txt`, `config.py`, `shared/connectors/*`, `service/scraper/*`
 - `Dockerfile` (0 bytes), `docker/` (empty), `docker-compose.yml`
 - `service/recon_pipeline/graph/*` and `tests/recon/test_repository.py`
+- `service/recon_pipeline/stealth/*` and its README (§4 knobs, §5 measured cost, §6 not-built list)
 - `git ls-files subdomains.txt`, `git check-ignore -v tests/recon/test_qbsco.sh`

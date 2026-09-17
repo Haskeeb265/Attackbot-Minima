@@ -32,6 +32,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ....stealth import detect as stealth_detect
+from ....stealth.session import StealthSession
 from ..passive.docker_tool import ContainerRun, DockerTimeoutError, DockerUnavailableError
 from .resolve import write_list_file
 from .tools import (
@@ -126,10 +128,14 @@ class EnrichResult:
 def parse_dnsx_jsonl(text: str) -> dict[str, RecordSet]:
     """Parse dnsx JSONL into per-host record sets.
 
-    Entries with no records (NXDOMAIN, or only an empty ``axfr`` stub) are
-    dropped: a host that no longer resolves is not something this stage should
-    report as a finding.  Malformed lines are skipped individually rather than
-    failing the parse — one bad line should not cost the whole enrichment pass.
+    A host that answered with no records (NXDOMAIN, or an empty ``axfr`` stub) is
+    **kept** with an empty record set rather than dropped, because "we asked and
+    the answer was nothing" is a fact the report needs: it is what
+    :attr:`EnrichResult.with_records` counts against :attr:`EnrichResult.hosts`,
+    and what keeps a fully-dead host list from looking like a resolved one.
+
+    Malformed lines are skipped individually rather than failing the parse — one
+    bad line should not cost the whole enrichment pass.
     """
     records: dict[str, RecordSet] = {}
     for line in text.splitlines():
@@ -259,10 +265,20 @@ class HttpProbe:
     cname: tuple[str, ...] = ()
     url: str = ""
 
+    #: Response headers, as httpx reports them (underscored, lowercased names
+    #: such as ``cf_ray``).  Needed because a WAF/challenge is often only
+    #: visible in the headers, and because the probe is the stage's only step
+    #: that can observe a block at all.
+    headers: dict[str, str] = field(default_factory=dict)
+    #: The stealth verdict for this response (``ok``/``challenge``/...).
+    verdict: "stealth_detect.Verdict | None" = None
+
     def summary(self) -> str:
         parts = [self.host, str(self.status_code or ""), self.title]
         if self.technologies:
             parts.append(f"[{','.join(self.technologies)}]")
+        if self.verdict is not None and self.verdict.waf:
+            parts.append(f"({self.verdict.waf})")
         return "\t".join(part for part in parts if part)
 
     def to_dict(self) -> dict[str, object]:
@@ -273,6 +289,8 @@ class HttpProbe:
             payload["technologies"] = list(self.technologies)
         if self.cname:
             payload["cname"] = list(self.cname)
+        if self.verdict is not None and not self.verdict.is_ok:
+            payload["verdict"] = self.verdict.to_dict()
         return payload
 
 
@@ -287,6 +305,9 @@ class HttpResult:
     error: str | None = None
     outputs: dict[str, str] = field(default_factory=dict)
 
+    #: Hosts left out because the stealth layer had already quarantined them.
+    skipped: list[str] = field(default_factory=list)
+
     @property
     def live(self) -> int:
         return sum(1 for probe in self.probes if probe.status_code)
@@ -298,6 +319,21 @@ class HttpResult:
             counts[key] = counts.get(key, 0) + 1
         return dict(sorted(counts.items()))
 
+    @property
+    def blocked(self) -> list[str]:
+        """Hosts whose answer was a challenge or an outright block."""
+        return sorted(
+            probe.host for probe in self.probes if probe.verdict is not None and probe.verdict.is_block
+        )
+
+    def waf_breakdown(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for probe in self.probes:
+            name = probe.verdict.waf if probe.verdict is not None else None
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+        return dict(sorted(counts.items()))
+
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "hosts": self.hosts,
@@ -306,6 +342,13 @@ class HttpResult:
             "ok": self.ok,
             "seconds": round(self.seconds, 2),
         }
+        if self.blocked:
+            payload["blocked"] = self.blocked
+        wafs = self.waf_breakdown()
+        if wafs:
+            payload["waf"] = wafs
+        if self.skipped:
+            payload["skipped_quarantined"] = self.skipped
         if self.error:
             payload["error"] = self.error
         if self.outputs:
@@ -341,9 +384,28 @@ def parse_httpx_jsonl(text: str) -> list[HttpProbe]:
                 technologies=tuple(str(item) for item in technologies) if isinstance(technologies, list) else (),
                 cname=tuple(str(item) for item in cname) if isinstance(cname, list) else (),
                 url=str(payload.get("url") or ""),
+                headers=normalize_response_headers(payload.get("header")),
             )
         )
     return probes
+
+
+def normalize_response_headers(raw: object) -> dict[str, str]:
+    """Normalise httpx's header map into the conventional HTTP spelling.
+
+    ``httpx -irh`` emits header names underscored and lowercased (``cf_ray``,
+    ``content_type``) because they have to survive as JSON keys.  Detection
+    signatures are written the way the header appears on the wire
+    (``cf-ray``), so the name is converted here, once, instead of teaching every
+    signature about httpx's JSON conventions.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(name).lower().replace("_", "-"): str(value)
+        for name, value in raw.items()
+        if str(name).strip() and value is not None
+    }
 
 
 def probe_http(
@@ -353,20 +415,60 @@ def probe_http(
     timeout: float,
     rate_limit: int,
     threads: int,
+    session: StealthSession | None = None,
+    impersonate: bool = True,
 ) -> HttpResult:
-    """Probe *hosts* over HTTP(S) with httpx.  Sends application traffic."""
+    """Probe *hosts* over HTTP(S) with httpx.  Sends application traffic.
+
+    When *session* is supplied:
+
+    * hosts the stealth layer has already quarantined are **not probed at all**
+      (there is no point, and re-asking is what turns a soft block into a hard
+      one);
+    * every host is probed with its own stable identity;
+    * each response is classified, so a challenge or WAF block discovered here is
+      recorded and slows/ stops the work that follows.
+    """
     names = list(dict.fromkeys(hosts))
+    skipped: list[str] = []
+    if session is not None:
+        allowed = [name for name in names if session.is_allowed(name)]
+        skipped = [name for name in names if name not in set(allowed)]
+        if skipped:
+            log.warning(
+                "HTTP probe: skipping %d quarantined host(s): %s",
+                len(skipped),
+                ", ".join(skipped[:5]),
+            )
+        names = allowed
     if not names:
-        return HttpResult()
+        return HttpResult(hosts=0, skipped=skipped)
 
     output_dir = Path(output_dir)
     write_list_file(output_dir / HTTPX_INPUT, names)
 
+    # One identity for the whole batch is impossible with a single CLI call — the
+    # CLI takes one header set — so the *most common* identity is used for the
+    # batch and the per-host assignment is recorded in the report.  Hosts are
+    # probed once, in bulk, which is the pass where a per-host identity is least
+    # observable; the paced Python transport (which does honour per-host
+    # identities) is the follow-up path.
+    identity = None
+    if session is not None:
+        by_name: dict[str, object] = {}
+        counts: dict[str, int] = {}
+        for name in names:
+            profile = session.identity_for(name)
+            by_name.setdefault(profile.name, profile)
+            counts[profile.name] = counts.get(profile.name, 0) + 1
+        identity = by_name[max(by_name, key=lambda key: counts[key])]
+
     log.warning(
         "HTTP probe enabled: httpx will send %d request(s) to the target's hosts "
-        "(rate limit %d/s) - this is application traffic, not DNS",
+        "(rate limit %d/s, identity %s) - this is application traffic, not DNS",
         len(names),
         rate_limit,
+        identity.name if identity else "default",
     )
 
     started = time.monotonic()
@@ -377,6 +479,9 @@ def probe_http(
                 input_path=f"{WORKDIR}/{HTTPX_INPUT}",
                 rate_limit=rate_limit,
                 threads=threads,
+                identity=identity,
+                impersonate=impersonate,
+                max_host_errors=session.httpx_max_host_errors() if session else None,
             ),
             output_dir=output_dir,
             timeout=timeout,
@@ -386,13 +491,19 @@ def probe_http(
         )
     except (DockerTimeoutError, DockerUnavailableError) as exc:
         log.error("HTTP probe failed: %s", exc)
-        return HttpResult(hosts=len(names), ok=False, seconds=time.monotonic() - started, error=str(exc))
+        return HttpResult(
+            hosts=len(names),
+            ok=False,
+            skipped=skipped,
+            seconds=time.monotonic() - started,
+            error=str(exc),
+        )
 
     elapsed = time.monotonic() - started
     if not run.ok:
         reason = last_error(run)
         log.error("HTTP probe failed: %s", reason)
-        return HttpResult(hosts=len(names), ok=False, seconds=elapsed, error=reason)
+        return HttpResult(hosts=len(names), ok=False, skipped=skipped, seconds=elapsed, error=reason)
 
     try:
         text = (output_dir / HTTPX_OUTPUT).read_text(encoding="utf-8", errors="replace")
@@ -400,10 +511,29 @@ def probe_http(
         text = ""
 
     probes = parse_httpx_jsonl(text)
+
+    if session is not None:
+        for probe in probes:
+            probe.verdict = session.record_probe(
+                probe.host,
+                status=probe.status_code,
+                headers=probe.headers,
+                body=probe.title,  # the title is enough for the strong markers
+            )
+
+    blocked = [probe.host for probe in probes if probe.verdict is not None and probe.verdict.is_block]
+    if blocked:
+        log.warning(
+            "HTTP probe: %d host(s) answered with a challenge/block: %s",
+            len(blocked),
+            ", ".join(blocked[:5]),
+        )
+
     log.info("HTTP probe: %d/%d host(s) responded in %.1fs", len(probes), len(names), elapsed)
     return HttpResult(
         hosts=len(names),
         probes=probes,
+        skipped=skipped,
         ok=True,
         seconds=elapsed,
         outputs={"http_jsonl": (output_dir / HTTPX_OUTPUT).as_posix()},

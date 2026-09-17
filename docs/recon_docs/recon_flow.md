@@ -33,8 +33,8 @@ was intended to live, which is **not** a statement that the file exists.
 | **Hot Cache** | S8 | Derived score cache for fast hot-path reads | `queue/` (cache layer) | not started |
 | **Queue Workers** | S9 | Redis Streams consumer groups; 5 worker roles | `queue/` | not started |
 | **Recursion Gate + Dispatcher** | S10 | Relevance filter (hard/soft signals), token-bucket rate limiting, priority | `pipeline/gate.py` | partial: the active stage resolves/brute-forces/recurses under its own limits, with no dispatcher or gate |
-| **Stealth & Resilience** | S12 | Transport adapter, CAPTCHA detection, backoff, source quarantine | `stealth/` | not started |
-| **Re-scoring & Pruning** | S11 | Decay refresh, state flips, job cancel, archive | `pipeline/` (rescore loop) | not started |
+| **Stealth & Resilience** | S12 | Transport adapter, identity coherence, pacing/backoff, WAF + CAPTCHA detection, source quarantine, DNS volume budget | `service/recon_pipeline/stealth/` | **partial** — direct mode only; no proxy pools |
+| **Re-scoring & Pruning** | S11 | Penalty re-verification, re-score on change, state flips, job cancel, archive | `pipeline/` (rescore loop) | not started |
 | **LLM Classification** | S13 | Advisory classification + recon plan (Cerebras / Groq fallback) | `llm/classifier.py` | not started (no provider SDK or key) |
 | **Observability** | S14 | Score audit, DLQ ops, differential monitoring | `observability/` | not started (each asset-pipeline stage writes its own `report.json`) |
 
@@ -59,7 +59,7 @@ flowchart TD
     S8["S8 · Redis Hot Cache<br/>sig · sigobs · seed:hot · bloom"]
     S10["S10 · Recursion Gate + Active Dispatcher<br/>relevance filter + rate limit + priority"]
     S12["S12 · Stealth & Resilience<br/>transport, CAPTCHA detect, backoff"]
-    S11["S11 · Re-scoring & Pruning<br/>decay refresh, state flips, prune"]
+    S11["S11 · Re-scoring & Pruning<br/>re-verify penalties, state flips, prune"]
     S13["S13 · LLM Classification<br/>advisory · gate-checked"]
     S14["S14 · Observability<br/>audit · DLQ ops · differential monitor"]
 
@@ -77,7 +77,7 @@ flowchart TD
     S10 -->|"approved active jobs"| S12
     S12 -->|"new raw artifacts → recursion"| S3
     S11 -->|"recompute / prune"| S1
-    S11 -->|"refresh decayed weights"| S8
+    S11 -->|"rewrite stale scores"| S8
     S13 -->|"classification + plan (advisory)"| S1
     S14 -->|"observe graph"| NEO
     S14 -->|"observe queues / DLQ"| RD

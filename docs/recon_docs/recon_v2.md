@@ -166,7 +166,8 @@ evidence chain (which source found it, which corroborating signals exist or are 
 reviewer promotes to `IN_SCOPE` or demotes to `OUT_OF_SCOPE`; the decision and reviewer identity
 are recorded as provenance on the node. Corroboration can also arrive automatically over time
 (e.g., a later source independently confirms DNS ownership) — the Scope Engine re-evaluates
-`AMBIGUOUS` nodes whenever new evidence lands, the same way S11 re-scores nodes on decay.
+`AMBIGUOUS` nodes whenever new evidence lands, the same way S11 re-scores a node when a penalty
+condition changes.
 
 ### 4.6 Interaction with the v1 Recursion Gate
 
@@ -285,32 +286,33 @@ pipeline from generating findings the program has explicitly said it does not wa
 
 ### 7.3 New Scoring Signal
 
-| Signal | Weight \(w_s\) | Half-life \(h_s\) | Notes |
-|---|---|---|---|
-| Dangling CNAME to unclaimed third-party resource, program permits takeover class | 90 | 14 days | Short half-life: takeover windows close quickly once claimed by anyone (including the org itself) — must be re-verified frequently, not treated as a stable long-term signal |
+| Signal | Weight \(w_s\) | Notes |
+|---|---|---|
+| Dangling CNAME to unclaimed third-party resource, program permits takeover class | 90 | Takeover windows close quickly once claimed by anyone (including the org itself), so the *dangling state* is what the grant rides on: it is re-verified on every re-scoring pass and the signal is withdrawn as soon as the CNAME resolves to a claimed resource |
 
 ---
 
 ## 8. Mathematical Scoring Model — v2 Signal & Penalty Additions
 
-The core equation, decay function, clamp behavior, and state thresholds (`recon.md` §7) are
-unchanged. v2 adds source-specific signals and penalties.
+The core equation, clamp behavior, and state thresholds (`recon.md` §7) are unchanged. In
+particular v2 keeps the decay-free rule: a score is a function of *observed evidence*, never of
+the clock. v2 adds source-specific signals and penalties.
 
 ### 8.1 New Positive Signals
 
-| Signal | Weight \(w_s\) | Half-life \(h_s\) |
-|---|---|---|
-| Dangling CNAME / tenant takeover (program permits class) | 90 | 14 days |
-| Current ASN ownership, dedicated (non-cloud) ASN | 100 | ∞ (no decay) — same class as v1's ASN/CIDR hard signal |
-| Extracted from public code repository owned by the org (not just mentioning the org) | 65 | 150 days |
-| Extracted from mobile app binary (official store listing confirmed as the org's app) | 65 | 150 days |
-| Favicon/JARM/cert-fingerprint match **with** independent DNS/WHOIS corroboration | 55 | 90 days |
-| Favicon/JARM/cert-fingerprint match, no corroboration (held at `AMBIGUOUS` — contributes only if later promoted) | 20 | 45 days |
-| Endpoint/parameter extracted from JS bundle on confirmed in-scope host | 35 | 60 days |
-| Reverse-WHOIS registrant exact match, single corroborating TLD/brand signal | 40 | 120 days |
-| Reverse-WHOIS registrant match only, no corroboration | 15 | 60 days |
-| Cloud bucket name matches org brand permutation + is publicly listable | 50 | 90 days |
-| Content-discovery hit on confirmed in-scope host (non-default path) | 30 | 60 days |
+| Signal | Weight \(w_s\) |
+|---|---|
+| Dangling CNAME / tenant takeover (program permits class) | 90 |
+| Current ASN ownership, dedicated (non-cloud) ASN | 100 |
+| Extracted from public code repository owned by the org (not just mentioning the org) | 65 |
+| Extracted from mobile app binary (official store listing confirmed as the org's app) | 65 |
+| Favicon/JARM/cert-fingerprint match **with** independent DNS/WHOIS corroboration | 55 |
+| Favicon/JARM/cert-fingerprint match, no corroboration (held at `AMBIGUOUS` — contributes only if later promoted) | 20 |
+| Endpoint/parameter extracted from JS bundle on confirmed in-scope host | 35 |
+| Reverse-WHOIS registrant exact match, single corroborating TLD/brand signal | 40 |
+| Reverse-WHOIS registrant match only, no corroboration | 15 |
+| Cloud bucket name matches org brand permutation + is publicly listable | 50 |
+| Content-discovery hit on confirmed in-scope host (non-default path) | 30 |
 
 ### 8.2 New Negative Penalties
 

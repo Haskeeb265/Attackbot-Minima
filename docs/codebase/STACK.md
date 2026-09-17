@@ -20,13 +20,15 @@ imports lazily or only from one subsystem.
 | `python-dotenv` | `config.py` | loads the root `.env` once, with `override=True` |
 | `sqlalchemy` | `db/init/models.py` | schema metadata **for Alembic autogenerate only**; not used at runtime |
 | `alembic` | `db/migrations/` | migrations; `env.py` uses `db.init.models.Base.metadata` |
-| `requests` | `shared/connectors/`, passive `crtsh`/`wayback` | HTTP |
+| `requests` | `shared/connectors/`, passive `crtsh`/`wayback`, stealth `transport.py` | HTTP; in the stealth layer it is the fallback transport that preserves header *order* but not the TLS fingerprint |
 | `dnspython` | passive `wildcard.py`, active `resolvers.py`/`axfr.py` | imported **lazily inside functions**, so it is optional at import time and required at run time for DNS work |
 | `neo4j` | `service/recon_pipeline/graph/` | official driver; only the graph layer needs it |
 | `pytest` | `tests/recon/` | the hermetic suite |
+| `curl_cffi` *(optional)* | stealth `transport.py` | **not installed in this tree**; when present it is the strongest transport (browser ClientHello + HTTP/2 + header order). The layer falls back to `requests` and reports the downgrade |
 
 **Not present, though the plans assume them:** a Redis client (see below) and any
-LLM SDK. Neither is imported anywhere in the repo.
+LLM SDK. Neither is imported anywhere in the repo. `curl_cffi` is the one
+*optional* dependency that changes stealth capability — see the table above.
 
 ## Datastores
 
@@ -54,8 +56,12 @@ fresh volume.
 
 The recon stages deliberately do **not** import `config.py` for their own knobs;
 each stage has a `settings.py` that reads `PASSIVE_*` / `ACTIVE_*` /
-`PERMUTATION_*` environment variables with documented defaults. The only value
-they take from `config.py` is `TARGET` (the default target).
+`PERMUTATION_*` environment variables with documented defaults, and the stealth
+layer has its own (`STEALTH_*`, in `service/recon_pipeline/stealth/settings.py`).
+The only value the stages take from `config.py` is `TARGET` (the default target).
+Cross-layer settings are **imported, not redefined**: the active stage derives its
+HTTP rate limit from the stealth layer's default, so pacing cannot silently drift
+between them.
 
 ## Container images
 

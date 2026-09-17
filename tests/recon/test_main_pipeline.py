@@ -219,3 +219,29 @@ def test_a_stage_that_reports_hosts_it_did_not_write_is_flagged(
 
     assert summary.ok  # the stage itself did not fail
     assert any("union artifact is incomplete" in record.message for record in caplog.records)
+
+
+def test_passive_only_skips_the_active_and_permutation_stages(wired, tmp_path, monkeypatch):
+    """PASSIVE_ONLY is a global kill switch for active technique (spec NFR).
+
+    The stages enforce it themselves too, but the orchestrator must not even call
+    them: a stage that runs and instantly aborts reads as a stage that failed.
+    """
+    wired(
+        active_hosts=["active.example.com"],
+        permutation_hosts=["perm.example.com"],
+        passive_hosts=["www.example.com"],
+    )
+    monkeypatch.setattr(main, "PASSIVE_ONLY", True)
+
+    summary = main.run_pipeline(APEX, output_dir=tmp_path)
+
+    # The union is a union of *live* hosts, and only the active stages establish
+    # liveness: passive subdomains are unresolved candidates.  So passive-only
+    # legitimately produces an empty union, and saying so is the honest outcome.
+    assert _union(tmp_path) == set()
+    by_stage = {entry["stage"]: entry for entry in summary.stages}
+    assert by_stage["passive"].get("skipped") is None
+    for stage in ("active", "permutation"):
+        assert by_stage[stage]["skipped"] == "PASSIVE_ONLY"
+        assert by_stage[stage]["ok"] is True  # skipped is not failure

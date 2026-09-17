@@ -199,6 +199,13 @@ Recursion is bounded three ways — `RECURSION_MAX_DEPTH` (2),
 widening step rather than an open-ended sweep: at most 25 × 250 = 6,250 extra
 queries per level.
 
+Only names strictly **below the apex** become recursion parents. The apex itself is
+excluded because its direct children are the level-1 candidate set, which step 6
+already queried — offering it back would spend a wordlist's worth of requests
+re-asking questions that were just answered. Names outside the apex are excluded
+because they are not ours to query at all; without that rule the ancestor walk
+would climb out of scope one label at a time (`a.other.test` → `other.test`).
+
 ---
 
 ## Footprint and authorization
@@ -240,7 +247,7 @@ Everything lands in `active/output/` (gitignored — reproduce by re-running):
 | `resolvers_rejected.txt` | rejected candidates with reasons (auditable) |
 | `wildcards.txt` | confirmed wildcard records, merged with the passive stage's |
 | `wildcard_suppressed.txt` | names dropped as wildcard noise (auditable) |
-| `records.txt` / `records.jsonl` | per-host DNS records (`a, aaaa, cname, ns, mx, txt`) |
+| `records.txt` / `records.jsonl` | per-host DNS records (`a, aaaa, cname, ns, mx, txt`) — always includes the **apex** and `_dmarc.<apex>`, where MX/SPF/DMARC live |
 | `axfr.txt` | names recovered from a successful zone transfer |
 | `foreign.txt` | out-of-scope names seen in the inputs (excluded) |
 | `http.jsonl` | opt-in HTTP probe results (**never** merged into `resolved.txt`) |
@@ -252,6 +259,14 @@ Every resolved host is tagged with the step(s) that found it
 filter keeps a name outright when two independent steps corroborate it, so
 provenance is what stops a genuinely live host that a wildcard happens to explain
 from being discarded.
+
+Record enrichment always covers the **apex** and the DMARC policy name
+(`_dmarc.<apex>`) alongside the live hosts, even when the live list is empty.
+Mail policy (MX, the SPF record inside TXT, DMARC inside `_dmarc` TXT) lives on
+the apex, not on subdomains — a measured run (qbsco.net, 2026-09-17) queried
+MX/TXT for four subdomains that had none while the M365 MX records answering for
+the apex went unasked. An NXDOMAIN `_dmarc` row is kept as an answered-empty
+record, so "no DMARC policy" is a recorded fact rather than missing evidence.
 
 ### Measured run
 
@@ -289,6 +304,50 @@ Honest caveats:
   the 79.2 s. Skip it with `--no-enrich` when only the host list is wanted.
 
 ---
+
+## Stealth & resilience (spec §5.1)
+
+The stage runs under the shared stealth layer
+([`service/recon_pipeline/stealth/`](../../../stealth/README.md)) by default. What that
+changes here, concretely:
+
+* **Candidate order is shuffled** (keyed on the target) before resolution, and the work is
+  split into **budget-sized batches** with a jittered pause between them, sized so that no
+  single resolver sees more unique names than the volume budget allows.
+* **The resolver tools are rate-limited** from the same budget when the operator has not set
+  `ACTIVE_PUREDNS_RATE_LIMIT` explicitly.
+* **AXFR attempts are spaced** (jittered, `ACTIVE_AXFR_SPACING`, default 5s) instead of fired
+  back to back.
+* **The HTTP probe stops looking like a stock Go client**: `-random-agent=false` plus one
+  coherent identity (user agent, Client Hints, `-tlsi` ClientHello). Measured: the CLI's own
+  default randomiser sends user agents such as `Firefox/3.6.13` or a `Chrome/134` string for
+  `Kubuntu; Linux i686`, and `-tlsi chrome` produces the real Chrome JA4
+  (`t13d1516h2_8daaf6152771_...`).
+* **Blocks are recorded.** The probe captures response headers (`-irh`), so a challenge or WAF
+  block is detected, the host is quarantined, and later steps skip it. Repeated blocks from one
+  WAF degrade the run to passive-only.
+* **`PASSIVE_ONLY=1` refuses active technique outright** — before Docker, DNS or HTTP.
+* Every run records its stealth state under `"stealth"` in `output/report.json` (transport and
+  its real capabilities, identities, pacing, the DNS plan, verdicts, quarantine).
+
+### Measured cost
+
+Live run against `tesla.com` (2,083 candidates, 755 brute-force labels):
+
+| | Stealth on | Stealth off |
+|---|---|---|
+| Wall clock | **193 s** | ~64 s |
+| Live hosts | **493** | 493 |
+| Deliberate waiting | 48 s (3 resolve batches, 2 pauses) | 0 |
+| Names per resolver | up to **111** | ~81 |
+
+Same hosts, ~3× wall clock. The run also reported that the current resolver pool is too small
+for the volume budget (111 per resolver against a 60 budget; 23 resolvers or two hourly windows
+would be needed) — reported as a note rather than silently exceeded, and never by dropping names.
+
+Stealth can be turned off with `ACTIVE_STEALTH=0` (it then behaves exactly as it did before this
+layer existed). The `STEALTH_*` knobs and the evidence behind them are documented in
+[`stealth/README.md`](../../../stealth/README.md).
 
 ## Settings
 

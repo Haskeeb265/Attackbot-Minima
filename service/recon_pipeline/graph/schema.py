@@ -38,7 +38,7 @@ Design decisions (each traced to evidence):
 * **Mode: one-shot (v1).** The pipeline runs to completion per invocation —
   recursion, scoring, and graph writes all happen *during* the run, and scores
   freeze at observation time. The plan's continuous machinery (S8 Redis cache,
-  S9 workers, S11 background decay/pruning, S14 differential monitoring) is
+  S9 workers, S11 background re-scoring/pruning, S14 differential monitoring) is
   deferred. The schema is deliberately mode-agnostic: MERGE identity makes
   re-runs safe, and the deferred stages can be layered back on with no schema
   migration.
@@ -217,7 +217,7 @@ PROP_TOOL = "tool"
 PROP_OBSERVED_AT = "observed_at"
 PROP_CONFIDENCE = "confidence"
 # Optional evidence marker on scoring-relevant edges — the signal_type used by
-# the S2 signal table (recon.md §7: weight / half-life / confidence).
+# the S2 signal table (recon.md §7: weight / confidence).
 PROP_SIGNAL = "signal"
 
 
@@ -268,7 +268,7 @@ SCHEMA_STATEMENTS: List[str] = [
         "FOR (a:Asset) ON (a.score)"
     ),
 
-    # Provenance / re-run safety lookups; decay sweeps are N/A in one-shot mode.
+    # Provenance / re-run safety lookups; re-scoring sweeps are N/A in one-shot mode.
     (
         "CREATE INDEX asset_last_seen_idx IF NOT EXISTS "
         "FOR (a:Asset) ON (a.last_seen_at)"

@@ -593,7 +593,8 @@ policy gate — §7.2 of `recon_v2.md`).
 - takeover detection core logic: fixture CNAME chains matching known vulnerable-service
   fingerprints (`*.github.io`, `*.zendesk.com`, `*.s3.amazonaws.com`, `*.herokuapp.com`, etc.) +
   fixture "unclaimed resource" HTTP responses → assert `DANGLING_REFERENCE` edge + scoring signal
-  application (weight 90, half-life 14 days, per `recon_v2.md` §7.3);
+  application (weight 90, withdrawn as soon as the CNAME resolves to a claimed resource, per
+  `recon_v2.md` §7.3);
 - **policy gate test (critical):** run the exact same dangling-CNAME fixture against two synthetic
   program records — one with "Subdomain Takeover" in its ingested weakness metadata, one without;
   assert the first promotes the node's score toward Active and the second records the finding as

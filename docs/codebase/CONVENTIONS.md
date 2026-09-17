@@ -76,10 +76,14 @@ Every recon stage has `settings.py` as its single source of paths and tunables:
 
 - paths derived from `__file__` exactly once (never from cwd);
 - every knob is an environment variable (`PASSIVE_*`, `ACTIVE_*`,
-  `PERMUTATION_*`) read through `env_flag` / `env_int` with a documented default,
-  so a run is reproducible from the CLI alone;
+  `PERMUTATION_*`, and `STEALTH_*` for the shared stealth layer at
+  `service/recon_pipeline/stealth/settings.py`) read through `env_flag` /
+  `env_int` with a documented default, so a run is reproducible from the CLI
+  alone;
 - settings shared across stages are **imported**, not duplicated (the active and
-  permutation stages import the passive stage's wildcard tunables on purpose).
+  permutation stages import the passive stage's wildcard tunables on purpose, and
+  the active stage derives its HTTP rate limit from the stealth layer's per-host
+  QPS).
 
 ## Errors and logging
 
@@ -109,8 +113,12 @@ Every recon stage has `settings.py` as its single source of paths and tunables:
 
 - **Hermetic by default.** The recon suite touches no Docker, DNS, or network,
   and never reads a stage's `output/` directory; external effects are injected
-  (query functions, resolvers, engines, generators) and faked in
+  (query functions, resolvers, engines, generators, transports) and faked in
   `tests/recon/conftest.py`.
+- **Time is injected.** Anything that waits — pacing backoffs, inter-batch DNS
+  pauses, quarantine TTLs — takes a `Clock` (`RealClock` in production,
+  `FakeClock` in tests), so a 15-second wait is a recorded number, not a real
+  sleep. Stage tests inject a fake-clocked stealth session for the same reason.
 - **Assert on the contract**: what a stage writes, what it reports, and which
   abort paths it takes — not internal call order.
 - Integration tests that need real services are written as standalone scripts
@@ -120,7 +128,8 @@ Every recon stage has `settings.py` as its single source of paths and tunables:
 ## Evidence
 
 - `shared/db.py`, `db/repos/*.py`, `db/persistence/persistence.py`
-- `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/*/settings.py`
+- `service/recon_pipeline/stealth/settings.py` and the stage `settings.py` files
+  (`.../passive/settings.py`, `.../active/settings.py`, `.../permutation/settings.py`)
 - `.../passive/sources.py`, `.../active/wordlist.py`, `.../active/resolve.py`,
   `.../permutation/generate.py` (the four registries)
 - `.../active/output/resolvers.txt` vs the curated seed files in `.../active/resolvers/`

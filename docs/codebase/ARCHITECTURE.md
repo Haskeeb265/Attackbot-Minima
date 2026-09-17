@@ -59,11 +59,11 @@ directory, a `report.json`, and a README with measured numbers.
 ```
 passive     OSINT/CT sources → normalized, provenance-tagged known names
    ↓
-active      validate resolvers → resolve → bruteforce → recurse → AXFR
+active      validate resolvers → resolve (budgeted batches) → bruteforce → recurse → AXFR
             → wildcard filter → record enrichment → live hosts + records
-   ↓
+   ↓        └── every step paced/identity-coherent/block-aware via the stealth layer
 permutation known names → dnsgen candidates → resolve (active's engine) → live hosts
-   ↓
+   ↓        └── same DNS budget + shuffle + passive-only gate
 main.py     union of live hosts + summary.json
 ```
 
@@ -86,6 +86,45 @@ Design rules that the code enforces:
   name outright when two independent steps corroborate it.
 - **Footprint is a code-level distinction.** DNS steps are on by default; the one
   step that sends application traffic (HTTP probing) is behind `--http`.
+- **All active traffic goes through one stealth chokepoint** —
+  `service/recon_pipeline/stealth/session.py`. Stage code never shapes its own
+  requests: it asks the session, which applies pacing, per-host identity,
+  block detection and quarantine, and refuses work when the run has degraded to
+  passive-only. The DNS work additionally runs under a *volume* budget
+  (`dns_budget.py`): the plan is computed before any query is sent, and when the
+  validated resolver pool is too small to keep every name inside the budget the
+  run says so in its report instead of silently exceeding it.
+- **Config is imported, never re-tuned ad hoc.** The active stage's HTTP rate
+  limit defaults from the stealth layer's per-host QPS, so pacing cannot drift
+  between stages.
+
+## 2b. Stealth & resilience (built, direct mode)
+
+`service/recon_pipeline/stealth/` implements the spec's §5.1 layer — the part that
+keeps active recon from being trivially fingerprinted, and keeps DNS enumeration
+under published detection thresholds:
+
+- **Identity** (`identity.py`) — one *coherent* browser identity per host
+  (user agent ↔ Client Hints ↔ header set ↔ TLS ClientHello), stable across runs.
+  Measured on this repo's own toolchain: the toolchain's default randomiser sent
+  user agents such as `Firefox/3.6.13`, while `-tlsi chrome` yields the genuine
+  Chrome JA4. Both findings, and the header-order limitation of the CLI, are
+  captured in the layer's README.
+- **Pacing** (`pacing.py`) — per-host token buckets, jittered delays, exponential
+  backoff, `Retry-After` honouring, all on an injectable clock (hermetic tests).
+- **Detection** (`detect.py`) — WAF fingerprints and challenge pages → a verdict;
+  evidence-gated so ordinary pages (a login form mentioning captcha, a bare 403)
+  never quarantine a host.
+- **Quarantine** (`quarantine.py`) — persistent per-host and per-WAF state with
+  TTL; several hosts challenged by one WAF degrade the run to passive-only.
+- **DNS budget** (`dns_budget.py`) — per-resolver unique-name budget (set below
+  the ~75-names-per-hour detection threshold), keyed shuffle, rotation, batching.
+- **Transport** (`transport.py`) — `curl_cffi` (full impersonation, optional) >
+  `requests` (header order, Python TLS), with the actual capabilities reported
+  per run. Nothing here disables certificate verification.
+
+`PASSIVE_ONLY=1` is a global kill switch the orchestrator and both stages
+enforce independently.
 
 Detailed contracts, flags and measured yields live in the
 [pipeline README](../../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md)
@@ -111,11 +150,13 @@ The contract every future writer must follow is
 
 ## 4. Planned (not built)
 
-The spec family describes a much larger system: a scoring engine, seed ingestion
+The spec family describes a much larger system: a scoring engine (the spec's
+scoring model is now **decay-free** — see `recon.md` §7), seed ingestion
 from Postgres into the graph, Redis queues and a hot cache, an active dispatcher
-with a recursion gate, a stealth/transport layer, LLM classification, and
-observability — then a v2 extension adding a Scope Engine and eleven new source
-classes.
+with a recursion gate, LLM classification, and observability — then a v2
+extension adding a Scope Engine and eleven new source classes. The stealth
+layer is **partially built** (direct mode; no proxy pools, no CAPTCHA handling,
+no Redis-backed shared quarantine — see `stealth/README.md` §6).
 
 None of that exists in code. The stage-by-stage status is maintained in the plans
 themselves:
@@ -132,4 +173,7 @@ themselves:
   and the stage READMEs
 - `service/recon_pipeline/graph/{schema,repository,client}.py`,
   `tests/recon/test_repository.py`
+- `service/recon_pipeline/stealth/{identity,pacing,detect,quarantine,dns_budget,transport,session}.py`,
+  `tests/recon/test_stealth_*.py` (143 hermetic tests), and the live-capture
+  evidence cited in `stealth/README.md`
 - `docs/recon_docs/*` for the planned stages (explicitly marked as intent)

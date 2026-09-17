@@ -27,6 +27,16 @@ Attackbot-Minimal/
 │   │   ├── ingest.py                  # orchestrator: handles → details → map → persist
 │   │   └── helpers/                   # currently only __init__.py
 │   └── recon_pipeline/
+│       ├── stealth/                   # spec §5.1 stealth layer (built, direct mode)
+│       │   ├── identity.py            # coherent browser identities, one stable per host
+│       │   ├── pacing.py              # per-host token buckets, jitter, backoff (injectable clock)
+│       │   ├── detect.py              # WAF/challenge classification, Retry-After parsing
+│       │   ├── quarantine.py          # persistent per-host/per-WAF quarantine, passive-only fallback
+│       │   ├── dns_budget.py          # per-resolver volume budget, keyed shuffle, rotation
+│       │   ├── transport.py           # requests/curl_cffi transports with a capability report
+│       │   ├── session.py             # the chokepoint every stage's network work goes through
+│       │   ├── settings.py            # STEALTH_* environment knobs
+│       │   └── README.md              # measured evidence + design + honest limits
 │       ├── graph/                     # Neo4j layer (built)
 │       │   ├── client.py              # Neo4jClient — driver + verify()
 │       │   ├── schema.py              # labels, relationship types, constraints, indexes
@@ -37,11 +47,11 @@ Attackbot-Minimal/
 │               ├── main.py            # orchestrator: runs stages, writes output/live_hosts.txt
 │               ├── env.py             # shared env parsing (env_flag / env_int)
 │               ├── Dockerfile         # the 11-tool image, smoke-tested at build time
-│               ├── commands.txt       # raw per-tool Docker commands
+│               ├── commands.txt       # raw per-tool Docker commands (incl. shaped/stealth commands)
 │               ├── README.md          # pipeline overview
 │               ├── passive/           # stage 1: OSINT + CT sources → known names
-│               ├── active/            # stage 2: DNS resolution, bruteforce, recursion, AXFR
-│               ├── permutation/       # stage 3: names derived from known names
+│               ├── active/            # stage 2: DNS resolution, bruteforce, recursion, AXFR (stealth-wired)
+│               ├── permutation/       # stage 3: names derived from known names (stealth-wired)
 │               └── output/            # (gitignored) union of live hosts + summary.json
 │
 ├── db/                         # PostgreSQL layer
@@ -55,8 +65,8 @@ Attackbot-Minimal/
 │
 ├── tests/
 │   ├── conftest.py             # makes the repo root importable for pytest
-│   ├── recon/                  # hermetic suite (253 tests) — no Docker, DNS or network
-│   └── scraper/                # script-style tests needing a live PostgreSQL
+│   ├── recon/                  # hermetic suite (397 tests) — no Docker, DNS or network
+│   └── scraper/                # live-PostgreSQL scripts; one real pytest test (skips without its fixture)
 │
 ├── docs/                       # see docs/README.md for the map
 │   ├── README.md · codebase/ · recon_docs/ · scraper_docs/

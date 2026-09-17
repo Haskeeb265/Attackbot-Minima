@@ -22,6 +22,10 @@ from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive i
     sources,
     wayback,
 )
+from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive.sources import (
+    DOCKER_SOURCES,
+    HTTP_SOURCES,
+)
 
 APEX = "qbsco.net"
 
@@ -355,6 +359,78 @@ def test_wayback_fetch_keeps_only_in_scope_hosts(monkeypatch) -> None:
 def test_wayback_fetch_returns_empty_when_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(wayback, "fetch_text", lambda *a, **k: None)
     assert wayback.fetch(APEX) == []
+
+
+# --------------------------------------------------------------------------- #
+# Subtree-query invariant (why the passive stage needs no recursion loop)
+# --------------------------------------------------------------------------- #
+
+
+def test_crtsh_query_is_subtree_wide(monkeypatch) -> None:
+    """crt.sh must be queried with ``%.<apex>``, matching EVERY depth.
+
+    The ``%`` suffix wildcard makes one apex query return the whole zone —
+    deep names included.  This is the contract that makes a passive recursion
+    loop pointless (see the stage README, "Why the passive stage does not
+    recurse"): re-feeding deep findings as new seeds re-queries a subset of a
+    set the apex query already covered.  If this test fails because someone
+    narrowed the query (e.g. to an exact host), the passive stage LOSES depth
+    and the no-recursion decision must be revisited.
+    """
+    captured: dict = {}
+
+    def fake_fetch_text(url, *, params, timeout):  # noqa: ANN001
+        captured["url"] = url
+        captured["params"] = params
+        # A depth-3 name returned for an apex-level query: set-based results.
+        return '{"name_value": "a.b.c.qbsco.net\\napp.qbsco.net"}'
+
+    monkeypatch.setattr(crtsh, "fetch_text", fake_fetch_text)
+
+    hosts = crtsh.fetch(APEX)
+
+    assert captured["params"]["q"] == f"%.{APEX}", captured["params"]
+    # ...and the harvest really does cross label levels in a single call:
+    assert hosts == ["a.b.c.qbsco.net", "app.qbsco.net"]
+
+
+def test_wayback_query_is_subtree_wide(monkeypatch) -> None:
+    """Wayback must use ``matchType=domain``, which matches every depth.
+
+    Per the CDX API, ``matchType=domain`` returns captures for the domain and
+    all subdomains, at any depth — same set-based contract as crt.sh above.
+    """
+    captured: dict = {}
+
+    def fake_fetch_text(url, *, params, timeout):  # noqa: ANN001
+        captured["params"] = params
+        return '[["original"],["https://x.y.z.qbsco.net/"]]'
+
+    monkeypatch.setattr(wayback, "fetch_text", fake_fetch_text)
+
+    hosts = wayback.fetch(APEX)
+
+    assert captured["params"]["matchType"] == "domain", captured["params"]
+    assert captured["params"]["url"] == APEX, captured["params"]
+    assert hosts == ["x.y.z.qbsco.net"]  # depth-3 name from one apex query
+
+
+def test_every_source_takes_exactly_one_seed_domain() -> None:
+    """No source may accept a seed *list* or a deeper seed than the apex.
+
+    The recursion question is settled at the registry level: every source is
+    run exactly once with the apex.  A source that grew a multi-seed or
+    per-host API would silently change that contract, so pin the signatures.
+    """
+    import inspect
+
+    for name, source in DOCKER_SOURCES.items():
+        params = inspect.signature(source.args).parameters
+        assert len(params) == 1, f"{name}.args must take exactly one domain"
+    for name, source in HTTP_SOURCES.items():
+        params = inspect.signature(source.fetch).parameters
+        first = next(iter(params))
+        assert first == "apex", f"{name}.fetch's first parameter must be the apex"
 
 
 # --------------------------------------------------------------------------- #

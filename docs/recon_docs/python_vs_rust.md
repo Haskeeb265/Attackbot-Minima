@@ -108,7 +108,7 @@ Rating scale: **Low** (days), **Medium** (a week+), **High** (weeks). Assumes th
 | S8 | Redis hot cache | **Low** | **Medium** | Python: `fakeredis` for unit tests. Rust: `redis-rs` solid, but **no in-memory test double** → tests need real Redis or a mock |
 | S9 | Queues + workers | **Medium** | **Medium** | Python: threads (simple, GIL-limited) or asyncio (rewrite) — the §8.5 fork. Rust: tokio resolves it; more upfront code, better ceiling |
 | S10 | Dispatcher + rate limit + gate | **Medium** | **Medium** | Python: hand-rolled bucket. Rust: `governor` + gate policy as types |
-| S11 | Re-scoring/decay/pruning | **Medium** | **Medium** | Pure core both ways; queue-cancel wrappers similar |
+| S11 | Re-scoring/penalty re-verification/pruning | **Medium** | **Medium** | Pure core both ways; queue-cancel wrappers similar |
 | S12 | Stealth layer | **Medium–High** | **Medium–High** | Both defer real proxies; Rust is better positioned for the HTTP/2/TLS-fingerprint follow-up |
 | S13 | LLM classification | **Low** | **Medium** | Python: trivial sync HTTP + JSON. Rust: async reqwest + serde — more ceremony, same logic |
 | S14 | Observability + DLQ ops | **Low** | **Medium** | Python: `colorlog` exists. Rust: `tracing` more powerful but needs setup |

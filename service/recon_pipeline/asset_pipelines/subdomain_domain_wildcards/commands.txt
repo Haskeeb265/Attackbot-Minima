@@ -214,3 +214,61 @@ MSYS_NO_PATHCONV=1 docker run --rm \
   subdomain_domain_wildcards_image \
   puredns resolve /work/candidates.txt -r /work/resolvers.txt \
     --resolvers-trusted /work/resolvers-trusted.txt -w /work/live-hosts.txt
+
+# -----------------------------------------------------------------------------
+# STEALTH: reproducing the shaped run by hand
+# -----------------------------------------------------------------------------
+# The stage applies all of this itself; these commands exist so a single tool can
+# be reproduced with the same shaping. The reasoning, the measurements and the
+# limits are in service/recon_pipeline/stealth/README.md.
+
+# 1. The one flag that matters most. httpx enables -random-agent BY DEFAULT,
+#    which is what produced user agents like "Firefox/3.6.13" and
+#    "Chrome/134.0.0.0" for "Kubuntu; Linux i686" during testing — i.e. a user
+#    agent no browser has ever sent, in front of whichever ClientHello the
+#    impersonator picked. Off, plus an explicit coherent identity:
+docker run --rm subdomain_domain_wildcards_image httpx \
+  -u https://example.com -json -irh -random-agent=false \
+  -H 'Sec-Ch-Ua: "Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"' \
+  -H 'Sec-Ch-Ua-Mobile: ?0' -H 'Sec-Ch-Ua-Platform: "Windows"' \
+  -H 'Upgrade-Insecure-Requests: 1' \
+  -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36' \
+  -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8' \
+  -H 'Sec-Fetch-Site: none' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-User: ?1' -H 'Sec-Fetch-Dest: document' \
+  -H 'Accept-Encoding: gzip, deflate, br, zstd' -H 'Accept-Language: en-US,en;q=0.9' -H 'Priority: u=0, i'
+
+# 2. TLS impersonation. Verified to produce the real Chrome JA4
+#    (t13d1516h2_8daaf6152771_... — the cipher hash Cloudflare publishes for
+#    current Chrome). Do NOT combine with -unsafe: raw mode drops the
+#    impersonation and the JA4 reverts to Go's default.
+docker run --rm subdomain_domain_wildcards_image httpx -u https://example.com -tlsi chrome -silent
+
+# 3. Check any of it yourself (echoes back the JA3/JA4/header order you sent):
+#    the Python transport does this too — see stealth/README.md for captures.
+docker run --rm subdomain_domain_wildcards_image httpx -u https://tls.peet.ws/api/all -json -irr -tlsi chrome -random-agent=false
+
+# 4. Pace at the volume budget instead of at full speed. massdns/puredns fan out
+#    over the resolver file, so per-resolver load is labels/resolvers; the
+#    --rate-limit below matches STEALTH_DNS_QPS and the batching the stage does.
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -v "$(pwd -W)/service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/active/output:/work" \
+  subdomain_domain_wildcards_image \
+  puredns bruteforce example.com /work/wordlist.txt -r /work/resolvers.txt \
+    --resolvers-trusted /work/resolvers-trusted.txt \
+    --rate-limit 100 --wildcard-tests 3 \
+    -w /work/bruteforce.txt --write-wildcards /work/bruteforce-wildcards.txt
+
+# 5. Environment knobs (all optional; defaults shown):
+#   STEALTH_PASSIVE_ONLY=0               refuse all active technique
+#   STEALTH_HOST_QPS=2                   sustained requests/second per host
+#   STEALTH_HOST_BURST=4                 per-host burst allowance
+#   STEALTH_JITTER=0.35                  timing jitter as a fraction of each delay
+#   STEALTH_DNS_NAMES_PER_RESOLVER_HOUR=60   the volume budget per resolver
+#   STEALTH_DNS_BATCH_SIZE=500           names per resolver window
+#   STEALTH_DNS_BATCH_SPACING=20         jittered seconds between batches
+#   STEALTH_DNS_QPS=100                  total query rate across the pool
+#   STEALTH_IDENTITY=chrome-win          pin one identity for the whole run
+#   STEALTH_QUARANTINE_FILE=<path>       where quarantine state persists
+#   ACTIVE_STEALTH=0                     disable the whole layer
+#   ACTIVE_HTTP_IMPERSONATE=0            stop passing -tlsi to httpx
+#   ACTIVE_AXFR_SPACING=5                seconds between zone-transfer attempts

@@ -169,6 +169,12 @@ service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/active/output/
 service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/permutation/output/
 service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/output/
 
+# port_service_host stage run artifacts: the scan set, passive intel, CDN verdicts,
+# open ports, service identities, per-tool raw output and the run report. Like the
+# sibling stage's, these are fully reproducible by re-running the stage (see that
+# stage's README for the measured yields), so they are not tracked.
+service/recon_pipeline/asset_pipelines/port_service_host/output/
+
 # Scratch directories used for ad-hoc live verification runs (wordlist/resolver
 # experiments, temporary mounts). Never source.
 .tmp_*/

@@ -49,7 +49,7 @@ from .active import resolvers as resolver_mod
 from .active.pipeline import RESOLVED_FILE as ACTIVE_RESOLVED_KEY
 from .active.pipeline import run_active_stage
 from .active.resolve import DEFAULT_ENGINE
-from .active.settings import DEFAULT_SOURCE_TIMEOUT
+from .active.settings import DEFAULT_SOURCE_TIMEOUT, PASSIVE_ONLY
 from .passive.normalize import canonicalize_host
 from .passive.pipeline import run_passive_stage
 from .permutation.pipeline import RESOLVED_FILE as PERMUTATION_RESOLVED_KEY
@@ -175,6 +175,23 @@ def run_pipeline(
 
     for stage in stages:
         log.info("=== %s stage ===", stage)
+        # The passive stage is always allowed.  Active technique is refused when
+        # the operator forces passive-only: the stages enforce this themselves
+        # (they can also trip on a quarantine they discover mid-run), but saying
+        # so here keeps the stage list honest instead of reporting a stage that
+        # ran and instantly aborted.
+        if stage != "passive" and PASSIVE_ONLY:
+            log.warning("skipping %s stage: PASSIVE_ONLY is set", stage)
+            summary.stages.append(
+                {
+                    "stage": stage,
+                    "ok": True,
+                    "skipped": "PASSIVE_ONLY",
+                    "seconds": 0.0,
+                    "counts": {},
+                }
+            )
+            continue
         stage_started = time.monotonic()
         try:
             if stage == "passive":
@@ -223,6 +240,17 @@ def run_pipeline(
             "counts": dict(report.counts),
             "outputs": dict(report.outputs),
         }
+        # A stage's stealth state belongs in the run summary: it is the record of
+        # how we presented ourselves and what the target did about it.
+        stealth = getattr(report, "stealth", None)
+        if isinstance(stealth, dict) and stealth:
+            entry["stealth"] = {
+                "transport": (stealth.get("transport") or {}).get("name"),
+                "passive_only": stealth.get("passive_only"),
+                "verdicts": stealth.get("verdicts") or {},
+                "blocked_hosts": stealth.get("blocked_hosts") or [],
+                "dns_plan": stealth.get("dns_plan") or {},
+            }
         if not report.ok:
             summary.ok = False
         if getattr(report, "fatal", None):

@@ -10,6 +10,7 @@ below is the intended design — file an update to whichever is wrong.
 |---|---|
 | run the project | [`../README.md`](../README.md) |
 | run or extend the subdomain/domain/wildcard pipeline | [`../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md`](../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md) |
+| understand how active traffic is shaped, and why (stealth, spec §5.1) | [`../service/recon_pipeline/stealth/README.md`](../service/recon_pipeline/stealth/README.md) — what detectors measure, live-capture evidence, design, knobs, measured cost, and the not-built list |
 | understand what the whole system is meant to become | [`recon_docs/recon.md`](recon_docs/recon.md) + [`recon_docs/recon_v2.md`](recon_docs/recon_v2.md) |
 | know what is built versus planned | the status section in [`recon_docs/IMPLEMENTATION_PLAN.md`](recon_docs/IMPLEMENTATION_PLAN.md) and [`recon_docs/IMPLEMENTATION_PLAN_V2.md`](recon_docs/IMPLEMENTATION_PLAN_V2.md) |
 | work on the scraper or the `bounty_*` schema | [`scraper_docs/schema.md`](scraper_docs/schema.md) |
@@ -55,13 +56,24 @@ v1 pair first.
 
 ### Outside `docs/`
 
-- Per-stage READMEs under
-  `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/` — the
-  operator-facing documentation for the built pipeline: flags, outputs, settings,
-  measured yields and live caveats. These are the most current docs in the repo.
+- Per-stage READMEs under `service/recon_pipeline/asset_pipelines/` — the
+  operator-facing documentation for the built pipelines
+  (`subdomain_domain_wildcards/`, `port_service_host/`): flags, outputs,
+  settings, measured yields and live caveats. These are the most current docs in
+  the repo.
+- [`stealth/README.md`](../service/recon_pipeline/stealth/README.md) — the stealth
+  layer's own doc: what modern detectors measure (JA4 + inter-request signals,
+  DNS volume thresholds), the measurements taken on this repo's own toolchain,
+  every knob, the measured cost of shaping, and what is deliberately not built.
+- [`port_service_host/DESIGN.md`](../service/recon_pipeline/asset_pipelines/port_service_host/DESIGN.md)
+  — that pipeline's research doc: passive-first IP intelligence, the L0–L3 scan
+  ladder, tool choices with verified vendor claims, efficiency math, and the
+  phased plan. Its header records the deltas between this plan and the shipped
+  build, so the doc stays true now that the code exists.
 - [`commands.txt`](../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/commands.txt)
   — raw Docker commands for every bundled tool, for reproducing or debugging one
-  tool by hand.
+  tool by hand — including the shaped (identity + impersonation + rate limit)
+  variants the stages actually build.
 - `ai-agent-workspace/` — agent and skill definitions. Tooling configuration, not
   project documentation.
 

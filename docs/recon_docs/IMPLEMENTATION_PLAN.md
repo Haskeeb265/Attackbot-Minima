@@ -33,9 +33,9 @@ what is true about the repository today.
 | S7 End-to-end Domain pipeline (v1 loop) | **partial** | an end-to-end asset pipeline exists — `.../main.py`, running passive → active → permutation and writing a union of live hosts — but it does not touch the graph and has no scoring |
 | S8 Redis hot cache | not started | `REDIS_URL` exists in `config.py`; no client library, no code connects |
 | S9 Queue topology + workers | not started | — |
-| S10 Active dispatcher, rate limiting, recursion gate | **partial** | `.../active/` resolves, brute-forces and recurses with its own bounded limits (validated resolver pool, capped recursion), but there is no dispatcher, token bucket or policy gate |
-| S11 Re-scoring, decay, pruning | not started | — |
-| S12 Stealth & resilience | not started | — |
+| S10 Active dispatcher, rate limiting, recursion gate | **partial** | `.../active/` resolves, brute-forces and recurses with its own bounded limits (validated resolver pool, capped recursion) and now paces that work through the stealth layer's per-host token buckets; there is still no dispatcher, queue-priority or scoring-driven policy gate |
+| S11 Re-scoring, penalty re-verification, pruning | not started | — |
+| S12 Stealth & resilience | **partial (direct mode)** | `service/recon_pipeline/stealth/` — coherent per-host browser identities, pacing with jitter/backoff/`Retry-After`, WAF + challenge detection, persistent quarantine escalating to passive-only, per-resolver DNS volume budgeting, and transports with a capability report. Wired into `.../active/` and `.../permutation/`. **Not built:** proxy pools (D4 defers them), CAPTCHA solving, and Redis-backed shared quarantine (state is a JSON file) |
 | S13 LLM classification | not started | no provider SDK, endpoint or key anywhere in the repo |
 | S14 Observability, DLQ ops, monitoring | not started | each asset-pipeline stage writes its own `report.json`; there is no monitoring or queue-ops surface |
 
@@ -78,7 +78,7 @@ All other decisions below are marked **[OPEN]** where they still need your input
 | 8 | Redis hot cache | ✅ unit (fakeredis) + integration | S2, S0 |
 | 9 | Queue topology + workers (Redis Streams) | ✅ integration (real Redis) | S7, S8 |
 | 10 | Active dispatcher + rate limiting + recursion gate | ✅ unit (fake clock) + integration | S2, S9 |
-| 11 | Background re-scoring, decay, pruning | ✅ unit (injected time) | S2, S9 |
+| 11 | Background re-scoring, penalty re-verification, pruning | ✅ unit (injected time) | S2, S9 |
 | 12 | Stealth layer (transport adapter, CAPTCHA, passive-only) | ✅ unit (simulated blocks) | S10 |
 | 13 | LLM classification stage | ✅ mocked LLM provider | S1, S4, S7 (reads) + S10 gate |
 | 14 | Observability, DLQ ops, differential monitoring | ✅ integration | S7+ |
@@ -113,8 +113,7 @@ All other decisions below are marked **[OPEN]** where they still need your input
         ┌───────────────────────────┬───────────────────────┐
         ▼                           ▼                       ▼
 ┌────────────────┐       ┌──────────────────┐     ┌──────────────────┐
-│ Passive sources│       │  Extraction (S3) │     │ Scoring (S2)     │
-│ crt.sh (S5)    │  ──►  │  normalize →     │ ──► │ weights/decay/   │
+│ Passive sources│       │  Extraction (S3) │     │ Scoring (S2)     ││ crt.sh (S5)    │  ──►  │  normalize →     │  ──► │ weights/penalty/ │
 │ Wayback (S6)   │       │  candidate nodes │     │ penalties/audit  │
 │ (more later)   │       └──────────────────┘     └──────────────────┘
 └────────────────┘                                          │
@@ -125,7 +124,7 @@ All other decisions below are marked **[OPEN]** where they still need your input
                                                  └──────────────────┘
 ```
 
-**Flow (v1):** seeds enter the graph (S4) → passive sources fetch artifacts (S5/S6) → extraction normalizes into candidate nodes (S3) → scoring decides Active/Warm/Cold (S2) → Active candidates go through the dispatcher for deeper probing, gated by relevance (S10) → everything lands in the graph with provenance (S1) → hot cache + queues keep the hot path fast (S8/S9) → background loop refreshes decay and prunes (S11) → LLM classifies/plans on top (S13) → operators observe and monitor (S14).
+**Flow (v1):** seeds enter the graph (S4) → passive sources fetch artifacts (S5/S6) → extraction normalizes into candidate nodes (S3) → scoring decides Active/Warm/Cold (S2) → Active candidates go through the dispatcher for deeper probing, gated by relevance (S10) → everything lands in the graph with provenance (S1) → hot cache + queues keep the hot path fast (S8/S9) → background loop re-verifies penalty conditions and prunes (S11) → LLM classifies/plans on top (S13) → operators observe and monitor (S14).
 
 ---
 
@@ -137,7 +136,7 @@ These apply to *every* stage. They map the spec's requirements onto the project'
 2. **Module-qualified imports for infra access.** `import shared.graph as graph` / `import shared.redis_client as redis_client` — mirroring `import shared.db as db`. Never `from shared.graph import fetch_node`.
 3. **Unit-of-work rule, adapted.** Top-level orchestrators own driver/connection/session lifecycle; query functions receive `session` as a parameter (Neo4j sessions replace `conn`). Query functions never open their own session.
 4. **Idempotency everywhere.** Every graph write uses `MERGE` on a canonical identity `(asset_type, canonical_value)`. Raw artifacts carry `content_hash` so re-ingestion is a no-op. This delivers the spec's "effectively-once" NFR without distributed transaction gymnastics.
-5. **Every edge + score carries provenance.** `(source, tool, observed_at, confidence)` on edges; score decisions persist a full audit record (contributing signals + weights + decayed values).
+5. **Every edge + score carries provenance.** `(source, tool, observed_at, confidence)` on edges; score decisions persist a full audit record (contributing signals + weights + confidence + penalties).
 6. **Policy-gated active probing.** No active step executes without passing the recursion gate (S10) + rate limiter. A global `PASSIVE_ONLY` flag degrades the whole system to passive mode (spec NFR §9).
 7. **Logging:** `shared.colorlog.log` (`process`/`success`/`failed`/`info`/`warn`).
 8. **Tests:** pytest, one test file per module under `tests/`, integration tests follow the `smoke_test_db.py` rollback/sentinel pattern where applicable.
@@ -153,7 +152,7 @@ service/recon_pipeline/
   graph/schema.cypher       # idempotent constraints + indexes
   graph/crud.py             # node/edge CRUD functions (session param)
   scoring/weights.py        # signal weights, half-lives, penalties (S2)
-  scoring/engine.py         # FinalScore computation, decay, clamp (S2)
+  scoring/engine.py         # FinalScore computation, clamp (S2)
   scoring/audit.py          # score audit record construction (S2)
   extract/normalize.py      # canonical values: hostnames, URLs, IPs (S3)
   extract/extractors.py     # artifact extractors: SANs, URLs, secrets, hosts (S3)
@@ -210,7 +209,7 @@ service/recon_pipeline/
 
 - **Neo4j Community vs Enterprise.** Community is GPLv3, free, single-node only (no clustering/HA, no RBAC beyond basic auth, online backup is Enterprise-only per Neo4j docs). Trade-off: we accept single-node availability for zero cost; if a future prod deployment needs HA, that's a separate decision. Pin a specific community tag (e.g. `neo4j:5.26-community` or current 2025.x tag) for reproducibility. **[OPEN]** — do you want the latest 2025.x tag or a pinned 5.x LTS?
 - **Redis for both queues and cache.** Redis Streams provide consumer groups, message acknowledgment, and pending-entry re-delivery (`XREADGROUP`/`XACK`/`XAUTOCLAIM`) — enough for a single-machine "event-driven" topology without Kafka. Redis also serves the hot cache (S8). Trade-off: one extra infra dependency vs. Postgres-based queues (polling, slower) or in-process asyncio queues (no durability, no cross-process workers). Chosen: Redis (D2).
-- **Config location.** Extend the **root `config.py`** (which already centralizes env + rate limits per `scope.md` §3) with `NEO4J_URI/USER/PASSWORD`, `REDIS_URL`, and shared rate-limit values; `service/recon_pipeline/config.py` re-exports what recon needs. Trade-off: single source of truth (good) vs. root config growing (acceptable).
+- **Config location.** Extend the **root `config.py`** (which already centralizes env + rate limits per `scope.md` §3) with `NEO4J_URI/USER/PASSWORD`, `REDIS_URL`, and shared rate-limit values; `service/recon_pipeline/asset_pipelines/config.py` (the module that actually exists today) re-exports what recon needs. Trade-off: single source of truth (good) vs. root config growing (acceptable).
 - **Connection wrappers.** New `shared/graph.py` (Neo4j `GraphDatabase.driver(...)`, function-first) and `shared/redis_client.py` (redis-py client + stream helpers) mirror `shared/db.py`. Trade-off: thin wrappers add a layer but keep call sites obviously infra-touching, matching convention #2.
 - **APOC plugin.** Deferred. Neo4j's APOC adds utility procedures but complicates the Docker image. v1 needs no APOC. Revisit if a stage needs `apoc.periodic.*` or text utilities.
 - **Auth for local dev.** Neo4j requires a password on first boot (`NEO4J_AUTH`). Use env-provided credentials; do not print them (avoid the `config.py` credential-print bug flagged in `CONCERNS.md`).
@@ -238,22 +237,23 @@ service/recon_pipeline/
 
 ### Stage 2 — Scoring Engine (pure math)
 
-**Objective:** implement the spec §7 scoring model exactly — decay, weights, penalties, thresholds, audit — as pure, dependency-free functions.
+**Objective:** implement the spec §7 scoring model exactly — weights, penalties, thresholds, audit — as pure, dependency-free functions.
 
 **Mandatory dependencies:** **none** — fully buildable and testable in isolation. This is the project's most standalone-testable stage.
 
 **Standalone test:** `pytest tests/test_scoring.py` — pure unit tests:
-- decay math: `d(0)=1`, `d(h)=0.5`, `d(2h)=0.25`; clamp at [0,100].
+- weighted arithmetic: `FinalScore = clamp(Σ (w · c) + Σ penalties, 0, 100)`; no
+  time-dependent term, so the same observations always give the same score.
 - each positive signal contributes `w * d(t) * c`; **max-not-stack** rule (two observations of the same signal type → only the max contributes, per spec §7).
 - every penalty applies (parking page → −100 → immediate kill; localhost/sinkhole → −100; CDN-without-supporting-signals → −80; NXDOMAIN>14d → −50; expired cert → −40; takeover → −70; shared-hosting → −60; generic-name → −25; expired domain → −90).
 - threshold classification: ≥75 Active, 40–74 Warm, <40 Cold.
-- audit record completeness: every input signal/penalty appears in the output audit with `(signal_type, w, h, c, observed_at, decayed_weight)`.
+- audit record completeness: every input signal/penalty appears in the output audit with `(signal_type, w, c, observed_at, contribution)`.
 - time-dependence: engine takes `now` as an injectable parameter so tests are deterministic (no wall clock).
 
 **Decisions & trade-offs:**
 
 - **Weights as code constants vs config.** Put the spec tables (positive signals, half-lives, penalties) in `scoring/weights.py` as `dict`s, with an optional env override for tuning. Trade-off: code constants are versioned + type-checked and match the project's "no speculative abstraction" stance; config-driven tuning adds indirection the system doesn't need yet.
-- **Float math, rounded for audit.** Use IEEE doubles for decay (`2 ** (-t / h)`); round the final score + audit values to 2–4 decimals for storage/display. Trade-off: pure float is fast and simple; Decimal adds precision at cost with no real benefit at this scale. Boundary ties at exactly 75/40 use `>=` per spec.
+- **Float math, rounded for audit.** Use IEEE doubles for the weighted sum; round the final score + audit values to 2–4 decimals for storage/display. Trade-off: pure float is fast and simple; Decimal adds precision at cost with no real benefit at this scale. Boundary ties at exactly 75/40 use `>=` per spec.
 - **Score audit as a first-class structure.** `scoring/audit.py` builds a serializable `ScoreAudit` (signals list + penalties list + final score + state). This satisfies the spec NFR "every score decision must be auditable" from day one and is what S14 queries later. Trade-off: a little extra structure now vs. retrofitting audit after the fact.
 - **Where the engine plugs in.** S7 (e2e), S10 (gate decisions), S11 (re-scoring) all call the same pure functions. Because it's pure, it never needs Redis/Neo4j to be unit-tested — this is the stage that proves "testable without relying on another stage."
 
@@ -343,7 +343,7 @@ service/recon_pipeline/
 **Decisions & trade-offs:**
 
 - **Runner shape.** `pipeline/runner.py` — a plain function `run_domain_pipeline(seed) -> PipelineReport` (counts + scores). No background workers yet (that's S9). Trade-off: sequential single-process loop is slower but trivial to debug and test; the same functions get reused inside queue workers in S9 unchanged.
-- **Signal wiring for v1.** crt.sh subdomains get signals: exact-match seed (w=100, no decay), SAN co-occurrence with seed (w=60, h=90d), shares-non-CDN-IP (deferred — needs IP resolution, later stage). Penalties applied: parking/CDN heuristics (deferred to S10's gate for refinement, but basic generic-name penalty −25 applies now). Rationale: keep S7's assertions crisp — it tests the *loop*, not the full signal catalog.
+- **Signal wiring for v1.** crt.sh subdomains get signals: exact-match seed (w=100), SAN co-occurrence with seed (w=60), shares-non-CDN-IP (deferred — needs IP resolution, later stage). Penalties applied: parking/CDN heuristics (deferred to S10's gate for refinement, but basic generic-name penalty −25 applies now). Rationale: keep S7's assertions crisp — it tests the *loop*, not the full signal catalog.
 - **State on node + audit.** `state` property + `state_changed_at` + linked `ScoreAudit` record (as node property JSON or a small `:ScoreAudit` node — **[OPEN]** which; property-JSON is simpler, node gives queryable history).
 - **`PASSIVE_ONLY` honored even here** — v1 loop only does passive fetching (crt.sh), so this is naturally satisfied; the flag becomes load-bearing in S10+.
 
@@ -359,7 +359,7 @@ service/recon_pipeline/
 
 **Decisions & trade-offs:**
 
-- **Key schema (spec §8):** `sig:{node_id}` (node summary: last score/state), `sigobs:{node_id}:{signal_type}` (observations: weight, half-life, confidence, observed_at), `seed:hot:{seed_id}` (sorted set of related nodes by score), `node:seeds:{node_id}` (linked seeds set), `penalty:{node_id}` (active penalties), `bloom:seen:{seed_id}` (membership filter).
+- **Key schema (spec §8):** `sig:{node_id}` (node summary: last score/state), `sigobs:{node_id}:{signal_type}` (observations: weight, confidence, observed_at), `seed:hot:{seed_id}` (sorted set of related nodes by score), `node:seeds:{node_id}` (linked seeds set), `penalty:{node_id}` (active penalties), `bloom:seen:{seed_id}` (membership filter).
 - **Cache is derived, not authoritative.** Graph stays the system of record (spec: graph = system of record; cache = critical-path support). Cache entries are rebuildable from graph state — a cache wipe must not lose data. Trade-off: eventual consistency between cache and graph (fine — S11 refresher reconciles) vs. cache-as-source-of-truth (faster, dangerous). Chosen: derived cache.
 - **Bloom filter v1.** Use a Redis `SET` (or small integer bitmap via `SETBIT`) keyed `bloom:seen:{seed_id}` rather than the RedisBloom module. Trade-off: exact-but-memory-heavy SET vs. probabilistic-and-efficient RedisBloom (needs a module-enabled image). v1 = SET; note RedisBloom as an upgrade path when volumes grow. **[OPEN]** — acceptable?
 - **`fakeredis` for unit tests.** It's a solid in-memory substitute for common ops; streams support is partial, so S9 tests that touch streams use real Redis. Trade-off: slight test/env drift vs. zero-infra unit tests — acceptable split.
@@ -403,18 +403,18 @@ service/recon_pipeline/
 
 ---
 
-### Stage 11 — Background Re-scoring, Decay & Pruning
+### Stage 11 — Background Re-scoring, Penalty Re-verification & Pruning
 
-**Objective:** the spec's "background re-scoring continuously refreshes decay" — recompute scores as observations age, flip node states, cancel stale active work, and prune.
+**Objective:** keep stored scores honest against *material* change — re-check the conditions behind each penalty (still resolving, certificate valid, takeover state), re-score nodes whose evidence changed, flip states, cancel stale active work, and prune. Age alone changes nothing: a score moves only when an observation or a penalty condition does.
 
 **Mandatory dependencies:** S2 (scoring), S9 (queues to cancel pending work).
 
-**Standalone test:** `pytest tests/test_rescore.py` — inject observations with past `observed_at` timestamps, run the refresher, assert: decayed scores drop (e.g. a 60-weight SAN signal at t=180d → weight·0.25), states flip Active→Warm→Cold at the right thresholds, Cold nodes get their pending active jobs cancelled, hard-prune candidates (score < 20 for > 90 days with no new signals) are flagged/archived. Deterministic via injected clock.
+**Standalone test:** `pytest tests/test_rescore.py` — feed the refresher a graph with a changed penalty condition (name stopped resolving, certificate expired, CNAME now dangling) and assert the node is re-scored and its state flips at the right threshold; feed it the same graph unchanged and assert *nothing* moves, however old the observations are; assert Cold nodes get pending active jobs cancelled and long-cold candidates are flagged/archived. Deterministic via injected clock.
 
 **Decisions & trade-offs:**
 
 - **Refresh cadence.** Periodic loop (e.g. every N hours) + event-driven immediate re-score when a *new strong signal* arrives (spec §8: "new strong signals trigger immediate high-priority re-scoring"). Trade-off: pure periodic (simple, delayed reactions) vs. pure event-driven (instant, more churn) — hybrid with thresholds.
-- **Cache honesty.** The refresher recomputes `sig:{node_id}` / `sigobs:*` from graph facts so long-lived decayed weights stay honest (spec §8). TTLs implement interest-based retention (sliding window). Trade-off: refresher complexity vs. stale cache lying about scores — refresher is required by spec, built now.
+- **Cache honesty.** The refresher recomputes `sig:{node_id}` / `sigobs:*` from graph facts, so a cached score never disagrees with the evidence behind it (spec §8). TTLs implement interest-based retention (sliding window). Trade-off: refresher complexity vs. stale cache lying about scores — refresher is required by spec, built now.
 - **Pruning (spec §7).** Soft prune: score < 40 ⇒ `Cold` + cancel pending active jobs (queue-level cancel via `active.recon.*` consumer noticing state change). Optional hard prune: score < 20 for > 90 days with no new signals ⇒ archive flag (node kept, marked archived). Trade-off: keep-vs-archive — spec explicitly says archived nodes are retained for future correlation only; do **not** hard-delete in v1. **[OPEN]** — archive flag only, or actual data eviction later?
 - **Standalone-ness.** Even though it *uses* queues, the testability guarantee holds: the refresher core is a pure function `recompute(observations, now) -> (new_score, new_state)`; the queue-cancel side effects are thin wrappers tested separately.
 
@@ -422,7 +422,7 @@ service/recon_pipeline/
 
 ### Stage 12 — Stealth & Resilience Layer
 
-**Objective:** implement spec §5.1 — protocol-aware request transport with adaptive rate limiting, CAPTCHA/challenge detection, graceful passive-only fallback, and source quarantine. **Real proxy pools are deferred** (D4) — v1 ships the interface + direct transport + all the detection/backoff logic.
+**Objective:** implement spec §5.1 — protocol-aware request transport with adaptive rate limiting, CAPTCHA/challenge detection, graceful passive-only fallback, and source quarantine. **Real proxy pools are deferred** (D4) — the direct-mode layer is **built** at `service/recon_pipeline/stealth/` (see the status table): coherent per-host browser identities, pacing with jitter/backoff/`Retry-After`, WAF + challenge detection, persistent quarantine escalating to passive-only, and a per-resolver DNS volume budget. The sections below describe that layer as it now exists; the stage's own README and `stealth/README.md` carry the measured evidence.
 
 **Mandatory dependencies:** S10 (dispatcher integration point).
 
@@ -430,9 +430,9 @@ service/recon_pipeline/
 
 **Decisions & trade-offs:**
 
-- **Transport adapter (`stealth/transport.py`).** `Transport.send(request) -> Response` protocol with `DirectTransport` (v1: standard `requests`, honors per-target rate tokens + backoff) and a `ProxyTransport` stub implementing the same protocol for later residential/datacenter pools. Trade-off: adapter adds a hop now (cheap) vs. retrofitting all call sites later (expensive, and every future stage would have to care) — adapter now, per D4.
-- **CAPTCHA/challenge detection (`stealth/detect.py`).** Heuristics: status codes (429/403), body markers (captcha/challenge/verify/`cf-chl`), header fingerprints. On detection: exponential backoff → if sustained, quarantine that source + downgrade to passive-only for the target (spec §5.1 "graceful fallback to passive-only mode"). Trade-off: heuristic detection is imperfect (false positives/negatives) vs. ML detection (overkill) — heuristics, tunable constants.
-- **Traffic shaping.** Realistic TLS fingerprints / header ordering / HTTP/2 (spec §5.1) requires something like `curl_cffi` or a proxy provider — **deferred** with the proxies. Documented as the S12 follow-up; DirectTransport uses normal `requests` behavior. **[OPEN]** — fine to defer?
+- **Transport adapter — built at `service/recon_pipeline/stealth/transport.py`.** `Transport.send(request, identity) -> Response` with `RequestsTransport` (ordered headers, keep-alive, honest `tls_impersonation: false`) and `CurlCffiTransport` (full ClientHello + HTTP/2 + order, optional dependency), plus `select_transport()` which reports what ran and why. `ProxyTransport` remains the designed extension point for residential/datacenter pools (D4).
+- **CAPTCHA/challenge detection — built at `service/recon_pipeline/stealth/detect.py`.** Status codes (429/403), WAF header fingerprints (a data table covering Cloudflare, Akamai, Imperva, DataDome, PerimeterX, Fastly, CloudFront, F5, FortiWeb, …), strong challenge-page markers vs. weak words, body-size bounds, and `Retry-After` in both RFC 9110 forms. Evidence-gated by design: a challenge requires a challenge-specific marker; a bare 403 is a finding, not a block. On a served challenge the host is quarantined immediately; repeated denials need several incidents; a WAF blocking several hosts degrades the run to passive-only (`quarantine.py`).
+- **Traffic shaping.** Partially built (2026-09-16): identity-coherent header *contents* and real browser header *order* are handled by the `requests` transport, TLS ClientHello impersonation through the `httpx -tlsi` path (verified to produce the real Chrome JA4), and `curl_cffi` is implemented as an optional full-stack transport (not installed in this tree — the run report says so). What remains deferred with the proxies: HTTP/2 frame-level fingerprint shaping outside `curl_cffi`, and proxy/IP rotation. Evidence and captures: `service/recon_pipeline/stealth/README.md`.
 - **Quarantine state.** Lives in Redis (`quarantine:{source}` TTL); the S10 dispatcher consults it before enqueueing. Trade-off: Redis-based (shared across workers, simple) vs. DB-backed (durable, slower) — Redis.
 
 ---
@@ -523,7 +523,7 @@ S14 ◄── needs S7+ (a functioning pipeline to observe)
 | ASN → CIDR → PTR → Domain explosion | Post-v1 (needs ASN/BGP source — S5/S6 source interface + S10 gate; scheduled once keyed sources land — see §8.10) |
 | Mobile binary → Cloud resource → related infrastructure | Post-v1 (needs binary pipeline — future asset pipeline on S3/S7 pattern) |
 | Certificate SAN co-occurrence promotes unknown host | S7 (SAN signal w=60 wired) + S2 unit test |
-| Decay & penalty behavior (parking/NXDOMAIN demotion) | S2 unit tests + S11 re-scoring tests |
+| Penalty behavior (parking/NXDOMAIN demotion) | S2 unit tests + S11 re-scoring tests |
 
 **Spec §10 also doubles as acceptance tests** — each row above should be automated in the listed stage.
 
@@ -545,7 +545,7 @@ Still open:
 2. **[S8]** Bloom filter: plain Redis SET for v1, or add the RedisBloom module?
 3. **[S9]** Worker concurrency: threads (sync, matches current stack) vs. asyncio from the start?
 4. **[S11]** Hard prune: archive-flag only, or plan actual eviction later?
-5. **[S12]** Deferring TLS-fingerprint/HTTP-2 shaping with the proxy pools — OK?
+5. **[S12]** Partially resolved: identity coherence, header order and TLS impersonation are built (see the status table and `stealth/README.md`). Still open: HTTP/2 frame shaping beyond `curl_cffi`, and proxy pools (D4) — OK to keep deferred?
 6. **[S14]** Log/JSON observability for v1, or do you want a dashboard stack (e.g. Grafana) now?
 7. **Post-v1 sources:** which keyed sources (VirusTotal, SecurityTrails, Rapid7 FDNS, Shodan/Censys) do you intend to obtain keys for, and when? This decides when the ASN/CIDR/PTR pipeline and IP-intel pipeline get scheduled.
 8. **[S8]** OK to add `fakeredis` as a dev/test dependency for cache unit tests?

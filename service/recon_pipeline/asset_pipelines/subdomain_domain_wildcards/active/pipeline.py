@@ -60,7 +60,7 @@ import argparse
 import json
 import logging
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,13 +94,19 @@ from .resolve import (
 from .settings import (
     AXFR_ENABLED,
     AXFR_MAX_NAMESERVERS,
+    AXFR_SPACING,
     BRUTEFORCE_ENABLED,
     DEFAULT_SOURCE_TIMEOUT,
     HTTP_ENABLED,
+    HTTP_IMPERSONATE,
     HTTP_RATE_LIMIT,
     HTTP_THREADS,
     OUTPUT_DIR,
+    PASSIVE_ONLY,
+    QUARANTINE_FILE,
+    STEALTH_ENABLED,
     PASSIVE_SUBDOMAINS_FILE,
+    PUREDNS_RATE_LIMIT,
     RECURSION_ENABLED,
     RECURSION_MAX_DEPTH,
     RECURSION_WORD_LIMIT,
@@ -108,6 +114,7 @@ from .settings import (
     RESOLVER_QUERY_TIMEOUT,
     WILDCARD_ENABLED,
 )
+from ....stealth.session import StealthConfig, StealthSession
 from .tools import ToolImageMissingError, ensure_image, describe_tools
 from .wordlist import build_wordlist
 from .resolvers import Query, dnspython_query
@@ -149,6 +156,10 @@ class ActiveReport:
     records: dict[str, object] = field(default_factory=dict)
     http: dict[str, object] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
+    #: Stealth layer state: transport and its limits, identities, pacing, the DNS
+    #: budget plan, and any quarantine.  Present so an operator can answer "how
+    #: did this run present itself, and what did the target do about it?".
+    stealth: dict[str, object] = field(default_factory=dict)
     domains: list[str] = field(default_factory=list)
     wildcards: list[str] = field(default_factory=list)
     suppressed: dict[str, str] = field(default_factory=dict)
@@ -235,6 +246,8 @@ def run_active_stage(
     query: Query = dnspython_query,
     resolver: Resolver | None = None,
     passive_subdomains_file: Path | str = PASSIVE_SUBDOMAINS_FILE,
+    stealth: bool = STEALTH_ENABLED,
+    session: StealthSession | None = None,
 ) -> ActiveReport:
     """Run the full active stage for *target* and write its outputs.
 
@@ -263,6 +276,11 @@ def run_active_stage(
         ``threshold`` (default) / ``strict`` / ``lenient``.
     query / resolver:
         Injected DNS callables for tests (resolver validation / wildcard probing).
+    stealth / session:
+        Whether to run under the stealth layer (spec §5.1), or an explicit
+        :class:`..stealth.session.StealthSession` to use.  When it is active the
+        stage refuses to run in passive-only mode, shuffles candidate order, and
+        resolves in budget-sized batches, pacing and detecting blocks as it goes.
 
     Returns
     -------
@@ -304,6 +322,12 @@ def run_active_stage(
     def finish() -> ActiveReport:
         report.finished_at = _utc_now()
         report.seconds = time.monotonic() - started
+        if session is not None:
+            # Persist quarantine state (and record how the run presented itself)
+            # before the report is serialised, so the report describes the run's
+            # final stealth state rather than a stale snapshot.
+            report.stealth = session.to_dict()
+            session.save()
         report.outputs["report"] = _write_json(output_dir / REPORT_FILE, report).as_posix()
         _log_summary(report)
         return report
@@ -314,7 +338,26 @@ def run_active_stage(
         report.fatal = message
         return finish()
 
-    # 1. The stage's tools all run out of a locally built image.  Fail before any
+    # 1. Stealth layer (spec §5.1).  Built before anything else so that even the
+    #    image check and resolver validation are paced, and so a run that has
+    #    degraded to passive-only refuses *before* touching Docker or DNS rather
+    #    than quietly hammering on.
+    if session is None and stealth:
+        session = StealthSession(
+            StealthConfig.from_settings(
+                quarantine_path=QUARANTINE_FILE,
+                passive_only=PASSIVE_ONLY,
+            )
+        )
+    if session is not None:
+        if session.passive_only:
+            return abort(
+                "passive-only mode is active (PASSIVE_ONLY, or a WAF quarantine carried "
+                "over from a previous run): refusing to run the active stage"
+            )
+        log.info("stealth: %s", session.selection.reason)
+
+    # 2. The stage's tools all run out of a locally built image.  Fail before any
     #    work rather than midway with a confusing tool error.
     if engine_obj.name in ENGINES:
         try:
@@ -324,7 +367,7 @@ def run_active_stage(
         except Exception as exc:  # Docker missing / daemon down
             return abort(f"Docker is not available: {exc}")
 
-    # 2. Resolver pool.  Without a trustworthy pool nothing below means anything.
+    # 3. Resolver pool.  Without a trustworthy pool nothing below means anything.
     pool = resolver_mod.prepare_resolvers(
         output_dir=output_dir,
         resolvers=resolvers,
@@ -346,7 +389,46 @@ def run_active_stage(
         resolvers=pool.valid,
         trusted=pool.trusted,
         timeout=timeout,
+        # The resolver tools' own rate limit is derived from the stealth budget
+        # when the operator has not set one explicitly (0 = derive).
+        rate_limit=PUREDNS_RATE_LIMIT or (session.dns_rate_limit(resolver_count=len(pool.valid)) if session else 0),
     )
+
+    def resolve_all(names: Sequence[str], *, step: str, label: str = "") -> set[str]:
+        """Resolve *names*, honouring the per-resolver volume budget.
+
+        The volume budget is a *count* per resolver, not a rate, so it is
+        enforced by splitting the work into batches that are separated in time
+        (each batch is its own invocation, with a jittered pause between them)
+        rather than by slowing one blast down — slowing a blast changes how it
+        looks, not how many names each resolver learns.  A single batch keeps the
+        phase's plain artefact names, so small runs look exactly as before.
+        """
+        candidates = list(dict.fromkeys(names))
+        if not candidates:
+            return set()
+        if session is None:
+            result = engine_obj.resolve(candidates, context)
+            report.steps.append(dict(result.to_dict(), step=step))
+            if not result.ok:
+                report.ok = False
+            return result.resolved
+
+        plan = session.plan_dns(candidates, pool.valid, seed=apex)
+        single = len(plan.batches) <= 1
+        found: set[str] = set()
+        for batch in plan.batches:
+            if batch.index:
+                session.pause_between_batches(batch.index)
+            batch_context = context if single else replace(context, label=f"{label}batch-{batch.index + 1}")
+            result = engine_obj.resolve(list(batch.labels), batch_context)
+            report.steps.append(
+                dict(result.to_dict(), step=step if single else f"{step}-{batch.index + 1}")
+            )
+            if not result.ok:
+                report.ok = False
+            found |= result.resolved
+        return found
 
     # 3. Candidate sources.
     sources: dict[str, set[str]] = {}
@@ -416,16 +498,17 @@ def run_active_stage(
 
     # 5. Resolve the known candidates (passive + operator-supplied).
     if seeds:
-        verdict = engine_obj.resolve(sorted(seeds), context)
-        report.steps.append(dict(verdict.to_dict(), step="resolve"))
-        if not verdict.ok:
-            report.ok = False
+        # ``resolve_all`` shuffles (keyed on the target) before resolving, so the
+        # order of the batch does not advertise the source layout, and splits the
+        # work when the resolver pool cannot carry the whole volume inside the
+        # budget window.
+        found = resolve_all(sorted(seeds), step="resolve")
         # One label per *source that contained the name*, so a host found by the
         # passive stage and also handed over by the operator carries both — and
         # therefore counts as corroborated when the wildcard filter runs.
-        absorb(verdict.resolved & passive_candidates, "passive")
-        absorb(verdict.resolved & supplied, "supplied")
-        resolved |= verdict.resolved
+        absorb(found & passive_candidates, "passive")
+        absorb(found & supplied, "supplied")
+        resolved |= found
 
     # 6. Level-1 wordlist bruteforce.
     wordlist = build_wordlist(
@@ -476,23 +559,26 @@ def run_active_stage(
             )
             # A labelled context gives each pass its own input/output artefacts,
             # so the primary resolve's raw results survive the recursion pass.
-            deep = engine_obj.resolve(names, replace(context, label=f"recursive-{level}"))
-            report.steps.append(dict(deep.to_dict(), step=f"recursive-{level}"))
-            if not deep.ok:
-                report.ok = False
+            deep_resolved = resolve_all(names, step=f"recursive-{level}", label=f"recursive-{level}-")
             queried |= set(names)
-            fresh = deep.resolved - resolved
-            absorb(deep.resolved, "recursive")
-            resolved |= deep.resolved
+            fresh = deep_resolved - resolved
+            absorb(deep_resolved, "recursive")
+            resolved |= deep_resolved
             processed |= set(parents)
             if not fresh:
                 break
 
     # 8. Zone transfer attempts (authoritative names, when a server allows it).
+    #    Spaced out: one query per nameserver fired back-to-back is a sweep.
     transfers: list[axfr_mod.ZoneTransfer] = []
     if axfr:
         transfers = axfr_mod.zone_transfer(
-            apex, output_dir=output_dir, max_nameservers=AXFR_MAX_NAMESERVERS, timeout=timeout
+            apex,
+            output_dir=output_dir,
+            max_nameservers=AXFR_MAX_NAMESERVERS,
+            timeout=timeout,
+            spacing=AXFR_SPACING if session else 0.0,
+            sleep=(lambda seconds: session.clock.sleep(seconds)) if session else None,
         )
         report.axfr = [transfer.to_dict() for transfer in transfers]
         zone_hosts = axfr_mod.transfer_hosts(transfers)
@@ -522,10 +608,18 @@ def run_active_stage(
 
     live = sorted(kept)
 
-    # 10. Record enrichment on the names that survived.
-    if enrich and live:
+    # 10. Record enrichment on the names that survived.  The apex and the DMARC
+    #     policy name are always enriched alongside the live hosts: mail policy
+    #     (MX, SPF in TXT, DMARC in ``_dmarc.<apex>`` TXT) lives on the apex, not
+    #     on subdomains.  Measured miss (qbsco.net, 2026-09-17): the stage queried
+    #     MX/TXT for four subdomains, none of which had any, while the M365 MX
+    #     records that answered for the apex were never asked for.  A NXDOMAIN
+    #     ``_dmarc`` is kept as an answered-empty row, so "no DMARC policy" stays a
+    #     recorded fact rather than an absence of evidence.
+    if enrich:
+        enrichment_names = [*live, apex, f"_dmarc.{apex}"]
         enriched = enrich_mod.enrich_records(
-            live, output_dir=output_dir, timeout=timeout
+            enrichment_names, output_dir=output_dir, timeout=timeout
         )
         report.records = enriched.to_dict()
         if not enriched.ok:
@@ -539,6 +633,8 @@ def run_active_stage(
             timeout=timeout,
             rate_limit=HTTP_RATE_LIMIT,
             threads=HTTP_THREADS,
+            session=session,
+            impersonate=HTTP_IMPERSONATE,
         )
         report.http = probed.to_dict()
         if not probed.ok:

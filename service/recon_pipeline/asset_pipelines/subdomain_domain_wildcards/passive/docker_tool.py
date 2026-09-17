@@ -181,6 +181,7 @@ def run_container(
     dns: list[str] | None = None,
     environment: dict[str, str] | None = None,
     entrypoint: str | None = None,
+    cap_add: list[str] | None = None,
 ) -> ContainerRun:
     """Run *image* with *args*, streaming stdout/stderr into the given files.
 
@@ -208,6 +209,12 @@ def run_container(
         ``-e`` variables for the container.
     entrypoint:
         Override the image entrypoint (``--entrypoint``).
+    cap_add:
+        Linux capabilities to grant the container (``--cap-add``).  Only the
+        port/service stage needs this: naabu's SYN scan requires raw sockets
+        (``NET_RAW``, plus ``NET_ADMIN`` for some host-discovery modes), while
+        its CONNECT mode needs nothing.  Kept as an explicit, per-call option
+        rather than a default so no other stage silently widens its privileges.
 
     Returns
     -------
@@ -232,6 +239,8 @@ def run_container(
         command += ["-v", f"{_docker_host_path(host_path)}:{container_path}{suffix}"]
     for key, value in (environment or {}).items():
         command += ["-e", f"{key}={value}"]
+    for capability in cap_add or []:
+        command += ["--cap-add", capability]
     if entrypoint:
         command += ["--entrypoint", entrypoint]
     command += [image, *args]

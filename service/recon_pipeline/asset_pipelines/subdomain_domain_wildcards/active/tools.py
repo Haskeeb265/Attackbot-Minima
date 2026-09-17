@@ -32,6 +32,7 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..passive.docker_tool import (
     ContainerRun,
@@ -43,6 +44,9 @@ from ..passive.docker_tool import (
     run_container,
 )
 from .settings import CONTAINER_WORKDIR as WORKDIR
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, keeps this module import-light
+    from ....stealth.identity import BrowserIdentity
 from .settings import DEFAULT_SOURCE_TIMEOUT, IMAGE, PASSIVE_DIR
 
 log = logging.getLogger("active.tools")
@@ -383,9 +387,34 @@ def httpx_args(
     input_path: str = WORK_INPUT,
     rate_limit: int = 100,
     threads: int = 50,
+    identity: "BrowserIdentity | None" = None,
+    impersonate: bool = True,
+    include_headers: bool = True,
+    max_host_errors: int | None = None,
 ) -> list[str]:
-    """``httpx`` — HTTP probing of already-resolved hosts, JSONL on stdout."""
-    return [
+    """``httpx`` — HTTP probing of already-resolved hosts, JSONL on stdout.
+
+    When *identity* is supplied the probe stops looking like a stock Go client:
+
+    * ``-random-agent=false`` — the CLI's randomiser is **on by default** and is
+      the single worst offender: measured against ``tls.peet.ws`` it sends user
+      agents such as ``Firefox/3.6.13`` (2010) or ``Chrome/134.0.0.0`` for
+      ``Kubuntu; Linux i686``, i.e. a user agent no browser has ever sent.  One
+      stable identity per host beats a rotating fiction.
+    * ``-tlsi <profile>`` — uTLS ClientHello impersonation.  Verified to produce
+      the real Chrome JA4 (``t13d1516h2_8daaf6152771_...``).
+    * ``-H ...`` — the identity's coherent header set (Client Hints included), so
+      the user agent, the hints and the ClientHello agree with each other.
+    * ``-irh`` — response headers in the JSON, which is how WAF/challenge
+      responses are detected on this bulk pass (see ``enrich.probe_http``).
+    * ``-maxhr`` — a low ceiling on per-host errors, so a host that is refusing
+      us is dropped instead of retried into a hard block.
+
+    Header *order* is the one thing the CLI cannot fix: Go sorts them
+    alphabetically.  That is documented in the stealth README and is the reason
+    the Python transport exists.
+    """
+    args = [
         "-silent",
         "-json",
         "-l",
@@ -400,7 +429,17 @@ def httpx_args(
         str(threads),
         "-duc",
         "-nc",
+        "-random-agent=false",
     ]
+    if identity is not None:
+        if impersonate:
+            args += ["-tlsi", identity.tls_profile]
+        args += identity.httpx_header_args()
+    if include_headers:
+        args.append("-irh")
+    if max_host_errors:
+        args += ["-maxhr", str(max_host_errors)]
+    return args
 
 
 def dnsgen_args(

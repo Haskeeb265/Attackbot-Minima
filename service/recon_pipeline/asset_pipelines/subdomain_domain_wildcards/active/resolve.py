@@ -448,7 +448,12 @@ def get_engine(name: str) -> Engine:
 
 
 def select_engine(names: Iterable[str] = ()) -> Engine:
-    """First requested engine that exists; the default when none is named."""
+    """The first requested engine, **validated**; the default when none is named.
+
+    An unknown name raises rather than falling through to the next request: this
+    is a ``--engine`` value someone typed, and quietly running a different engine
+    than the one asked for would change the results while looking like it worked.
+    """
     for name in names:
         return get_engine(name)
     return ENGINES[DEFAULT_ENGINE]
@@ -503,10 +508,19 @@ def recursion_parents(
     parents first: they are proven live, so a query spent under them is likelier
     to hit than one spent under an unresolved ancestor.  Depth is the tie-breaker,
     since a shallow parent is where a generic wordlist is most likely to land.
+
+    Only names strictly **below** *apex* qualify.  The apex itself is excluded
+    because its direct children are the level-1 candidate set, which the caller
+    has already queried — offering it back would spend a wordlist's worth of
+    requests re-asking questions that were just answered.  Names outside the apex
+    are excluded because they are not this stage's to query at all, and the
+    ancestor walk would otherwise climb out of scope one label at a time.
     """
     preferred = set(prefer)
     parents: set[str] = set()
     for name in known:
+        if name == apex or not name.endswith("." + apex):
+            continue
         if depth_below(name, apex) < max_depth:
             parents.add(name)
         current = parent_of(name)

@@ -29,6 +29,7 @@ from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.re
 from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.resolvers import (
     QueryOutcome,
 )
+from service.recon_pipeline.stealth.transport import Capabilities, Request, Response
 
 #: Names the resolver-validation fakes claim to resolve.
 GOOD_NAMES = ("example.com", "cloudflare.com", "google.com")
@@ -129,6 +130,65 @@ def query_factory():
             return QueryOutcome(error="timeout")
 
         return query
+
+    return build
+
+
+@dataclass
+class FakeTransport:
+    """A scripted transport: returns queued responses and records requests.
+
+    Used to exercise the stealth layer's pacing, detection and quarantine
+    without any network access.  ``script`` may be a list of responses (consumed
+    in order, the last one repeating) or a callable taking the request.
+    """
+
+    script: object = field(default_factory=lambda: [Response(url="", status=200)])
+    name: str = "fake"
+    capability_overrides: dict[str, object] = field(default_factory=dict)
+    requests: list[Request] = field(default_factory=list)
+    identities: list[str] = field(default_factory=list)
+    closed: bool = False
+
+    def _next(self, request: Request) -> Response:
+        if callable(self.script):
+            return self.script(request)
+        responses = list(self.script)  # type: ignore[arg-type]
+        # ``send`` records the request before choosing a response, so the first
+        # call is index 0 and the last response repeats once the script runs out.
+        index = min(len(self.requests) - 1, len(responses) - 1)
+        return responses[index]
+
+    def send(self, request: Request, *, identity=None) -> Response:  # noqa: ANN001 - protocol
+        self.requests.append(request)
+        self.identities.append(getattr(identity, "name", ""))
+        response = self._next(request)
+        if not response.url:
+            response.url = request.url
+        if not response.transport:
+            response.transport = self.name
+        return response
+
+    def close(self) -> None:
+        self.closed = True
+
+    @property
+    def capabilities(self) -> Capabilities:
+        return Capabilities(
+            name=self.name,
+            tls_impersonation=bool(self.capability_overrides.get("tls_impersonation", False)),
+            http2=bool(self.capability_overrides.get("http2", False)),
+            header_order=bool(self.capability_overrides.get("header_order", True)),
+            keepalive=True,
+        )
+
+
+@pytest.fixture
+def fake_transport():
+    """Factory for a :class:`FakeTransport`."""
+
+    def build(**kwargs) -> FakeTransport:
+        return FakeTransport(**kwargs)
 
     return build
 
