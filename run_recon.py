@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Run the names, ports/services and URL/endpoint pipelines against one target and
-write one combined report at the project root.
+"""Run the names, ports/services, URL/endpoint and ASN/CIDR pipelines against one
+target and write one combined report at the project root.
 
 What it does, in order:
 
@@ -8,9 +8,12 @@ What it does, in order:
    ``active/output/records.jsonl`` is the address source for the port stage;
 2. runs ``port_service_host`` against the same target;
 3. runs ``url_endpoint`` (historical URL harvest -> endpoints/parameters/JS);
-4. assembles ``RECON_<target>_OUTPUT.md`` at the project root: a data-driven
+4. runs ``asn_cidr`` (network ownership discovery; never scans, emits the ports
+   stage's discovered-scope files) — best *after* pipeline 2 so sibling
+   addresses exist for annotation;
+5. assembles ``RECON_<target>_OUTPUT.md`` at the project root: a data-driven
    summary (read from the stages' machine reports, never hand-written) followed
-   by every curated artifact verbatim, then both console logs.
+   by every curated artifact verbatim, then the console logs.
 
 Two properties it exists to guarantee:
 
@@ -29,6 +32,7 @@ Usage::
     python run_recon.py -t example.com --skip-subdomain              # ports + URLs
     python run_recon.py -t example.com --skip-ports                  # names + URLs
     python run_recon.py -t example.com --skip-url                    # names + ports
+    python run_recon.py -t example.com --skip-asn                    # names + ports + URLs
 
 Per-stage knobs keep working through their environment variables (``PSH_*``,
 ``ACTIVE_*``) — this script forwards nothing it does not understand, so a run is
@@ -50,10 +54,12 @@ ROOT = Path(__file__).resolve().parent
 SDW_MODULE = "service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.main"
 PSH_MODULE = "service.recon_pipeline.asset_pipelines.port_service_host.pipeline"
 URL_MODULE = "service.recon_pipeline.asset_pipelines.url_endpoint.main"
+ASN_MODULE = "service.recon_pipeline.asset_pipelines.asn_cidr.main"
 
 SDW_DIR = ROOT / "service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards"
 PSH_DIR = ROOT / "service/recon_pipeline/asset_pipelines/port_service_host"
 URL_DIR = ROOT / "service/recon_pipeline/asset_pipelines/url_endpoint"
+ASN_DIR = ROOT / "service/recon_pipeline/asset_pipelines/asn_cidr"
 
 #: The artifacts worth embedding, relative to each stage directory.  Anything
 #: absent or stale is skipped and reported.  The permutation stage's 26
@@ -108,6 +114,14 @@ URL_ARTIFACTS: tuple[str, ...] = (
     "output/hosts.txt",
     "output/report.json",
     "output/summary.json",
+)
+
+ASN_ARTIFACTS: tuple[str, ...] = (
+    "output/networks.jsonl",
+    "output/asns.jsonl",
+    "output/scope/discovered.txt",
+    "output/scope/discovered.annotated.txt",
+    "output/report.json",
 )
 
 
@@ -217,7 +231,8 @@ def _mail_records(sdw_dir: Path, apex: str) -> list[str]:
     return rows
 
 
-def _summary_section(sdw_report: dict, psh_report: dict, url_report: dict, apex: str,
+def _summary_section(sdw_report: dict, psh_report: dict, url_report: dict,
+                     asn_report: dict, apex: str,
                      warnings: list[str] | None = None) -> str:
     """The data-driven header of the report: what happened, from the machine reports."""
     out: list[str] = [f"# Recon output — {apex}", ""]
@@ -312,17 +327,39 @@ def _summary_section(sdw_report: dict, psh_report: dict, url_report: dict, apex:
         out.append(f"Counts: `{json.dumps(counts, sort_keys=True)}`")
         out.append("")
 
-    if not sdw_report and not psh_report and not url_report:
+    if asn_report:
+        counts = asn_report.get("counts") or {}
+        out.append("## Pipeline 4 — asn_cidr (network ownership; discovery only, never scans)")
+        out.append("")
+        out.append(
+            f"{counts.get('networks', 0)} network(s) discovered "
+            f"({counts.get('announced', 0)} announced, {counts.get('allocated', 0)} allocated, "
+            f"{counts.get('both_origins', 0)} corroborated), "
+            f"{counts.get('with_known_hosts', 0)} contain resolved address(es), in "
+            f"{asn_report.get('seconds', 0):.1f}s · ok={asn_report.get('ok')}"
+        )
+        out.append("")
+        out.append(
+            "Discovered ≠ declared: `asn_cidr/output/scope/discovered.txt` feeds no "
+            "scan without an operator moving it into declared scope (design §5.4)."
+        )
+        out.append("")
+        out.append(f"Counts: `{json.dumps(counts, sort_keys=True)}`")
+        out.append("")
+
+    if not sdw_report and not psh_report and not url_report and not asn_report:
         out.append("_No pipeline produced a readable report — see the logs below._")
         out.append("")
     return "\n".join(out) + "\n"
 
 
 def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
-             sub_log: Path, port_log: Path, url_log: Path,
+             ran_asn: bool,
+             sub_log: Path, port_log: Path, url_log: Path, asn_log: Path,
              sdw_before: dict[str, float] | None = None,
              psh_before: dict[str, float] | None = None,
-             url_before: dict[str, float] | None = None) -> Path:
+             url_before: dict[str, float] | None = None,
+             asn_before: dict[str, float] | None = None) -> Path:
     """Write the combined report: computed summary + this-run artifacts + logs.
 
     ``*_before`` are the mtime snapshots taken *before* the stages ran; a file
@@ -332,6 +369,7 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
     sdw_before = sdw_before if sdw_before is not None else _mtimes(SDW_DIR)
     psh_before = psh_before if psh_before is not None else _mtimes(PSH_DIR)
     url_before = url_before if url_before is not None else _mtimes(URL_DIR)
+    asn_before = asn_before if asn_before is not None else _mtimes(ASN_DIR)
 
     def fresh(directory: Path, before: dict[str, float], relative: str) -> bool:
         """True when the artifact is new or was rewritten after the snapshot."""
@@ -345,6 +383,7 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
     sdw_report = _read_json(SDW_DIR / "output/summary.json") if ran_subdomain else {}
     psh_report = _read_json(PSH_DIR / "output/report.json") if ran_ports else {}
     url_report = _read_json(URL_DIR / "output/summary.json") if ran_url else {}
+    asn_report = _read_json(ASN_DIR / "output/report.json") if ran_asn else {}
 
     # The summary is only as fresh as the machine report it was read from.  When
     # a stage was asked to run but did not rewrite its report (a crash before the
@@ -373,8 +412,15 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
             "pipeline 3 did not rewrite its summary this run - "
             "the figures below describe a previous run"
         )
+    if ran_asn and asn_report and not fresh(
+        ASN_DIR, asn_before or {}, "output/report.json"
+    ):
+        warnings.append(
+            "pipeline 4 did not rewrite its report this run - "
+            "the figures below describe a previous run"
+        )
 
-    parts: list[str] = [_summary_section(sdw_report, psh_report, url_report, apex, warnings)]
+    parts: list[str] = [_summary_section(sdw_report, psh_report, url_report, asn_report, apex, warnings)]
 
     if ran_subdomain:
         parts.append("---\n\n## Verbatim artifacts — subdomain_domain_wildcards\n")
@@ -423,6 +469,19 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
         if stale_url:
             parts.append(f"\n_Stale artifacts excluded from embedding: {', '.join(stale_url)}_\n")
 
+    if ran_asn:
+        parts.append("---\n\n## Verbatim artifacts — asn_cidr\n")
+        stale_asn: list[str] = []
+        for relative in ASN_ARTIFACTS:
+            path = ASN_DIR / relative
+            if path.is_file() and not fresh(ASN_DIR, asn_before, relative):
+                stale_asn.append(relative)
+                parts.append(_fence(path, relative, stale=True))
+            else:
+                parts.append(_fence(path, relative, stale=False))
+        if stale_asn:
+            parts.append(f"\n_Stale artifacts excluded from embedding: {', '.join(stale_asn)}_\n")
+
     parts.append("---\n\n## Console logs\n")
     if ran_subdomain:
         parts.append(_fence(sub_log, sub_log.name, stale=False))
@@ -430,6 +489,8 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
         parts.append(_fence(port_log, port_log.name, stale=False))
     if ran_url:
         parts.append(_fence(url_log, url_log.name, stale=False))
+    if ran_asn:
+        parts.append(_fence(asn_log, asn_log.name, stale=False))
 
     report_path = ROOT / f"RECON_{apex}_OUTPUT.md"
     report_path.write_text("".join(parts), encoding="utf-8", newline="\n")
@@ -447,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-subdomain", action="store_true", help="skip pipeline 1")
     parser.add_argument("--skip-ports", action="store_true", help="skip pipeline 2")
     parser.add_argument("--skip-url", action="store_true", help="skip pipeline 3")
+    parser.add_argument("--skip-asn", action="store_true", help="skip pipeline 4 (ASN/CIDR discovery)")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging in every stage")
     args = parser.parse_args(argv)
 
@@ -466,17 +528,20 @@ def main(argv: list[str] | None = None) -> int:
     sub_log = ROOT / f"recon_{apex}_subdomain_{stamp}.log"
     port_log = ROOT / f"recon_{apex}_ports_{stamp}.log"
     url_log = ROOT / f"recon_{apex}_url_{stamp}.log"
+    asn_log = ROOT / f"recon_{apex}_asn_{stamp}.log"
 
     exit_codes: list[int] = []
     ran_subdomain = not args.skip_subdomain
     ran_ports = not args.skip_ports
     ran_url = not args.skip_url
+    ran_asn = not args.skip_asn
 
     # Snapshot the output trees BEFORE the stages run: the stale-artifact guard
     # is "did this file's mtime move during the run", which needs a baseline.
     sdw_before = _mtimes(SDW_DIR) if ran_subdomain else None
     psh_before = _mtimes(PSH_DIR) if ran_ports else None
     url_before = _mtimes(URL_DIR) if ran_url else None
+    asn_before = _mtimes(ASN_DIR) if ran_asn else None
 
     if ran_subdomain:
         command = [sys.executable, "-u", "-m", SDW_MODULE, "-t", apex,
@@ -494,11 +559,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.verbose:
             command.append("-v")
         exit_codes.append(_run_streamed(command, url_log))
+    if ran_asn:
+        # After pipeline 2 deliberately: sibling addresses are this pipeline's
+        # seeds and annotation input.
+        command = [sys.executable, "-u", "-m", ASN_MODULE, "-t", apex]
+        if args.verbose:
+            command.append("-v")
+        exit_codes.append(_run_streamed(command, asn_log))
 
     report_path = assemble(
         apex, ran_subdomain=ran_subdomain, ran_ports=ran_ports, ran_url=ran_url,
-        sub_log=sub_log, port_log=port_log, url_log=url_log,
+        ran_asn=ran_asn,
+        sub_log=sub_log, port_log=port_log, url_log=url_log, asn_log=asn_log,
         sdw_before=sdw_before, psh_before=psh_before, url_before=url_before,
+        asn_before=asn_before,
     )
     print(f"\n[run_recon] combined report: {report_path}")
     return 0 if all(code == 0 for code in exit_codes) else 1

@@ -1,0 +1,40 @@
+# asn_cidr — raw per-source commands (reproduction notes)
+#
+# The pipeline is pure Python + keyless HTTP; there is no tool image and
+# nothing to build.  These are the raw commands behind each source, for
+# reproducing one lookup by hand or verifying an API change upstream.
+
+# ---------------------------------------------------------------- #
+# RIPEstat — which prefixes does an AS announce (routing claim)
+# ---------------------------------------------------------------- #
+curl -s "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS400771&sourceapp=attackbot-recon-asn-cidr"
+# -> {"data":{"prefixes":[{"prefix":"103.53.44.0/22",...},...]}}
+
+# RIPEstat — which AS(es) announce the prefix an address lives in
+curl -s "https://stat.ripe.net/data/prefix-overview/data.json?resource=103.53.45.170&sourceapp=attackbot-recon-asn-cidr"
+# -> {"data":{"asns":[{"asn":58895,"holder":"EBONE1-PK ..."}],"block":{"resource":"103.53.44.0/22"}}}
+
+# ---------------------------------------------------------------- #
+# RDAP — the allocation record behind an address (registry claim)
+# ---------------------------------------------------------------- #
+curl -sL "https://rdap.org/ip/103.53.45.170"
+# rdap.org bootstraps to the authoritative RIR (ARIN/RIPE/APNIC/LACNIC/AFRINIC).
+# -> {"handle":"...","name":"...","startAddress":"103.53.44.0","endAddress":"103.53.47.255",
+#     "entities":[{"roles":["registrant"],"vcardArray":[...,"fn","E Bone Network (Pvt.) Limited"]}]}
+
+# A 404 means "nothing is allocated at this address" — a usable fact, distinct
+# from "the RIR did not answer" (transport failure).
+
+# ---------------------------------------------------------------- #
+# Team Cymru (already implemented by the ports stage over DNS TXT; the
+# port-43 whois recipe below is blocked on some networks, including this one)
+# ---------------------------------------------------------------- #
+whois -h whois.cymru.com " -v 103.53.45.170"
+# -> "58895 | 103.53.44.0/22 | PK | apnic | 2013-04-15 | EBONE1-PK ..."
+
+# ---------------------------------------------------------------- #
+# The pipeline itself
+# ---------------------------------------------------------------- #
+python -m service.recon_pipeline.asset_pipelines.asn_cidr.main -t qbsco.net
+python -m service.recon_pipeline.asset_pipelines.asn_cidr.main -t qbsco.net --asn 400771 --no-sibling-input
+python -m service.recon_pipeline.asset_pipelines.asn_cidr.main --list   # (stages: lookup, emit)

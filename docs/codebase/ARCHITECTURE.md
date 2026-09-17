@@ -1,10 +1,10 @@
 # Architecture
 
 Attackbot is an attack surface management tool for bug bounty programs. Today it
-has three built subsystems — a **scraper** that ingests HackerOne program data into
-PostgreSQL, three **recon asset pipelines** (names, then ports/services/hosts,
-then URLs/endpoints), and a **graph layer** (Neo4j schema + CRUD) that the recon
-results are not yet written into.
+has four built subsystems — a **scraper** that ingests HackerOne program data into
+PostgreSQL, four **recon asset pipelines** (names, then ports/services/hosts,
+then URLs/endpoints, then network ownership), and a **graph layer** (Neo4j schema
++ CRUD) that the recon results are not yet written into.
 
 ```
 HackerOne API ──▶ scraper ──▶ PostgreSQL ──▶ (planned) seed ingestion ──▶ Neo4j
@@ -13,7 +13,9 @@ in-scope domain ──▶ subdomain_domain_wildcards ──▶ live hosts (files
                               │                                           │
                               ├──▶ port_service_host ──▶ ports/services ──┤
                               │                                           │
-                              └──▶ url_endpoint ──▶ endpoints, params, JS ─┘
+                              ├──▶ url_endpoint ──▶ endpoints, params, JS ┤
+                              │                                           │
+                              └──▶ asn_cidr ──▶ ASNs/CIDRs + discovered ──┘
                                         (no pipeline wired into the graph yet)
 ```
 
@@ -206,6 +208,49 @@ Its own R&D doc is [`url_endpoint/DESIGN.md`](../../service/recon_pipeline/asset
  traffic to the target, so it belongs behind the unbuilt S10 dispatcher/stealth
 chokepoint — and graph writes.
 
+## 2e. Network-ownership pipeline — `asn_cidr` (built)
+
+`service/recon_pipeline/asset_pipelines/asn_cidr/` answers the fourth layer:
+*which networks does the target hold or announce — what exists that DNS never
+pointed at?* It is keyless, Docker-free and **never scans**: it reads
+third-party registries and writes artifacts.
+
+```
+seeds     sibling addresses (ports stage output) + --asn / --address flags
+   ↓
+lookup    RIPEstat announced-prefixes / prefix-overview  (routing claims)
+          RDAP via rdap.org                              (allocation claims)
+   ↓
+merge     one row per network; announced/allocated/corroborated marked
+   ↓
+annotate  which networks contain sibling-resolved addresses (confirmed territory)
+   ↓
+emit      networks.jsonl · asns.jsonl · scope/discovered{,.annotated}.txt · report.json
+```
+
+Design rules the code enforces:
+
+- **Claims, not truth.** Every network row carries *how we know* — `announced`
+  (routing), `allocated` (registry), or both when corroborated. The ports
+  stage's §5.4 gate (declared vs advisory scope) reads that distinction; a
+  discovered network never scan-authorises itself.
+- **Aggregate announcements are refused.** A live run showed AS8075 announcing
+  `40.0.0.0/8` — a routing aggregate containing one target address and 16
+  million addresses it does not operate. The /16 ceiling (v4) refuses these and
+  counts them (`refused_wide`); VIP-scale narrow announcements get the same
+  treatment from the other side (`ASN_MIN_PREFIX_LEN`).
+- **The sibling's format is emitted, not invented.** `scope/discovered.txt` is
+  byte-compatible with the ports stage's scope files (one CIDR per line), under
+  a directory name that says *discovered*.
+- **"No data" ≠ "no answer".** A 404 from an RIR is a fact (nothing allocated
+  there); a refused connection is a failure — the report keeps them apart, the
+  same discipline the URL pipeline's sources follow.
+
+Its own R&D doc is [`asn_cidr/DESIGN.md`](../../service/recon_pipeline/asset_pipelines/asn_cidr/DESIGN.md).
+**Not built:** per-prefix RDAP sweeps (rate budget first), graph writes
+(`ASN`/`CIDR` labels and `BELONGS_TO_ASN`/`ANNOUNCED_BY` edges already exist in
+`schema.py`), peer-ASN expansion (needs scoring).
+
 ## 3. Graph layer (built, not fed yet)
 
 `service/recon_pipeline/graph/` holds the Neo4j design and its CRUD:
@@ -257,4 +302,6 @@ themselves:
 - `service/recon_pipeline/asset_pipelines/url_endpoint/{main,normalize,extract}.py`,
   its `passive/` package (wayback, commoncrawl, urlscan, gau), and
   `tests/recon/test_url_*.py`
+- `service/recon_pipeline/asset_pipelines/asn_cidr/{main,normalize,sources,emit}.py`,
+  and `tests/recon/test_asn_*.py`; the live runs cited in `asn_cidr/DESIGN.md`
 - `docs/recon_docs/*` for the planned stages (explicitly marked as intent)

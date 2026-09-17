@@ -36,6 +36,11 @@ Be aware that the plan documents describe much more than what exists:
   CDX, Common Crawl, urlscan.io + `gau`) into a canonical union, then extraction of
   endpoints, parameters, JS bundles, source maps and interesting files
   (`service/recon_pipeline/asset_pipelines/url_endpoint/`).
+- Recon asset pipeline, `asn_cidr`, **built**: network-ownership discovery —
+  RIPEstat + RDAP (keyless) expand an address or AS seed into the ASNs and CIDRs
+  behind the target, emit ports-stage-compatible *discovered* scope files, and
+  never send a packet to the target or anything discovered
+  (`service/recon_pipeline/asset_pipelines/asn_cidr/`).
 - `run_recon.py` — one command runs every pipeline and assembles a combined
   `RECON_<target>_OUTPUT.md` whose summary is computed from the stages' reports.
 - Stealth & resilience layer (`service/recon_pipeline/stealth/`), wired into every
@@ -66,7 +71,7 @@ carries an implementation-status section:
 | Path | What it holds |
 |---|---|
 | `main.py`, `config.py` | the scraper entry point and the single `.env` loader |
-| `run_recon.py` | runs both recon pipelines and assembles the combined report |
+| `run_recon.py` | runs all four recon pipelines and assembles the combined report |
 | `db/` | PostgreSQL schema, mapper, persistence, repos, Alembic migrations |
 | `service/scraper/` | HackerOne ingestion |
 | `service/recon_pipeline/graph/` | Neo4j schema + CRUD repository |
@@ -74,6 +79,7 @@ carries an implementation-status section:
 | `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/` | the passive + active + permutation pipeline |
 | `service/recon_pipeline/asset_pipelines/port_service_host/` | the ports/services/hosts pipeline |
 | `service/recon_pipeline/asset_pipelines/url_endpoint/` | the historical-URL / endpoints / parameters pipeline |
+| `service/recon_pipeline/asset_pipelines/asn_cidr/` | the ASN / CIDR network-ownership discovery pipeline |
 | `shared/` | DB pool, color logging, API connectors |
 | `tests/` | `recon/` (hermetic pytest suite) · `scraper/` (live-DB scripts) |
 | `docs/` | all prose documentation — see [`docs/README.md`](docs/README.md) |
@@ -142,6 +148,9 @@ python -m service.recon_pipeline.asset_pipelines.port_service_host.pipeline -t e
 # recon: historical URLs -> endpoints, parameters, JS bundles, findings
 python -m service.recon_pipeline.asset_pipelines.url_endpoint.main -t example.com
 
+# recon: network ownership -> ASNs, CIDRs, discovered scope files (never scans)
+python -m service.recon_pipeline.asset_pipelines.asn_cidr.main -t example.com
+
 # recon: every pipeline + one combined report (RECON_<target>_OUTPUT.md)
 python run_recon.py -t example.com
 ```
@@ -157,8 +166,8 @@ Raw per-tool Docker commands (and the resolver warning that matters) are in
 ## Tests
 
 ```bash
-python -m pytest tests/recon -q      # 987 hermetic tests: no Docker, no DNS, no network
-python -m pytest tests/ -q           # 987 passed, 1 skipped
+python -m pytest tests/recon -q      # 1038 hermetic tests: no Docker, no DNS, no network
+python -m pytest tests/ -q           # 1038 passed, 1 skipped
 ```
 
 The recon suite is the project's real test suite: it runs anywhere and covers every

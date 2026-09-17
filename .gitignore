@@ -181,6 +181,10 @@ service/recon_pipeline/asset_pipelines/port_service_host/output/
 service/recon_pipeline/asset_pipelines/url_endpoint/passive/output/
 service/recon_pipeline/asset_pipelines/url_endpoint/output/
 
+# asn_cidr stage run artifacts: discovered network claims and scope files.
+# Same rule as the siblings - reproduced by re-running the stage, never tracked.
+service/recon_pipeline/asset_pipelines/asn_cidr/output/
+
 # Scratch directories used for ad-hoc live verification runs (wordlist/resolver
 # experiments, temporary mounts). Never source.
 .tmp_*/

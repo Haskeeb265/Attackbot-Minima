@@ -12,6 +12,7 @@ below is the intended design — file an update to whichever is wrong.
 | run or extend the subdomain/domain/wildcard pipeline | [`../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md`](../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md) |
 | run the ports/services/hosts pipeline | [`../service/recon_pipeline/asset_pipelines/port_service_host/README.md`](../service/recon_pipeline/asset_pipelines/port_service_host/README.md) |
 | run the historical-URL/endpoints pipeline | [`../service/recon_pipeline/asset_pipelines/url_endpoint/README.md`](../service/recon_pipeline/asset_pipelines/url_endpoint/README.md) |
+| run the ASN/CIDR network-ownership pipeline | [`../service/recon_pipeline/asset_pipelines/asn_cidr/README.md`](../service/recon_pipeline/asset_pipelines/asn_cidr/README.md) |
 | understand how active traffic is shaped, and why (stealth, spec §5.1) | [`../service/recon_pipeline/stealth/README.md`](../service/recon_pipeline/stealth/README.md) — what detectors measure, live-capture evidence, design, knobs, measured cost, and the not-built list |
 | understand what the whole system is meant to become | [`recon_docs/recon.md`](recon_docs/recon.md) + [`recon_docs/recon_v2.md`](recon_docs/recon_v2.md) |
 | know what is built versus planned | the status section in [`recon_docs/IMPLEMENTATION_PLAN.md`](recon_docs/IMPLEMENTATION_PLAN.md) and [`recon_docs/IMPLEMENTATION_PLAN_V2.md`](recon_docs/IMPLEMENTATION_PLAN_V2.md) |

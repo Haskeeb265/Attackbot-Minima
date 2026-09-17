@@ -61,14 +61,21 @@ Attackbot-Minimal/
 │           │   ├── active/            # naabu ladder, nmap, webprobe, tools
 │           │   ├── classify/          # cdn.py — cdn / dedicated / unknown / hosted verdicts
 │           │   └── output/            # (gitignored) addresses, ports, services, report.json
-│           └── url_endpoint/          # built pipeline 3: URLs / endpoints / parameters
-│               ├── main.py            # orchestrator: passive → extract → derived assets
-│               ├── normalize.py       # URL canonicalization, classification, junk filter
-│               ├── extract.py         # endpoints, parameters, JS bundles, findings
-│               ├── passive/           # wayback, commoncrawl, urlscan, gau registry + stage runner
-│               ├── Dockerfile         # the gau image, smoke-tested at build time
-│               ├── DESIGN.md          # source/tool research + phased plan
-│               └── output/            # (gitignored) urls.jsonl, endpoints, parameters, reports
+│           ├── url_endpoint/          # built pipeline 3: URLs / endpoints / parameters
+│           │   ├── main.py            # orchestrator: passive → extract → derived assets
+│           │   ├── normalize.py       # URL canonicalization, classification, junk filter
+│           │   ├── extract.py         # endpoints, parameters, JS bundles, findings
+│           │   ├── passive/           # wayback, commoncrawl, urlscan, gau registry + stage runner
+│           │   ├── Dockerfile         # the gau image, smoke-tested at build time
+│           │   ├── DESIGN.md          # source/tool research + phased plan
+│           │   └── output/            # (gitignored) urls.jsonl, endpoints, parameters, reports
+│           └── asn_cidr/              # built pipeline 4: ASN / CIDR network ownership (never scans)
+│               ├── main.py            # orchestrator: seeds → lookup → merge → annotate → emit
+│               ├── normalize.py       # network canonicalization, claim merge, floors/ceilings
+│               ├── sources.py         # RIPEstat (announcements) + RDAP (allocations), keyless
+│               ├── emit.py            # networks.jsonl, asns.jsonl, ports-stage scope files
+│               ├── DESIGN.md          # claim-kind research + live-run lessons + phased plan
+│               └── output/            # (gitignored) discovered networks + scope files + report
 │
 ├── db/                         # PostgreSQL layer
 │   ├── init/001_schema.sql     # schema, auto-runs on a fresh container volume
@@ -81,7 +88,7 @@ Attackbot-Minimal/
 │
 ├── tests/
 │   ├── conftest.py             # makes the repo root importable for pytest
-│   ├── recon/                  # hermetic suite (987 tests) — no Docker, DNS or network
+│   ├── recon/                  # hermetic suite (1038 tests) — no Docker, DNS or network
 │   └── scraper/                # live-PostgreSQL scripts; one real pytest test (skips without its fixture)
 │
 ├── docs/                       # see docs/README.md for the map
@@ -102,6 +109,7 @@ Attackbot-Minimal/
 | `.../permutation/dnsgen.py` | Candidate generation only (no resolution) | `python -m ...subdomain_domain_wildcards.permutation.dnsgen -t <target>` |
 | `.../port_service_host/pipeline.py` | Ports/services/hosts pipeline (all layers) | `python -m ...port_service_host.pipeline -t <target>` |
 | `.../url_endpoint/main.py` | URL/endpoint pipeline (all stages) | `python -m ...url_endpoint.main -t <target>` |
+| `.../asn_cidr/main.py` | ASN/CIDR network-ownership discovery (never scans) | `python -m ...asn_cidr.main -t <target>` |
 | `run_recon.py` | Every pipeline + combined report | `python run_recon.py -t <target>` |
 | `tests/recon/test_repository.py` | Neo4j graph integration test (script, needs a live Neo4j) | `python tests/recon/test_repository.py` |
 

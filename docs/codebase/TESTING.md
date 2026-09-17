@@ -9,17 +9,17 @@
 
 | Suite | Style | Runs where | Count |
 |---|---|---|---|
-| `tests/recon/` | hermetic pytest tests | anywhere — no Docker, DNS, network, or `output/` reads | **987** |
+| `tests/recon/` | hermetic pytest tests | anywhere — no Docker, DNS, network, or `output/` reads | **1038** |
 | `tests/scraper/` | script-style, live PostgreSQL | needs `docker compose up -d postgres` | 1 (skips without its fixture — see below) |
 
 ```bash
-python -m pytest tests/recon -q        # 987 passed
-python -m pytest tests/ -q             # 987 passed, 1 skipped
+python -m pytest tests/recon -q        # 1038 passed
+python -m pytest tests/ -q             # 1038 passed, 1 skipped
 ```
 
 ## `tests/recon/` — the hermetic suite
 
-Per file (987 tests total), grouped by subsystem:
+Per file (1038 tests total), grouped by subsystem:
 
 **Names pipeline — `subdomain_domain_wildcards`**
 
@@ -66,6 +66,14 @@ Per file (987 tests total), grouped by subsystem:
 | `test_url_extract.py` | 9 | endpoints collapse by query, parameter-name filtering, JS/source-map/finding separation, bounded report samples |
 | `test_url_passive.py` | 35 | Wayback/Common Crawl/urlscan parsers, honest 404-vs-failure states (an unreachable source raises rather than reporting an empty success), registry, the merge stage and its junk/foreign accounting |
 | `test_url_pipeline.py` | 4 | the orchestrator end to end with an injected source runner: artifacts, extract-only reuse, bad input refusal |
+
+**Network-ownership pipeline — `asn_cidr`**
+
+| File | Tests | Covers |
+|---|---|---|
+| `test_asn_normalize.py` | 24 | network canonicalization (CIDR/start-end/bare forms), private-space refusal, prefix floors and aggregate ceilings, claim merging, containment, sibling annotation |
+| `test_asn_sources.py` | 13 | RIPEstat/RDAP parsers (defensive against RIR schema differences), "no data" vs "no answer" status discipline |
+| `test_asn_pipeline.py` | 14 | seed expansion with both sources failing/succeeding, merge + annotation end to end, the scope-file format contract, caps and refusal accounting |
 
 **Stealth layer — `service/recon_pipeline/stealth`**
 
@@ -145,11 +153,11 @@ sentinel lets them propagate normally.
 - **No CI configuration** (no workflow files) — nothing runs the suite
   automatically.
 - `tests/recon/test_repository.py` (Neo4j CRUD + constraint enforcement) is a
-  script requiring a live Neo4j, so it is not part of the 987.
+  script requiring a live Neo4j, so it is not part of the 1038.
 - No coverage measurement is configured; there is no coverage report to cite.
 
 ## Evidence
 
-- `python -m pytest tests/recon -q` → `987 passed`
-- `python -m pytest tests/ -q` → `987 passed, 1 skipped`
+- `python -m pytest tests/recon -q` → `1038 passed`
+- `python -m pytest tests/ -q` → `1038 passed, 1 skipped`
 - `tests/conftest.py`, `tests/recon/conftest.py`, and the per-file test lists

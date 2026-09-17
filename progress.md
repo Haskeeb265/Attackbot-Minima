@@ -49,7 +49,7 @@ against the code, not the docs:
 | Domain | built | `subdomain_domain_wildcards/` (the `Subdomain` refinement folds in here) |
 | Wildcard | built | `.../passive/wildcard.py`, reused by all three stages |
 | IP | partial (file-only) | `port_service_host/` — passive intel, classify, ladder, scan |
-| CIDR | input-only | declared `--scope` file; no range host discovery / prefix expansion |
+| CIDR | **built (discovery)** | `asn_cidr/` — RIPEstat + RDAP discover the networks behind a target and emit ports-stage-compatible scope files; the scan side stays in `port_service_host/` |
 | URL, Endpoint | built | `url_endpoint/` — Wayback + Common Crawl + urlscan + gau → endpoints, parameters, JS |
 | Certificate | none | CNAME chains are collected; no cert clustering (S20) |
 | Secret | none | no extractor (S21/S23) |
@@ -60,10 +60,11 @@ against the code, not the docs:
 | Hardware/IoT (#13) | none | no label in `schema.py` (falls back to `:Other`) |
 | SmartContract (#14) | none | no pipeline |
 | AI Model (#15) | none | no label in `schema.py` (falls back to `:Other`) |
-| ASN (#17) | none | no BGP/ASN pivot (S18) |
+| ASN (#17) | **built** | `asn_cidr/` — the S18 pivot's collection half (RIPEstat/RDAP, keyless, never scans); graph writes still open |
 
-**Counts:** 3 types fully covered (Domain, Wildcard, URL/Endpoint), 2 partial (IP,
-CIDR), and **12 with no collection logic at all**. The schema also defines labels that nothing
+**Counts:** 5 types fully covered (Domain, Wildcard, URL/Endpoint, CIDR-discovery,
+ASN), 1 partial (IP — file-only scan side), and **11 with no collection logic at
+all**. The schema also defines labels that nothing
 populates (`URL`, `Endpoint`, `Certificate`, `Secret`, `Technology`,
 `CloudResource`, `ASN`), and the v2 plan adds node types the schema lacks —
 `ThirdPartyService` and `FingerprintCluster` (`recon_v2.md` Appendix A), plus the
@@ -217,6 +218,45 @@ These need folding into `IMPLEMENTATION_PLAN*.md` status tables, `docs/recon_doc
   semantics, the two parameter rejections), `DESIGN.md` (honest states as an
   enforced rule, not a principle), `docs/codebase/{TESTING,CONCERNS}.md`,
   `STRUCTURE.md`, root `README.md`.
+
+## Added 2026-09-18 (final session, part 2) — the `asn_cidr` pipeline (asset type #17 + CIDR discovery)
+
+- **New asset pipeline, `asn_cidr`** — network ownership: RIPEstat
+  (`announced-prefixes`, `prefix-overview`) + RDAP (via `rdap.org`) expand an
+  address or AS seed into the ASNs and CIDRs behind the target, then emit
+  ports-stage-compatible **discovered** scope files. Keyless, Docker-free, and
+  **never scans** — discovery without touch, with the §5.4 gate (announced ≠
+  owned ≠ in-scope) enforced by marking every row `announced` / `allocated` /
+  corroborated.
+- **Why this one next:** it closes the loop the ports pipeline left open —
+  its `seed_builder` already accepts CIDR scope files, and §5.4 forbids
+  ASN-derived prefixes from the scan set, but nothing ever *produced* them.
+  Also the best-fed seed: the sibling stages' 19 resolved addresses are the
+  pipeline's default input. Coverage table: **4 built / 2 partial / 11
+  remaining** asset types.
+- **Live run (qbsco.net, 55–94 s, 0 source failures):** 77 985 raw claims →
+  3 422 networks (3 417 announced, 6 allocated, **1 corroborated** —
+  `103.53.44.0/22`, announced *and* allocated to the target's hoster, contains
+  a resolved address). The corroborated row is the strongest network fact the
+  pipeline can produce.
+- **Live-data fix #1: routing aggregates are not footprint.** The first run
+  presented `40.0.0.0/8` (announced by AS8075, containing one target address) as
+  a discovered network — 16 million addresses the AS does not operate. A /16
+  ceiling (`ASN_MAX_PREFIX_LEN`) now refuses v4 aggregates; 2 486 refusals
+  counted in `report.json`. RIPEstat's `block` field learned to pass the same
+  gates.
+- **R&D finding:** `bgpview.io`, `hackertarget` and `whois.cymru.com:43` were
+  all unreachable from this network during research — RIPEstat + RDAP was the
+  only pair that worked end to end, which is what ships (Team Cymru comes in via
+  the sibling's `ownership.jsonl` instead of port 43).
+- **Wired into `run_recon.py` as pipeline 4** (`--skip-asn`), deliberately
+  running *after* pipeline 2 so sibling addresses exist for seeding/annotation;
+  the combined report gains a Pipeline 4 section with the discovered-≠-declared
+  warning, and the mtime stale guard covers the new artifacts.
+- Test count 987 → **1038** (+51 for `asn_cidr`); module is mypy-clean. Docs:
+  `asn_cidr/{README,DESIGN}.md` + `commands.txt`, `ARCHITECTURE.md` §2e,
+  `STRUCTURE.md`, `TESTING.md`, root `README.md`, `docs/README.md`,
+  `.gitignore`.
 
 ## Suggested next moves (dependency order from the plans)
 
