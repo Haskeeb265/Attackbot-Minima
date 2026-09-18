@@ -324,6 +324,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip the S2 scoring pass (the model carries no score/band fields)",
     )
+    parser.add_argument(
+        "--no-scope",
+        action="store_true",
+        help="do not annotate the model with scope verdicts (they are on by default)",
+    )
     parser.add_argument("--max-nodes", type=int, default=settings.MAX_NODES, help="node cap")
     parser.add_argument("--max-edges", type=int, default=settings.MAX_EDGES, help="edge cap")
     parser.add_argument("--max-evidence", type=int, default=settings.MAX_EVIDENCE)
@@ -343,6 +348,17 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)-7s %(name)s: %(message)s",
     )
 
+    # The scope engine is built here exactly as the platform runner builds it
+    # (`ScopeEngine.from_domain(target)`), so a standalone run and a platform run
+    # produce the same model.  Without this the CLI wrote a document with no
+    # scope verdict at all, which is the one field a consumer must have before
+    # touching anything.
+    scope = None
+    if not args.no_scope:
+        from service.recon_pipeline.platform.scope import ScopeEngine
+
+        scope = ScopeEngine.from_domain(args.target)
+
     report = run_pipeline(
         args.target,
         output_dir=args.output_dir,
@@ -350,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         ports_dir=args.ports_dir,
         urls_dir=args.urls_dir,
         networks_dir=args.networks_dir,
+        scope=scope,
         scored=not args.no_score,
         max_nodes=args.max_nodes,
         max_edges=args.max_edges,
@@ -371,7 +388,11 @@ def main(argv: list[str] | None = None) -> int:
         counts.get("nodes_unscored"),
         counts.get("orphan_nodes"),
     )
-    log.info("graph state (handoff document): %s", report.outputs.get("graph_state"))
+    log.info(
+        "graph state (handoff document): %s — %s node(s) with a scope verdict",
+        report.outputs.get("graph_state"),
+        counts.get("scope_annotated"),
+    )
     for note in report.notes:
         log.warning(note)
     return 0 if report.ok else 1

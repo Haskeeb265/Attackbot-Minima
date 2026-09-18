@@ -132,6 +132,17 @@ def build_graph_state(
                 "carries no `score` field: nothing claimed it as an asset, which is "
                 "not the same as it scoring zero"
             ),
+            # Stated as data for the same reason: a consumer must be able to tell
+            # "this asset is in scope" from "this run had no scope engine", and an
+            # absent field cannot say which.
+            "scope": (
+                "when a scope engine annotated the model, every place-shaped node "
+                "carries `props.scope_state` (in_scope / needs_review / "
+                "out_of_scope) and `props.scope_reason`; `run.counts.scope_annotated` "
+                "says how many did and `run.counts.registered_networks` how many "
+                "discovered networks were registered. Zero means no engine was "
+                "present, not that nothing is in scope"
+            ),
         },
         "vocabulary": vocab.mapping_document(),
         "scoring": score_mod.weights_document(),

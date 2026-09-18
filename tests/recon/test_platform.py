@@ -165,6 +165,70 @@ def test_a_discovered_network_never_authorises_itself() -> None:
     assert engine.check_network("10.0.0.0/8").state == "out_of_scope"
 
 
+def test_the_network_a_reason_names_is_the_most_specific_one_not_a_set_order_artefact() -> None:
+    """The engine iterates a *set* of discovered networks, and Python's string
+    hashing is randomised per process — so "the first containing network" made
+    the same address report a different network in every run.  The answer has to
+    come from a rule: the tightest network wins."""
+    engine = ScopeEngine.from_domain("acme.test")
+    engine.add_discovered_network("104.16.0.0/12")   # true, and says little
+    engine.add_discovered_network("104.21.64.0/19")  # true, and says more
+
+    decision = engine.check_address("104.21.81.2")
+
+    assert decision.state == "needs_review"
+    assert "104.21.64.0/19" in decision.reason
+
+    # Registration order (and therefore set construction order) cannot matter.
+    other = ScopeEngine.from_domain("acme.test")
+    other.add_discovered_network("104.21.64.0/19")
+    other.add_discovered_network("104.16.0.0/12")
+    assert other.check_address("104.21.81.2") == decision
+
+
+def test_a_declared_network_still_wins_over_a_tighter_discovered_one() -> None:
+    """Specificity breaks ties *within* a class of claim.  Authorization is the
+    stronger claim even when the discovery says more: declared space stays
+    ``in_scope`` and is still named as the reason."""
+    engine = ScopeEngine.from_domain("acme.test")
+    engine.add_declared_network("104.16.0.0/12")
+    engine.add_discovered_network("104.21.64.0/19")
+
+    decision = engine.check_address("104.21.81.2")
+
+    assert decision.state == "in_scope"
+    assert "104.16.0.0/12" in decision.reason
+
+
+def test_the_declared_domain_in_a_reason_is_the_most_specific_match() -> None:
+    engine = ScopeEngine(declared_domains={"acme.test", "eu.acme.test"})
+
+    decision = engine.check_host("api.eu.acme.test")
+
+    assert decision.state == "in_scope"
+    assert "eu.acme.test" in decision.reason
+
+
+def test_a_network_inside_two_declared_networks_names_the_tightest() -> None:
+    engine = ScopeEngine(declared_domains=set())
+    engine.add_declared_network("198.51.0.0/16")
+    engine.add_declared_network("198.51.96.0/20")
+    engine.add_declared_network("198.51.100.0/24")
+
+    # Both queries are contained in all three declarations (and neither *is* a
+    # declaration), so the reason has to name the tightest one.
+    for queried, expected in (
+        ("198.51.98.0/23", "198.51.96.0/20"),
+        ("198.51.100.128/25", "198.51.100.0/24"),
+    ):
+        decision = engine.check_network(queried)
+        assert decision.state == "in_scope"
+        assert expected in decision.reason, decision.reason
+
+    # A network that *is* declared is answered as such, not as containment.
+    assert engine.check_network("198.51.100.0/24").reason == "declared network"
+
+
 def test_private_and_non_routable_addresses_are_refused() -> None:
     engine = ScopeEngine.from_domain("acme.test")
 

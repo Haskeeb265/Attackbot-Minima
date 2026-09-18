@@ -168,8 +168,11 @@ model inside it is still proven identical.
 ## Measured — `qbsco.net`, 2026-09-18
 
 Inputs: all four pipelines had run that morning (names 08:53, ports 09:03, URLs
-09:04, networks 09:08). 9 812 rows read, 0 malformed, 0 artifacts missing,
-**0.25 s**, and no network access at all.
+09:04, networks 09:08). 9 812 rows read, 0 malformed, 0 artifacts missing, and no
+network access at all. The standalone run — collect, merge, score, scope,
+annotate and write the 8.58 MB document — takes **0.8 s** wall clock; the platform
+path reports per-stage timings in the run record (collect 0.05 s, merge 0.29 s,
+emit 0.15 s).
 
 | | |
 |---|---|
@@ -179,8 +182,8 @@ Inputs: all four pipelines had run that morning (names 08:53, ports 09:03, URLs
 | by trust | discovered 6 785 · observed 31 · declared 1 |
 | bands | medium 6 690 · core 59 · low 55 · high 11 · unscored 2 |
 | score range | 25 – 100 |
-| with a scope engine | 3 481 nodes annotated; 3 431 discovered networks registered (all `needs_review`) |
-| graph state | 8.57 MB, `integrity.consistent: true`, 0 unresolved edge endpoints |
+| with a scope engine | 3 481 nodes annotated (13 `in_scope`, 3 467 `needs_review`, 1 `out_of_scope`); 3 431 discovered networks registered |
+| graph state | 8.58 MB, `integrity.consistent: true`, 0 unresolved edge endpoints |
 
 The triage shape, which is what the score on every node is for:
 
@@ -212,7 +215,7 @@ What the model says that no single artifact could:
   addresses a classification verdict calls CDN/cloud, so they score their way to
   the bottom without being hidden — 25 each, penalty named in the audit.
 
-**Two defects this run caught**, both of the kind only live data finds:
+**Four defects this run caught**, all of them invisible to the test suite:
 
 1. The platform's `emit` stage wrote the model and the report itself, while the
    standalone path also wrote the graph state — so a platform run silently
@@ -223,6 +226,20 @@ What the model says that no single artifact could:
    inside the ASN loop: **every pure allocation was dropped** — Cloudflare's
    `104.16.0.0/12` and `172.64.0.0/13`, Microsoft's `2603:1000::/24` among them.
    Recovered: 5 edges and 3 organisations, orphans 16 → 11.
+3. The standalone CLI built **no scope engine**, so it wrote a document in which
+   all 6 817 nodes had no scope verdict — a thinner model than the platform run
+   of the same pipeline, missing the one field a consumer needs before touching
+   anything. The CLI now builds the engine exactly as the runner does, with
+   `--no-scope` as the explicit opt-out, and the state document states the scope
+   situation in `status.scope` so "nothing is in scope" cannot be confused with
+   "no engine ran".
+4. The engine's ``check_address`` returned *the first network in a ``set``* that
+   contained the address. Python randomises string hashing per process, so the
+   same address reported a different network in every run — Cloudflare's
+   `104.21.81.2` was "inside `104.16.0.0/12`" in one process and "inside
+   `104.21.64.0/19`" in another. The engine now answers by rule (the most
+   specific containing network, declared space still winning), which also makes
+   the reason more useful, and tests pin both halves.
 
 ## Honest gaps
 
@@ -264,6 +281,10 @@ python -m service.recon_pipeline.pipelines.graph_normalize.main -t example.com
 
 Stages are separable: `-s collect`, `-s merge`, `-s emit`. Asking for a later
 stage runs the earlier ones first, so `-s emit` is never a half-run.
+
+The standalone run annotates scope from `-t` exactly as the platform runner does
+(`ScopeEngine.from_domain(target)`); `--no-scope` opts out and the state document
+then says `scope_annotated: 0` rather than leaving the reader to guess.
 
 Settings (all optional, see `settings.py`): `GN_NAMES_DIR`, `GN_PORTS_DIR`,
 `GN_URLS_DIR`, `GN_NETWORKS_DIR` point the readers at another checkout's

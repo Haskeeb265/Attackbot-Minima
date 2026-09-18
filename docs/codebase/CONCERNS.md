@@ -88,7 +88,7 @@ containerised.
 
 ### 6. No CI
 
-No workflow configuration exists, so the 1123 hermetic recon tests are never run
+No workflow configuration exists, so the 1128 hermetic recon tests are never run
 automatically. They are fast (≈10 s) and dependency-light, which makes them the
 cheapest thing to wire into CI first.
 
@@ -105,7 +105,7 @@ anywhere — `platform/enrich.py` is built but permanently `available=False` her
 ### 8. The Neo4j integration test is not part of the suite
 
 `tests/recon/test_repository.py` needs a live Neo4j, so it is excluded from the
-1123 and easy to forget. It is also the only coverage for the multi-label write
+1128 and easy to forget. It is also the only coverage for the multi-label write
 contract that every future graph writer must follow.
 
 ### 9. Graph writes are only as idempotent as their label sets
@@ -178,7 +178,7 @@ true of the current code:
 - **The scraper test suite did not collect** (2026-09-16) —
   `test_hackerone_mapper.py` opened a fixture at import time and aborted `pytest`
   collection for the whole tree. It is now a skipping pytest test; `pytest tests/`
-  runs cleanly (1123 passed, 1 skipped).
+  runs cleanly (1128 passed, 1 skipped).
 - **`DATABASE_URL` printed to stdout** — `config.py` has no print statement.
 - **Missing per-program transaction boundary** — `ingest_program()` wraps each
   program in `db.atomic(conn)` inside a run-scoped connection, with failures
@@ -197,7 +197,7 @@ true of the current code:
 
 ## Evidence
 
-- `python -m pytest tests/ -q` → `1123 passed, 1 skipped`; `pytest tests/scraper --collect-only -q` → 1 collected (skips by design)
+- `python -m pytest tests/ -q` → `1128 passed, 1 skipped`; `pytest tests/scraper --collect-only -q` → 1 collected (skips by design)
 - `requirements.txt`, `config.py`, `shared/connectors/*`, `service/scraper/*`
 - `Dockerfile` (0 bytes), `docker/` (empty), `docker-compose.yml`
 - `service/recon_pipeline/platform/graph/*` and `tests/recon/test_repository.py`

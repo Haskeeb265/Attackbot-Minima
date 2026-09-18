@@ -221,8 +221,8 @@ Raw per-tool Docker commands (and the resolver warning that matters) are in
 ## Tests
 
 ```bash
-python -m pytest tests/recon -q      # 1123 hermetic tests: no Docker, no DNS, no network
-python -m pytest tests/ -q           # 1123 passed, 1 skipped
+python -m pytest tests/recon -q      # 1128 hermetic tests: no Docker, no DNS, no network
+python -m pytest tests/ -q           # 1128 passed, 1 skipped
 ```
 
 The recon suite is the project's real test suite: it runs anywhere and covers every

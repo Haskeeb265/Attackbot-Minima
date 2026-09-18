@@ -86,7 +86,7 @@ populates (`URL`, `Endpoint`, `Certificate`, `Secret`, `Technology`,
 - **Active (S10 techniques without the gate):** validated resolver pool (positive + `.invalid` NXDOMAIN probe — supersedes plan-v2's static resolver list), puredns resolve/bruteforce, bounded recursion, AXFR attempts, dnsx record enrichment, opt-in HTTP probe.
 - **Permutation (S16 technique):** dnsgen + batched stealth-paced resolution.
 - **Orchestrator (S7 shape):** `main.py` runs all three and writes `output/live_hosts.txt` + `summary.json` — but **writes files only; nothing reaches the graph** (CONCERNS.md #4).
-- 397+ hermetic tests at doc-check time; the whole recon suite is now **1 123 passing (2026-09-18)**.
+- 397+ hermetic tests at doc-check time; the whole recon suite is now **1 128 passing (2026-09-18)**.
 
 ### The ports/services/host pipeline (outside plan numbering — built)
 - Location: `service/recon_pipeline/pipelines/port_service_host/`; R&D doc `docs/recon_docs/port_service_host.md` is marked **IMPLEMENTED, with the deltas recorded there**.
@@ -157,7 +157,7 @@ populates (`URL`, `Endpoint`, `Certificate`, `Secret`, `Technology`,
    `context.graph`, but no pipeline calls it. The value today is per-run files
    plus a run report.
 3. **Stealth is direct-mode only** — a target that blocks by IP exhausts the single exit node; `report.json`'s stealth block is where to check what actually ran.
-4. **No CI** — the (fast, ~26 s, dependency-light) 1 123-test recon suite never runs automatically.
+4. **No CI** — the (fast, ~26 s, dependency-light) 1 128-test recon suite never runs automatically.
 5. Minor: `docker/` empty + 0-byte root Dockerfile; config/code drift for planned subsystems.
 
 ---
@@ -396,28 +396,46 @@ These need folding into `IMPLEMENTATION_PLAN*.md` status tables, `docs/recon_doc
   node in the file — a test proves the flag can come out false). Copied out of
   the finished model, never recomputed, so it cannot contradict the JSONL of the
   same run.
-- **Two defects the live run caught and fixed** — both of the kind only real data
-  finds: the platform contract wrote the model + report itself and so silently
-  omitted the handoff document (both paths now call one writer,
-  `main.write_outputs`); and an RDAP allocation row carries no ASN, so nesting the
-  allocation edge inside the ASN loop **dropped every pure allocation** —
-  Cloudflare's `104.16.0.0/12`/`172.64.0.0/13` and Microsoft's `2603:1000::/24`
-  among them (recovered: 5 edges, 3 organisations, orphans 16 → 11).
+- **Four defects the live run caught and fixed** — all of them invisible to the
+  hermetic suite:
+
+  1. the platform contract wrote the model + report itself and so silently
+     omitted the handoff document (both paths now call one writer,
+     `main.write_outputs`);
+  2. an RDAP allocation row carries no ASN, so nesting the allocation edge inside
+     the ASN loop **dropped every pure allocation** — Cloudflare's
+     `104.16.0.0/12`/`172.64.0.0/13` and Microsoft's `2603:1000::/24` among them
+     (recovered: 5 edges, 3 organisations, orphans 16 → 11);
+  3. the standalone CLI built **no scope engine**, so it wrote a document whose
+     every node had no scope verdict — the same pipeline run two ways produced
+     different models, and the missing field was the one a consumer needs first.
+     The CLI now builds the engine exactly as the runner does (`--no-scope` is
+     the explicit opt-out) and the document states the scope situation in
+     `status.scope`;
+  4. the scope engine's `check_address` returned **the first network in a `set`**
+     containing the address. Python randomises string hashing per process, so the
+     same address reported a different network in every run (`104.21.81.2` was
+     "inside `104.16.0.0/12`" in one process, "inside `104.21.64.0/19`" in the
+     next). It now answers by rule — the most specific containing network, with
+     declared space still outranking discovery — which is both stable and more
+     useful, and four tests in `test_platform.py` pin it.
 - **The engine got stricter too:** `signal_for_source` now names an unknown source
   as unknown in the audit (`unknown source, weakest tier: X`) instead of emitting
   a weight indistinguishable from a real one; the model's test asserts every
   source key it uses is one the engine knows.
 - **Live run, `qbsco.net`, 2026-09-18** (all four collectors refreshed that
   morning: names 08:53, ports 09:03, URLs 09:04, networks 09:08): 9 812 rows →
-  **6 817 nodes / 6 842 edges** in 0.25 s → an 8.57 MB `graph_state.json`.
+  **6 817 nodes / 6 842 edges** in 0.8 s → an 8.58 MB `graph_state.json`.
   6 815 scored (59 core, 11 high, 6 690 medium, 55 low; 2 unscored because
   nothing claimed them), score range 25–100, `integrity.consistent: true`,
-  3 481 nodes with a scope verdict.
+  3 481 nodes with a scope verdict (13 `in_scope`, 3 467 `needs_review`,
+  1 `out_of_scope`), and the CLI and the platform path producing the same
+  document byte for byte once their timestamps are removed.
 - **Standalone CLI added** (`python -m ...graph_normalize.main -t <target>`), so
   the command `STRUCTURE.md` documented actually runs; it logs the counts and the
   path of the handoff document.
-- Test count 1 104 → **1 123** (+19; `test_graph_normalize.py` 35 → 53,
-  `test_platform.py` 31 → 32), all new code mypy-clean apart from the pre-existing
+- Test count 1 104 → **1 128** (+24; `test_graph_normalize.py` 35 → 54,
+  `test_platform.py` 31 → 36), all new code mypy-clean apart from the pre-existing
   graph-driver stubs. Docs reconciled: `graph_normalize/README.md` (scoring and
   graph-state sections, refreshed measured numbers, the two defects),
   `ARCHITECTURE.md` §2f, `STRUCTURE.md`, `TESTING.md`, `CONCERNS.md` #4, root

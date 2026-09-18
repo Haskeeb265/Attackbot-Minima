@@ -321,13 +321,18 @@ Design rules the code enforces:
   is emitted with every run; a test asserts every kind and edge type has one.
 
 Measured on `qbsco.net` (2026-09-18, all four siblings refreshed that morning):
-9 812 rows → **6 817 nodes / 6 842 edges** in 0.25 s, 3 481 nodes annotated with a
-scope verdict, 6 815 scored (bands: 59 core, 11 high, 6 690 medium, 55 low; 2
-left unscored because nothing claimed them), 11 orphans and 3 real property
-conflicts (Cymru and RIPEstat spell three AS names differently) reported rather
-than resolved. Two live-run defects were found and fixed: the platform contract
-silently omitted the handoff document, and every pure RDAP allocation (Cloudflare,
-Microsoft ranges — no ASN in the row) was dropped from the model. Its own doc is
+9 812 rows → **6 817 nodes / 6 842 edges** in 0.8 s (an 8.58 MB state document),
+3 481 nodes annotated with a
+scope verdict (13 `in_scope`, 3 467 `needs_review`, 1 `out_of_scope`), 6 815
+scored (bands: 59 core, 11 high, 6 690 medium, 55 low; 2 left unscored because
+nothing claimed them), 11 orphans and 3 real property conflicts (Cymru and
+RIPEstat spell three AS names differently) reported rather than resolved.
+**Four live-run defects were found and fixed** — the platform contract silently
+omitted the handoff document; every pure RDAP allocation (Cloudflare and
+Microsoft ranges, which carry no ASN) was dropped from the model; the standalone
+CLI built no scope engine and so wrote a scope-less model; and the scope engine
+picked *the first network in a set* containing an address, which made
+the same address report a different network in every process. Its own doc is
 [`graph_normalize/README.md`](../../service/recon_pipeline/pipelines/graph_normalize/README.md).
 
 ## 2g. Platform layer and the pipeline contract (built)

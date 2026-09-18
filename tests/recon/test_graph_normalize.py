@@ -1058,6 +1058,17 @@ def _section(document: dict[str, object], key: str) -> dict:
     return value
 
 
+def _node(document: dict[str, object], node_id: str) -> dict:
+    """One node row from a state document."""
+    rows = document["nodes"]
+    assert isinstance(rows, list)
+    for row in rows:
+        assert isinstance(row, dict)
+        if row["id"] == node_id:
+            return row
+    raise AssertionError(f"no node {node_id} in the state document")
+
+
 def test_the_graph_state_is_one_self_describing_consistent_document(tmp_path: Path) -> None:
     output = tmp_path / "out"
     report = _run(tmp_path, output)
@@ -1126,6 +1137,37 @@ def test_the_graph_state_carries_each_nodes_score_and_band(tmp_path: Path) -> No
         assert "band" not in row
 
 
+def test_the_cli_annotates_scope_exactly_as_the_platform_does(tmp_path: Path) -> None:
+    """A standalone run must not be a thinner model than a platform run.
+
+    The CLI built no scope engine, so it wrote a document whose every node had
+    no scope verdict — the one field a consumer needs before touching anything —
+    while the platform path annotated 3 481 nodes.  Same pipeline, two entry
+    points, different models.
+    """
+    output = tmp_path / "out"
+    directories = _all_dirs(tmp_path)
+    argv = ["-t", APEX, "--output-dir", str(output)]
+    for stream in ("names", "ports", "urls", "networks"):
+        argv += [f"--{stream}-dir", str(directories[f"{stream}_dir"])]
+
+    assert main.main(argv) == 0
+
+    document = _state(output)
+    counts = _section(document, "run")["counts"]
+    assert counts["scope_annotated"] > 0
+    apex = _node(document, f"domain:{APEX}")
+    assert apex["props"]["scope_state"] == "in_scope"
+    # The verdict is stated in the document itself, so a reader can tell
+    # "nothing is in scope" from "no engine ran".
+    assert "scope" in document["status"]
+
+
+# --------------------------------------------------------------------------- #
+# the platform contract
+# --------------------------------------------------------------------------- #
+
+
 def test_the_integrity_check_reports_an_edge_whose_endpoint_is_not_a_node() -> None:
     """The flag is computed, so it has to be able to come out false."""
     model = norm.Model()
@@ -1167,11 +1209,6 @@ def test_the_graph_state_omits_the_run_section_when_there_is_no_report() -> None
     assert integrity["nodes_scored"] == 0
     assert integrity["nodes_unscored"] == 1
     assert "score_range" not in integrity
-
-
-# --------------------------------------------------------------------------- #
-# the platform contract
-# --------------------------------------------------------------------------- #
 
 
 def test_the_manifest_declares_the_siblings_it_consumes() -> None:

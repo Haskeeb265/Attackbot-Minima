@@ -130,7 +130,7 @@ Attackbot-Minimal/
 │
 ├── tests/
 │   ├── conftest.py             # makes the repo root importable for pytest
-│   ├── recon/                  # hermetic suite (1123 tests) — no Docker, DNS or network
+│   ├── recon/                  # hermetic suite (1128 tests) — no Docker, DNS or network
 │   └── scraper/                # live-PostgreSQL scripts; one real pytest test (skips without its fixture)
 │
 ├── docs/                       # see docs/README.md for the map

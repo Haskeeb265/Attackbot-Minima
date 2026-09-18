@@ -34,6 +34,31 @@ NEEDS_REVIEW = "needs_review"
 OUT_OF_SCOPE = "out_of_scope"
 
 
+def _most_specific_containing(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address, candidates: set[str]
+) -> str | None:
+    """The tightest network in *candidates* that contains *ip*, or ``None``.
+
+    Two things depend on this being a *rule* rather than "the first one the set
+    happened to yield": the answer is the same in every process (Python's string
+    hashing is randomised per process, so a set's order is not stable), and the
+    reason names the network that actually says something.  An address inside
+    both a ``/12`` and a ``/19`` of the same provider is inside the ``/19``; the
+    ``/12`` is true but tells the operator less.
+    """
+    best: ipaddress.IPv4Network | ipaddress.IPv6Network | None = None
+    for text in candidates:
+        try:
+            network = ipaddress.ip_network(text)
+        except ValueError:  # unparseable registrations are the caller's problem
+            continue
+        if ip.version != network.version or ip not in network:
+            continue
+        if best is None or (network.prefixlen, str(network)) > (best.prefixlen, str(best)):
+            best = network
+    return str(best) if best is not None else None
+
+
 @dataclass(frozen=True)
 class ScopeDecision:
     """The outcome of one scope question — always with its reason."""
@@ -124,15 +149,18 @@ class ScopeEngine:
             return ScopeDecision(OUT_OF_SCOPE, f"not a valid host: {host!r}")
         if is_ip_literal(canonical):
             return self.check_address(canonical)
-        for declared in self.declared_domains:
-            if is_subdomain_of(canonical, declared):
-                if canonical == declared:
-                    return ScopeDecision(
-                        IN_SCOPE, f"declared domain: {declared}"
-                    )
-                return ScopeDecision(
-                    IN_SCOPE, f"subdomain of declared domain {declared}"
-                )
+        # The most specific declared domain that covers it, so the answer (and
+        # its wording) does not depend on set iteration order.
+        declared_matches = sorted(
+            (d for d in self.declared_domains if is_subdomain_of(canonical, d)),
+            key=lambda domain: (len(domain), domain),
+            reverse=True,
+        )
+        if declared_matches:
+            declared = declared_matches[0]
+            if canonical == declared:
+                return ScopeDecision(IN_SCOPE, f"declared domain: {declared}")
+            return ScopeDecision(IN_SCOPE, f"subdomain of declared domain {declared}")
         return ScopeDecision(
             NEEDS_REVIEW,
             f"discovered host outside declared domains: {canonical}",
@@ -152,19 +180,15 @@ class ScopeEngine:
         if not is_scannable(canonical):
             return ScopeDecision(OUT_OF_SCOPE, "not globally routable")
         ip = ipaddress.ip_address(canonical)
-        for network_text in self.declared_networks:
-            network = ipaddress.ip_network(network_text)
-            if ip.version == network.version and ip in network:
-                return ScopeDecision(
-                    IN_SCOPE, f"inside declared network {network_text}"
-                )
-        for network_text in self.discovered_networks:
-            network = ipaddress.ip_network(network_text)
-            if ip.version == network.version and ip in network:
-                return ScopeDecision(
-                    NEEDS_REVIEW,
-                    f"inside discovered (not declared) network {network_text}",
-                )
+        declared_match = _most_specific_containing(ip, self.declared_networks)
+        if declared_match is not None:
+            return ScopeDecision(IN_SCOPE, f"inside declared network {declared_match}")
+        discovered_match = _most_specific_containing(ip, self.discovered_networks)
+        if discovered_match is not None:
+            return ScopeDecision(
+                NEEDS_REVIEW,
+                f"inside discovered (not declared) network {discovered_match}",
+            )
         return ScopeDecision(NEEDS_REVIEW, "address outside declared networks")
 
     def check_network(self, network: str) -> ScopeDecision:
@@ -186,12 +210,16 @@ class ScopeEngine:
                 NEEDS_REVIEW,
                 "discovered network - operator must move it into declared scope",
             )
+        containers = []
         for declared_text in self.declared_networks:
             declared = ipaddress.ip_network(declared_text)
             if ip_network.subnet_of(declared):  # type: ignore[arg-type]
-                return ScopeDecision(
-                    IN_SCOPE, f"contained in declared network {declared_text}"
-                )
+                containers.append(declared)
+        if containers:
+            # The tightest declaration that covers it, so the reason says
+            # something and does not depend on iteration order.
+            declared = min(containers, key=lambda network: (-network.prefixlen, str(network)))
+            return ScopeDecision(IN_SCOPE, f"contained in declared network {declared}")
         return ScopeDecision(OUT_OF_SCOPE, "network outside declared scope")
 
     # ------------------------------------------------------------------ #
