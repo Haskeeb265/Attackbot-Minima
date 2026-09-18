@@ -28,7 +28,7 @@ cli.py ─▶ runner.Runner
 | `contract.py` | — | `Manifest`, `Stage`, `RunContext`, the `Pipeline` protocol and `BasePipeline`. The interface that makes "add a folder, get a pipeline" true. |
 | `registry.py` | — | Discovery: every subdirectory of `pipelines/` is a candidate; a folder exposing `MANIFEST` + `PIPELINE` is registered, anything else is skipped with a logged reason. Import failures are reported, never raised. |
 | `runner.py` | — | The one code path that runs every pipeline: context construction, stage execution, timing, per-stage failure isolation, run/registry/report writing. Owns no asset logic and never parses pipeline artifacts. |
-| `scoring.py` | S2 | Evidence scoring. `score = round(max(base, strongest signal) + 0.1 × (remaining weights) − penalties)` — the strongest signal is a floor, corroboration nudges, so "eight sources agree" never becomes "one source echoed eight times". Pure: no I/O, no clock, and an audit trail per score. |
+| `scoring.py` | S2 | Evidence scoring. `score = round(max(base, strongest signal) + 0.1 × (remaining weights) − penalties)` — the strongest signal is a floor, corroboration nudges, so "eight sources agree" never becomes "one source echoed eight times". Pure: no I/O, no clock, and an audit trail per score. Callers build a `ScoredAsset`; `signal_for_source` maps a provenance string to its §4 weight and **names an unknown source as unknown** rather than handing back a weight indistinguishable from a real one. The only caller today is `graph_normalize`'s scoring pass, which scores every node of the asset model. |
 | `scope.py` | S15 | The `in_scope` / `needs_review` / `out_of_scope` chokepoint between discovery and action. Conservative by construction: it auto-claims what DNS pointed at, and puts ASN/CIDR-derived networks in `needs_review` because *announced ≠ owned* (recon.md §5.4). |
 | `dispatch.py` | S10 | The policy gate every active step asks first. Answers `ALLOW` / `DEFER` / `DENY` with a reason; deny-by-default (no scope decision, no score or unknown type ⇒ `DENY`); per-host and global token budgets; the full decision log lands in the run report. |
 | `cache.py` | S8 | Redis hot cache: latest score per asset + "already known" membership. Redis down is a *state*: every method returns a cache miss and `available=False`, and the `redis` import is deferred until a connection is attempted. |
@@ -77,5 +77,8 @@ reported each degradation with its cause.
   `tests/recon/test_repository.py`
 - `service/recon_pipeline/platform/stealth/*` and `stealth/README.md`
 - Live run: `python -m service.recon_pipeline run -t qbsco.net -p asn_cidr`
+- Live run of the scoring pass: `python -m service.recon_pipeline run -t qbsco.net -p graph_normalize`
+  (6 815 nodes scored, bands and top nodes in the report; the state document is
+  `pipelines/graph_normalize/output/graph_state.json`)
   → `output/runs/qbsco.net/<stamp>/`, one row in `output/runs/runs.jsonl`
 - `service/recon_pipeline/README.md` (the pipeline contract and its discovery rules)

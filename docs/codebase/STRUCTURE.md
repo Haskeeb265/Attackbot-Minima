@@ -109,10 +109,12 @@ Attackbot-Minimal/
 │               ├── normalize.py       # the model: identities, merge rules, dedupe, union props, orphans
 │               ├── sources.py         # counted artifact readers (missing ≠ empty ≠ corrupt)
 │               ├── merge.py           # per-stream mapping: artifact rows → nodes and edges
-│               ├── emit.py            # nodes.jsonl, edges.jsonl, vocabulary.json, nodes.txt
-│               ├── main.py            # collect → merge → emit, one report shape for both entry points
+│               ├── score.py           # node → the platform S2 engine's ScoredAsset (no local weights)
+│               ├── state.py           # the final graph state: one self-describing handoff document
+│               ├── emit.py            # nodes.jsonl, edges.jsonl, vocabulary.json, scoring.json, nodes.txt
+│               ├── main.py            # collect → merge → score → emit, report + artifact writer
 │               ├── README.md          # the model's contract, measured numbers, honest gaps
-│               └── output/            # (gitignored) the model + report.json
+│               └── output/            # (gitignored) the model, graph_state.json + report.json
 │
 │   (plus, at the run level) output/runs/<target>/<stamp>/{summary.json,stages/…}
 │   and the shared run timeline output/runs/runs.jsonl — both gitignored
@@ -128,7 +130,7 @@ Attackbot-Minimal/
 │
 ├── tests/
 │   ├── conftest.py             # makes the repo root importable for pytest
-│   ├── recon/                  # hermetic suite (1104 tests) — no Docker, DNS or network
+│   ├── recon/                  # hermetic suite (1123 tests) — no Docker, DNS or network
 │   └── scraper/                # live-PostgreSQL scripts; one real pytest test (skips without its fixture)
 │
 ├── docs/                       # see docs/README.md for the map
@@ -151,7 +153,7 @@ Attackbot-Minimal/
 | `.../port_service_host/pipeline.py` | Ports/services/hosts pipeline (all layers) | `python -m ...port_service_host.pipeline -t <target>` |
 | `.../url_endpoint/main.py` | URL/endpoint pipeline (all stages) | `python -m ...url_endpoint.main -t <target>` |
 | `.../asn_cidr/main.py` | ASN/CIDR network-ownership discovery (never scans) | `python -m ...asn_cidr.main -t <target>` |
-| `.../graph_normalize/main.py` | The asset model: four artifacts → nodes + edges (no DB writes) | `python -m ...graph_normalize.main -t <target>` |
+| `.../graph_normalize/main.py` | The asset model: four artifacts → scored nodes + edges, and `graph_state.json` for the vulnerability finder (no DB writes) | `python -m ...graph_normalize.main -t <target>` |
 | `run_recon.py` | Every pipeline + combined report | `python run_recon.py -t <target>` |
 | `tests/recon/test_repository.py` | Neo4j graph integration test (script, needs a live Neo4j) | `python tests/recon/test_repository.py` |
 

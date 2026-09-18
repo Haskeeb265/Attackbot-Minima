@@ -54,7 +54,7 @@ against the code, not the docs:
 | Certificate | none | CNAME chains are collected; no cert clustering (S20) |
 | Secret | none | no extractor (S21/S23) |
 | CloudResource | none | no bucket enumeration (S22) |
-| **Asset model (nodes + edges)** | **built (file-only)** | `graph_normalize/` fuses all four collectors' artifacts into one node/edge model with provenance, trust classes and scope verdicts. No database writes: the schema is not final |
+| **Asset model (nodes + edges)** | **built (file-only)** | `graph_normalize/` fuses all four collectors' artifacts into one scored node/edge model — provenance, trust classes, scope verdicts, an S2 score + band on every claimed node — and emits **`graph_state.json`**, the self-describing handoff document for the vulnerability finder. No database writes: the schema is not final |
 | Repository (Source Code) | none | no code-host dorking (S21) |
 | MobileApp (#7–#11) | none | no mobile teardown (S23) |
 | Binary (Executable) | none | no executable pipeline |
@@ -86,7 +86,7 @@ populates (`URL`, `Endpoint`, `Certificate`, `Secret`, `Technology`,
 - **Active (S10 techniques without the gate):** validated resolver pool (positive + `.invalid` NXDOMAIN probe — supersedes plan-v2's static resolver list), puredns resolve/bruteforce, bounded recursion, AXFR attempts, dnsx record enrichment, opt-in HTTP probe.
 - **Permutation (S16 technique):** dnsgen + batched stealth-paced resolution.
 - **Orchestrator (S7 shape):** `main.py` runs all three and writes `output/live_hosts.txt` + `summary.json` — but **writes files only; nothing reaches the graph** (CONCERNS.md #4).
-- 397+ hermetic tests at doc-check time; the whole recon suite is now **1 069 passing (2026-09-18)**.
+- 397+ hermetic tests at doc-check time; the whole recon suite is now **1 123 passing (2026-09-18)**.
 
 ### The ports/services/host pipeline (outside plan numbering — built)
 - Location: `service/recon_pipeline/pipelines/port_service_host/`; R&D doc `docs/recon_docs/port_service_host.md` is marked **IMPLEMENTED, with the deltas recorded there**.
@@ -157,7 +157,7 @@ populates (`URL`, `Endpoint`, `Certificate`, `Secret`, `Technology`,
    `context.graph`, but no pipeline calls it. The value today is per-run files
    plus a run report.
 3. **Stealth is direct-mode only** — a target that blocks by IP exhausts the single exit node; `report.json`'s stealth block is where to check what actually ran.
-4. **No CI** — the (fast, ~15 s, dependency-light) 1 069-test recon suite never runs automatically.
+4. **No CI** — the (fast, ~26 s, dependency-light) 1 123-test recon suite never runs automatically.
 5. Minor: `docker/` empty + 0-byte root Dockerfile; config/code drift for planned subsystems.
 
 ---
@@ -372,17 +372,73 @@ These need folding into `IMPLEMENTATION_PLAN*.md` status tables, `docs/recon_doc
   table, measured numbers, honest gaps), `ARCHITECTURE.md` §2f, `STRUCTURE.md`,
   `TESTING.md`, `docs/README.md`, root `README.md`.
 
+## Added 2026-09-18 (final session, part 4) — scoring on every node, and the graph state handoff
+
+- **S2 scoring wired into the model.** `graph_normalize/score.py` translates each
+  node into the platform engine's `ScoredAsset` and asks `platform/scoring.py`;
+  the pipeline owns no weights, so the arithmetic, the corroboration rule and the
+  bands cannot drift. `scoring.json` travels with every run.
+
+  | Decision | Why |
+  |---|---|
+  | signals come from the node's own `sources` | the engine's §4 weight applies to what actually saw the asset |
+  | `records` + `live_hosts` collapse to one key | both are our own resolution — an echo, not corroboration |
+  | ownership weight needs the `allocated_to` **edge** | an announcement must not borrow an ownership weight from another stream's allocation on the same node (the node's `classes` aggregates every stream, so it cannot answer this) |
+  | a verdict is never evidence | `cdn_classified.jsonl` only feeds the shared-infrastructure penalty |
+  | two penalties only | no takedown feed, no NXDOMAIN re-check exist in this tree, so neither penalty is invented |
+  | nothing claimed ⇒ no `score` | a node whose only contributor is a judgement is counted, not zeroed |
+
+- **`graph_state.json` — the final graph state.** One document: nodes (with
+  `labels`, `score`, `band`, `score_audit`, `sources`, `trust`, `props`,
+  `evidence`), edges (with `relationship` + `direction`), both contracts
+  (`vocabulary` + `scoring`), the run's own accounting, and a **computed**
+  `integrity` block (`consistent: true` only if every edge endpoint resolves to a
+  node in the file — a test proves the flag can come out false). Copied out of
+  the finished model, never recomputed, so it cannot contradict the JSONL of the
+  same run.
+- **Two defects the live run caught and fixed** — both of the kind only real data
+  finds: the platform contract wrote the model + report itself and so silently
+  omitted the handoff document (both paths now call one writer,
+  `main.write_outputs`); and an RDAP allocation row carries no ASN, so nesting the
+  allocation edge inside the ASN loop **dropped every pure allocation** —
+  Cloudflare's `104.16.0.0/12`/`172.64.0.0/13` and Microsoft's `2603:1000::/24`
+  among them (recovered: 5 edges, 3 organisations, orphans 16 → 11).
+- **The engine got stricter too:** `signal_for_source` now names an unknown source
+  as unknown in the audit (`unknown source, weakest tier: X`) instead of emitting
+  a weight indistinguishable from a real one; the model's test asserts every
+  source key it uses is one the engine knows.
+- **Live run, `qbsco.net`, 2026-09-18** (all four collectors refreshed that
+  morning: names 08:53, ports 09:03, URLs 09:04, networks 09:08): 9 812 rows →
+  **6 817 nodes / 6 842 edges** in 0.25 s → an 8.57 MB `graph_state.json`.
+  6 815 scored (59 core, 11 high, 6 690 medium, 55 low; 2 unscored because
+  nothing claimed them), score range 25–100, `integrity.consistent: true`,
+  3 481 nodes with a scope verdict.
+- **Standalone CLI added** (`python -m ...graph_normalize.main -t <target>`), so
+  the command `STRUCTURE.md` documented actually runs; it logs the counts and the
+  path of the handoff document.
+- Test count 1 104 → **1 123** (+19; `test_graph_normalize.py` 35 → 53,
+  `test_platform.py` 31 → 32), all new code mypy-clean apart from the pre-existing
+  graph-driver stubs. Docs reconciled: `graph_normalize/README.md` (scoring and
+  graph-state sections, refreshed measured numbers, the two defects),
+  `ARCHITECTURE.md` §2f, `STRUCTURE.md`, `TESTING.md`, `CONCERNS.md` #4, root
+  `README.md`, `docs/README.md`.
+
 ## Suggested next moves (dependency order from the plans)
 
-1. **Finalize the graph schema, then write the model into it** — map
+1. **Consume `graph_state.json` in the vulnerability-finder engine** — the model,
+   the scores and the handoff document all exist; the consumer does not.
+2. **Finalize the graph schema, then write the model into it** — map
    `vocabulary.py`'s two dicts to the settled labels and have a writer feed
-   `context.graph` from `nodes.jsonl`/`edges.jsonl`. The model, the sink and the
+   `context.graph` from `graph_state.json`. The model, the sink and the
    journal all exist; the schema is the only missing piece.
-2. **S4 seed ingestion** — Postgres programs → `Organization`/anchor nodes; the
+3. **Reconcile organisations** — one real organisation currently becomes several
+   `organization` nodes (Cymru's name, RDAP's name, the handle); it is the one
+   place the model is knowingly fragmentary.
+4. **S4 seed ingestion** — Postgres programs → `Organization`/anchor nodes; the
    scraper's data is still a disconnected island and scope files are hand-made.
-3. **Declare dependencies + wire CI** — cheapest reliability wins from CONCERNS.md
-   (the suite is 1 069 tests in ~15 s and still runs nowhere automatically).
-4. **Queue workers (S9 remainder)** — the topology, spool and DLQ exist; a
+5. **Declare dependencies + wire CI** — cheapest reliability wins from CONCERNS.md
+   (the suite is 1 123 tests in ~26 s and still runs nowhere automatically).
+6. **Queue workers (S9 remainder)** — the topology, spool and DLQ exist; a
    consumer pool is what would make the spine event-driven.
-5. **Correlation** (cert/favicon/JARM clustering, reverse-WHOIS, takeover) — the
+7. **Correlation** (cert/favicon/JARM clustering, reverse-WHOIS, takeover) — the
    "18th asset type", and what the platform's asset model is for.

@@ -13,13 +13,28 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.pipelines.graph_normalize import emit, main, settings, sources
+from service.recon_pipeline.pipelines.graph_normalize import emit, main, merge, settings, sources
 from service.recon_pipeline.pipelines.graph_normalize import normalize as norm
+from service.recon_pipeline.pipelines.graph_normalize import score as score_mod
+from service.recon_pipeline.pipelines.graph_normalize import state
 from service.recon_pipeline.pipelines.graph_normalize import vocabulary as vocab
+from service.recon_pipeline.platform import scoring as engine
 from service.recon_pipeline.platform.contract import RunContext
 from service.recon_pipeline.platform.scope import ScopeEngine
 
 APEX = "acme.test"
+
+#: Artifact labels, taken from the merge rather than retyped, so a renamed
+#: stream fails the tests instead of quietly scoring off the default weight.
+RECORDS = merge.SOURCE_LABEL["records"]
+LIVE_HOSTS = merge.SOURCE_LABEL["hosts"]
+PASSIVE = merge.SOURCE_LABEL["subdomains"]
+WILDCARDS = merge.SOURCE_LABEL["wildcards"]
+OPEN_PORTS = merge.SOURCE_LABEL["open_ports"]
+PASSIVE_INTEL = merge.SOURCE_LABEL["passive_intel"]
+VERDICTS = merge.SOURCE_LABEL["verdicts"]
+NETWORKS = merge.SOURCE_LABEL["networks"]
+ASNS = merge.SOURCE_LABEL["asns"]
 
 
 # --------------------------------------------------------------------------- #
@@ -470,7 +485,13 @@ def test_ports_artifacts_become_services_asns_and_networks(tmp_path: Path) -> No
 
     assert nodes["service:104.16.1.10:443/tcp"]["trust"] == vocab.OBSERVED
     assert nodes["asn:64500"]["props"]["as_name"] == "ACME-AS - Acme Hosting, US"
-    assert nodes["network:104.16.0.0/12"]["props"]["classes"] == ["announced", "allocated"]
+    # Both streams' claim classes land on the one node — announced by the network
+    # pipeline, allocated by the registry record the ports pipeline read.  The
+    # order is whichever stream the merge saw first; the *set* is the claim.
+    assert set(nodes["network:104.16.0.0/12"]["props"]["classes"]) == {
+        "announced",
+        "allocated",
+    }
 
     types = {edge["type"] for edge in edges}
     assert {vocab.BELONGS_TO_ASN, vocab.IN_NETWORK, vocab.EXPOSES_SERVICE, vocab.HOSTED_BY} <= types
@@ -513,6 +534,48 @@ def test_parameter_names_become_nodes_without_invented_edges(tmp_path: Path) -> 
     assert report.counts["unlinked_parameters"] == 2
     assert not [edge for edge in edges if edge["type"] not in vocab.EDGE_TYPES]
     assert "no URL linkage" in nodes["parameter:id"]["evidence"][0]
+
+
+def test_an_allocation_with_no_asn_still_becomes_an_allocation_edge(tmp_path: Path) -> None:
+    """RDAP allocation rows carry no ASN, and one did: the claim is about the
+    network, so nesting it in the ASN loop dropped every pure allocation."""
+    directories = _all_dirs(tmp_path)
+    directory = directories["networks_dir"]
+    _jsonl(
+        directory / "output" / "networks.jsonl",
+        [
+            {
+                "network": "104.16.0.0/12",
+                "classes": ["allocated"],
+                "asns": [],  # a pure allocation: no routing claim at all
+                "org": "Cloudflare, Inc.",
+                "org_handle": "CLOUD14",
+                "registry": "NET-104-16-0-0-1",
+                "known_hosts": 0,
+            }
+        ],
+    )
+    output = tmp_path / "out"
+    report = main.run_pipeline(
+        APEX,
+        output_dir=output,
+        names_dir=directories["names_dir"],
+        ports_dir=directories["ports_dir"],
+        urls_dir=directories["urls_dir"],
+        networks_dir=directory,
+    )
+
+    allocated = [
+        edge
+        for edge in _edges(output)
+        if edge["type"] == vocab.ALLOCATED_TO and edge["sources"] == [NETWORKS]
+    ]
+    assert len(allocated) == 1
+    assert allocated[0]["from"] == "network:104.16.0.0/12"
+    assert allocated[0]["to"] == "organization:cloudflare, inc."
+    # And the claim it carries is scored as ownership, not as an announcement.
+    assert _nodes(output)["network:104.16.0.0/12"]["score"] == engine.W_ASN_CIDR_OWNERSHIP
+    assert report.counts["sources_read"] == 4
 
 
 def test_network_artifacts_become_announcement_and_allocation_claims(tmp_path: Path) -> None:
@@ -578,6 +641,206 @@ def test_without_a_scope_engine_no_verdicts_are_invented(tmp_path: Path) -> None
 
 
 # --------------------------------------------------------------------------- #
+# scoring — every node carries the platform engine's score and band
+# --------------------------------------------------------------------------- #
+
+
+def _claim(model: norm.Model, kind: str, identity: str, sources: list[str], **props) -> norm.Node:
+    """A node claimed by each of *sources*, built the way the merge builds it."""
+    node = model.add_node(kind, identity, source=sources[0], trust=vocab.DISCOVERED, props=props or None)
+    for source in sources[1:]:
+        node = model.add_node(kind, identity, source=source, trust=vocab.DISCOVERED)
+    assert node is not None
+    return node
+
+
+def _score_of(node: norm.Node) -> int:
+    """The node's score, insisting it was scored at all."""
+    assert node.score is not None, f"{node.id} was left unscored"
+    return node.score
+
+
+def test_a_resolved_host_scores_the_engines_own_active_resolution_weight() -> None:
+    """The number is the engine's constant, not a literal retyped in the pipeline."""
+    model = norm.Model()
+    node = _claim(model, vocab.DOMAIN, f"www.{APEX}", [RECORDS])
+
+    stats = score_mod.score_model(model)
+
+    assert node.score == engine.W_ACTIVE_DNS_RESOLUTION
+    assert node.band == engine.BAND_CORE
+    assert node.score_audit[-1] == f"total: {node.score} ({node.band})"
+    assert stats.scored == 1
+    assert stats.by_band == {engine.BAND_CORE: 1}
+
+
+def test_two_artifacts_of_the_same_kind_are_one_claim_not_two() -> None:
+    """``records`` and ``live_hosts`` are both our own resolution, so a host in
+    both does not outscore a host in one — and a different *kind* of evidence
+    still lifts it.  This is the distinction the engine's corroboration rule is
+    for, and the reason the mapping collapses those two labels onto one key."""
+    model = norm.Model()
+    both = _claim(model, vocab.DOMAIN, f"www.{APEX}", [RECORDS, LIVE_HOSTS])
+    one = _claim(model, vocab.DOMAIN, f"api.{APEX}", [RECORDS])
+    other = _claim(model, vocab.DOMAIN, f"mail.{APEX}", [RECORDS, PASSIVE])
+
+    score_mod.score_model(model)
+
+    assert both.score == one.score == engine.W_ACTIVE_DNS_RESOLUTION
+    # The repeat is named as an echo rather than silently dropped, and bought
+    # no points.
+    assert any("echo ignored" in line for line in both.score_audit)
+    assert "corroboration" not in " ".join(both.score_audit)
+    assert _score_of(other) > _score_of(both)  # +6 for a genuinely different kind
+
+
+def test_a_routing_claim_does_not_earn_the_ownership_weight() -> None:
+    """The pipeline keeps routing separate from ownership in the model; the
+    scoring pass must not quietly reunite them."""
+    model = norm.Model()
+    announced = _claim(model, vocab.NETWORK, "203.0.113.0/24", [NETWORKS], classes=["announced"])
+    allocated = _claim(
+        model, vocab.NETWORK, "198.51.100.0/24", [NETWORKS], classes=["announced", "allocated"]
+    )
+    holder = _claim(model, vocab.ORGANIZATION, "acme hosting ltd", [NETWORKS], org="Acme Hosting Ltd")
+    # The allocation is an *edge* — the merge's own record of which stream made
+    # an ownership claim.  The node's ``classes`` aggregate every stream, so it
+    # cannot answer the question by itself.
+    model.add_edge(
+        vocab.ALLOCATED_TO,
+        allocated.id,
+        holder.id,
+        source=NETWORKS,
+        trust=vocab.DISCOVERED,
+    )
+    speaker = _claim(model, vocab.ASN, "64500", [ASNS], as_name="ACME-AS")
+
+    score_mod.score_model(model)
+
+    # Allocated by a registry: a hard claim, the ownership weight.
+    assert allocated.score == engine.W_ASN_CIDR_OWNERSHIP
+    assert allocated.band == engine.BAND_CORE
+    # Announced only — and an AS known only from its announcements — are
+    # third-party data, not a contract with the organisation.  The same
+    # ``classes`` list cannot buy the weight on its own.
+    assert announced.score == engine.W_THIRD_PARTY_DATASET
+    assert speaker.score == engine.W_THIRD_PARTY_DATASET
+    assert announced.band == engine.BAND_MEDIUM
+
+
+def test_a_prefix_one_stream_announces_and_another_allocates_is_scored_by_edge() -> None:
+    """An announcement must not inherit an ownership weight from a *different*
+    stream's allocation claim on the same node."""
+    ownership = merge.SOURCE_LABEL["ownership"]
+    model = norm.Model()
+    network = _claim(model, vocab.NETWORK, "198.51.100.0/24", [NETWORKS, ownership])
+    holder = _claim(model, vocab.ORGANIZATION, "acme hosting ltd", [ownership])
+    model.add_edge(
+        vocab.ALLOCATED_TO, network.id, holder.id, source=ownership, trust=vocab.DISCOVERED
+    )
+
+    score_mod.score_model(model)
+
+    # The two streams' claims are different kinds, so they corroborate rather
+    # than echo: the ownership floor plus the routing claim's 10%, which here
+    # lands on the ceiling.
+    owned = engine.W_ASN_CIDR_OWNERSHIP + int(
+        engine.W_THIRD_PARTY_DATASET * engine.CORROBORATION_FACTOR
+    )
+    assert owned > 100  # the clamp is doing real work, so the line is checked
+    assert network.score == 100
+    assert f"corroboration +{owned - 100}" in " ".join(network.score_audit)
+    assert any("announced, not allocated" in line for line in network.score_audit)
+    assert any("clamped" in line for line in network.score_audit)
+
+
+def test_a_network_holding_a_resolved_host_is_more_than_a_routing_claim() -> None:
+    """The one signal derived rather than sourced: a prefix that contains
+    infrastructure our own resolution found is no longer just a claim."""
+    model = norm.Model()
+    plain = _claim(model, vocab.NETWORK, "203.0.113.0/24", [NETWORKS], classes=["announced"], known_hosts=0)
+    holding = _claim(model, vocab.NETWORK, "198.51.100.0/24", [NETWORKS], classes=["announced"], known_hosts=1)
+
+    score_mod.score_model(model)
+
+    assert plain.score == engine.W_THIRD_PARTY_DATASET
+    assert _score_of(holding) > _score_of(plain)
+    assert any("host the names stage resolved" in line for line in holding.score_audit)
+
+
+def test_a_host_known_only_through_a_wildcard_is_penalised() -> None:
+    """The engine's wildcard penalty, applied only where the model can prove
+    it: covered *and* never resolved on its own."""
+    model = norm.Model()
+    wildcard = _claim(model, vocab.WILDCARD, f"*.{APEX}", [WILDCARDS])
+    ghost = _claim(model, vocab.DOMAIN, f"anything.{APEX}", [PASSIVE])
+    resolved = _claim(model, vocab.DOMAIN, f"www.{APEX}", [PASSIVE])
+    address = _claim(model, vocab.IP, "203.0.113.7", [OPEN_PORTS])
+    assert wildcard is not None
+    model.add_edge(vocab.WILDCARD_COVERS, wildcard.id, ghost.id, source=WILDCARDS, trust=vocab.INFERRED)
+    model.add_edge(vocab.WILDCARD_COVERS, wildcard.id, resolved.id, source=WILDCARDS, trust=vocab.INFERRED)
+    model.add_edge(vocab.RESOLVES_TO, resolved.id, address.id, source=RECORDS, trust=vocab.OBSERVED)
+
+    stats = score_mod.score_model(model)
+
+    assert ghost.score == engine.W_PASSIVE_DNS + engine.P_WILDCARD_MATCH
+    assert ghost.band == engine.BAND_LOW
+    assert any("wildcard match" in line for line in ghost.score_audit)
+    # Covered but resolved on its own is a host, not a wildcard artefact.
+    assert resolved.score == engine.W_PASSIVE_DNS
+    assert stats.penalised == 1
+
+
+def test_a_shared_infrastructure_verdict_penalises_and_never_evidences() -> None:
+    """A classification verdict is our own judgement, so it contributes no
+    signal — its effect is the penalty, on the address and on what runs there."""
+    model = norm.Model()
+    address = _claim(model, vocab.IP, "104.16.1.10", [PASSIVE_INTEL], hosting_verdict="hosted")
+    service = _claim(model, vocab.SERVICE, "104.16.1.10:443/tcp", [OPEN_PORTS])
+    provider = _claim(model, vocab.ORGANIZATION, "acme cloud", [VERDICTS])
+
+    stats = score_mod.score_model(model)
+
+    assert address.score == engine.W_THIRD_PARTY_DATASET + engine.P_SHARED_INFRASTRUCTURE
+    assert service.score == engine.W_SERVICE_RESPONSE + engine.P_SHARED_INFRASTRUCTURE
+    assert any("shared infrastructure" in line for line in service.score_audit)
+    # A node nothing but a verdict named is context, not an asset: unscored,
+    # with the reason, rather than published as a zero.
+    assert provider.score is None and provider.band == ""
+    assert stats.unscored == 1
+    assert provider.id in stats.unscored_ids
+    assert not any(VERDICTS in line for line in service.score_audit)
+
+
+def test_every_source_key_the_model_uses_is_one_the_engine_knows() -> None:
+    """A typo in the mapping would score at the floor and look like evidence."""
+    delegated = set(score_mod.SOURCE_KEY.values()) - set(score_mod._EXTRA_SIGNALS)
+    unknown = [
+        key
+        for key in sorted(delegated)
+        if engine.signal_for_source(key).reason.startswith("unknown source")
+    ]
+    assert unknown == []
+
+    # The two keys the engine has no entry for carry a weight the *engine*
+    # states, so the model still invents no confidence of its own.
+    engine_weights = {
+        value for name, value in vars(engine).items() if name.startswith("W_")
+    }
+    assert {weight for weight, _ in score_mod._EXTRA_SIGNALS.values()} <= engine_weights
+
+
+def test_an_unmapped_source_falls_to_the_weakest_tier_and_is_named() -> None:
+    model = norm.Model()
+    node = _claim(model, vocab.DOMAIN, f"mystery.{APEX}", ["mystery:feed"])
+
+    stats = score_mod.score_model(model)
+
+    assert node.score == engine.signal_for_source("mystery:feed").weight
+    assert stats.unknown_sources == ["mystery:feed"]
+
+
+# --------------------------------------------------------------------------- #
 # the pipeline end to end
 # --------------------------------------------------------------------------- #
 
@@ -593,17 +856,30 @@ def test_run_writes_the_model_and_says_it_wrote_no_graph(tmp_path: Path) -> None
     assert report.counts["nodes"] > 0 and report.counts["edges"] > 0
     assert report.counts["graph_written"] == 0
 
-    # The artifacts: model, mapping, report — and no journal or Cypher anywhere.
-    for name in (emit.NODES_FILE, emit.EDGES_FILE, emit.VOCABULARY_FILE, emit.REPORT_FILE):
+    # The artifacts: model, mapping, scoring table, handoff document, report —
+    # and no journal or Cypher anywhere.
+    for name in (
+        emit.NODES_FILE,
+        emit.EDGES_FILE,
+        emit.VOCABULARY_FILE,
+        emit.SCORING_FILE,
+        state.GRAPH_STATE_FILE,
+        emit.REPORT_FILE,
+    ):
         assert (output / name).is_file(), name
     written = {path.name for path in output.iterdir()}
     assert written == {
         emit.NODES_FILE,
         emit.EDGES_FILE,
         emit.VOCABULARY_FILE,
+        emit.SCORING_FILE,
+        state.GRAPH_STATE_FILE,
         emit.REPORT_FILE,
         emit.NODE_INDEX_FILE,
     }
+    # The report names the handoff document, so a consumer that only reads the
+    # report still knows where the graph state is.
+    assert Path(report.outputs["graph_state"]).name == state.GRAPH_STATE_FILE
 
     on_disk = json.loads((output / emit.REPORT_FILE).read_text(encoding="utf-8"))
     assert on_disk["graph_written"] is False
@@ -618,8 +894,111 @@ def test_the_same_inputs_produce_identical_model_bytes(tmp_path: Path) -> None:
     _run(tmp_path, first)
     _run(tmp_path, second)
 
-    for name in (emit.NODES_FILE, emit.EDGES_FILE, emit.VOCABULARY_FILE, emit.NODE_INDEX_FILE):
+    for name in (
+        emit.NODES_FILE,
+        emit.EDGES_FILE,
+        emit.VOCABULARY_FILE,
+        emit.NODE_INDEX_FILE,
+        emit.SCORING_FILE,
+    ):
         assert (first / name).read_bytes() == (second / name).read_bytes(), name
+
+    # The graph state carries the run's timestamp by design, so it is compared
+    # with the clock fields removed: the model inside it is still identical.
+    documents = [
+        json.loads((directory / state.GRAPH_STATE_FILE).read_text(encoding="utf-8"))
+        for directory in (first, second)
+    ]
+    for document in documents:
+        document.pop("generated_at")
+        document["run"].pop("seconds")
+        document["run"].pop("started_at")
+    assert documents[0] == documents[1]
+
+
+def test_the_run_report_carries_the_score_distribution_and_the_top_nodes(tmp_path: Path) -> None:
+    output = tmp_path / "out"
+    report = _run(tmp_path, output, top_scored=5)
+    nodes = _nodes(output)
+    scoring = report.scoring
+
+    scored = {key: row for key, row in nodes.items() if "score" in row}
+    assert report.counts["nodes_scored"] == len(scored) == scoring["scored_nodes"]
+    assert scoring["scored_nodes"] + scoring["unscored_nodes"] == report.counts["nodes"]
+    # The distribution is the artifact's own counts, and every band is named.
+    assert sum(scoring["nodes_by_band"].values()) == len(scored)
+    assert set(scoring["nodes_by_band"]) <= {
+        engine.BAND_CORE,
+        engine.BAND_HIGH,
+        engine.BAND_MEDIUM,
+        engine.BAND_LOW,
+    }
+    assert set(scoring["bands_by_kind"]) == set(report.by_kind)
+    assert set(report.by_kind) == {row["kind"] for row in nodes.values()}
+
+    # Every node's band is the engine's band for its own score.
+    for row in scored.values():
+        assert engine.band_for(row["score"]) == row["band"]
+
+    top = scoring["top_scored"]
+    assert len(top) == 5
+    assert [row["score"] for row in top] == sorted(
+        (row["score"] for row in top), reverse=True
+    )
+    assert {"id", "kind", "score", "band", "sources", "trust"} == set(top[0])
+    # The report quotes the artifact rather than re-scoring: same number, same band.
+    for row in top:
+        assert nodes[row["id"]]["score"] == row["score"]
+        assert nodes[row["id"]]["band"] == row["band"]
+
+
+def test_the_weight_table_travels_with_the_scores(tmp_path: Path) -> None:
+    """A score is only meaningful next to the table that produced it."""
+    output = tmp_path / "out"
+    _run(tmp_path, output)
+
+    table = json.loads((output / emit.SCORING_FILE).read_text(encoding="utf-8"))
+    assert table["engine"] == "service.recon_pipeline.platform.scoring"
+    # Quoted from the engine, so the document cannot drift from it.
+    assert table["weights"]["active_dns_resolution"] == engine.W_ACTIVE_DNS_RESOLUTION
+    assert table["weights"]["asn_cidr_ownership"] == engine.W_ASN_CIDR_OWNERSHIP
+    assert table["weights"]["third_party_dataset"] == engine.W_THIRD_PARTY_DATASET
+    assert sorted(table["penalties_applied"]) == ["shared_infrastructure", "wildcard_match"]
+    # The two penalties the model cannot prove say why they are not applied.
+    assert set(table["penalties_not_applied"]) == {"takedown_notice", "dead_host"}
+    # Every artifact label the merge can record has a mapping, so no real source
+    # silently falls through to the weak default.
+    mapped = set(score_mod.SOURCE_KEY) | set(score_mod.NO_SIGNAL_SOURCES)
+    assert set(merge.SOURCE_LABEL.values()) <= mapped
+
+
+def test_a_capped_audit_keeps_the_verdict_line(tmp_path: Path) -> None:
+    output = tmp_path / "out"
+    _run(tmp_path, output, max_score_audit=2)
+    nodes = _nodes(output)
+
+    for row in nodes.values():
+        audit = row.get("score_audit", [])
+        assert len(audit) <= 3, audit  # one kept line, the elision, the total
+        if audit:
+            assert audit[-1] == f"total: {row['score']} ({row['band']})"
+    # The cap bit: the fixture's richest node has more evidence than two lines.
+    assert any("more" in line for row in nodes.values() for line in row.get("score_audit", []))
+
+
+def test_scoring_can_be_switched_off_and_the_model_says_so(tmp_path: Path) -> None:
+    output = tmp_path / "out"
+    report = _run(tmp_path, output, scored=False)
+    nodes = _nodes(output)
+
+    assert report.counts["nodes_scored"] == 0
+    assert report.counts["nodes_unscored"] == 0
+    assert "GN_SCORE_MODEL" in report.scoring["skipped"]
+    assert not [row for row in nodes.values() if "score" in row or "band" in row]
+    # Switched off is not the same as "nothing claimed these": no node is
+    # reported as unscored, and no reason is invented for it.
+    assert report.scoring["unscored_nodes"] == 0
+    assert "unscored_reason" not in report.scoring
 
 
 def test_a_run_with_no_readable_artifacts_fails_loudly(tmp_path: Path) -> None:
@@ -664,6 +1043,133 @@ def test_missing_artifacts_are_named_in_the_notes(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# the final graph state — the handoff document
+# --------------------------------------------------------------------------- #
+
+
+def _state(output: Path) -> dict:
+    return json.loads((output / state.GRAPH_STATE_FILE).read_text(encoding="utf-8"))
+
+
+def _section(document: dict[str, object], key: str) -> dict:
+    """A nested section of a state document, narrowed for the type checker."""
+    value = document[key]
+    assert isinstance(value, dict)
+    return value
+
+
+def test_the_graph_state_is_one_self_describing_consistent_document(tmp_path: Path) -> None:
+    output = tmp_path / "out"
+    report = _run(tmp_path, output)
+    document = _state(output)
+
+    assert document["graph_state_version"] == state.GRAPH_STATE_VERSION
+    assert document["target"] == APEX
+    assert document["generated_at"]
+    assert document["produced_by"]["pipeline"] == "graph_normalize"
+
+    # It carries the run's own accounting, both contracts, and the integrity
+    # check — nothing a consumer would have to fetch from a sibling file.
+    assert document["run"]["counts"]["nodes"] == report.counts["nodes"]
+    assert document["vocabulary"]["labels"] == {
+        kind: list(labels) for kind, labels in vocab.GRAPH_LABELS.items()
+    }
+    assert document["scoring"]["weights"]["active_dns_resolution"] == (
+        engine.W_ACTIVE_DNS_RESOLUTION
+    )
+    assert document["status"]["graph_written"] is False
+    assert "not final" in document["status"]["note"]
+
+    nodes, edges = document["nodes"], document["edges"]
+    integrity = document["integrity"]
+    assert integrity["consistent"] is True
+    assert integrity["nodes"] == len(nodes) == report.counts["nodes"]
+    assert integrity["edges"] == len(edges) == report.counts["edges"]
+    assert integrity["edges_with_unresolved_endpoints"] == 0
+
+    # Every row states the graph name a write would use, so whoever settles the
+    # schema can load this file without consulting the code that wrote it.
+    ids = set()
+    for row in nodes:
+        assert row["labels"] == list(vocab.GRAPH_LABELS[row["kind"]])
+        assert row["id"] not in ids
+        ids.add(row["id"])
+    for row in edges:
+        relationship, direction = vocab.GRAPH_RELATIONSHIPS[row["type"]]
+        assert row["relationship"] == relationship
+        assert row["direction"] == direction
+        assert row["from"] in ids and row["to"] in ids
+
+
+def test_the_graph_state_carries_each_nodes_score_and_band(tmp_path: Path) -> None:
+    output = tmp_path / "out"
+    report = _run(tmp_path, output)
+    document = _state(output)
+    nodes = _nodes(output)
+
+    scored = [row for row in document["nodes"] if "score" in row]
+    unscored = [row for row in document["nodes"] if "score" not in row]
+    assert len(scored) == report.counts["nodes_scored"]
+    assert len(unscored) == report.counts["nodes_unscored"]
+    assert document["integrity"]["nodes_by_band"] == report.scoring["nodes_by_band"]
+    assert document["integrity"]["score_range"] == [
+        min(row["score"] for row in scored),
+        max(row["score"] for row in scored),
+    ]
+
+    for row in scored:
+        # The document quotes the model; it does not re-score.
+        assert row["score"] == nodes[row["id"]]["score"]
+        assert row["band"] == engine.band_for(row["score"])
+        assert row["score_audit"][-1] == f"total: {row['score']} ({row['band']})"
+    for row in unscored:
+        assert "band" not in row
+
+
+def test_the_integrity_check_reports_an_edge_whose_endpoint_is_not_a_node() -> None:
+    """The flag is computed, so it has to be able to come out false."""
+    model = norm.Model()
+    model.add_edge(
+        vocab.RESOLVES_TO,
+        f"{vocab.DOMAIN}:ghost.{APEX}",
+        f"{vocab.IP}:203.0.113.7",
+        source="test",
+        trust=vocab.OBSERVED,
+    )
+
+    document = state.build_graph_state(
+        model, target=APEX, generated_at="2026-09-18T00:00:00+00:00"
+    )
+
+    integrity = _section(document, "integrity")
+    assert integrity["edges_with_unresolved_endpoints"] == 1
+    assert integrity["consistent"] is False
+    assert integrity["nodes"] == 0
+
+
+def test_the_graph_state_omits_the_run_section_when_there_is_no_report() -> None:
+    model = norm.Model()
+    model.add_node(
+        vocab.DOMAIN,
+        APEX,
+        source=merge.SOURCE_LABEL["records"],
+        trust=vocab.DECLARED,
+    )
+
+    document = state.build_graph_state(
+        model, target=APEX, generated_at="2026-09-18T00:00:00+00:00"
+    )
+
+    assert "run" not in document
+    # A model handed over before the scoring pass ran: the node is counted as
+    # unscored and carries no band, which is exactly what the model says.
+    integrity = _section(document, "integrity")
+    assert integrity["nodes_scored"] == 0
+    assert integrity["nodes_unscored"] == 1
+    assert "score_range" not in integrity
+
+
+# --------------------------------------------------------------------------- #
 # the platform contract
 # --------------------------------------------------------------------------- #
 
@@ -701,6 +1207,10 @@ def test_the_contract_runs_each_stage_against_a_run_context(tmp_path: Path) -> N
     assert emitted["ok"] is True
     assert (output / emit.NODES_FILE).is_file()
     assert (output / emit.REPORT_FILE).is_file()
+    # The platform path writes the same artifact set as a standalone run —
+    # including the graph state, whose absence from this path a live run caught.
+    assert emitted["outputs"]["graph_state"] == str(output / state.GRAPH_STATE_FILE)
+    assert _state(output)["integrity"]["consistent"] is True
     # Same report shape as the standalone run: the platform path is not a
     # second-class citizen with a thinner report.
     on_disk = json.loads((output / emit.REPORT_FILE).read_text(encoding="utf-8"))

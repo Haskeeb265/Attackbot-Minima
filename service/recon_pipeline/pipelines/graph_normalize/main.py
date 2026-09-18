@@ -7,6 +7,7 @@ platform without a network or a database:
 ``collect``  read every configured sibling artifact (files only)
 ``merge``    normalise the rows into nodes and edges, annotate scope
 ``emit``     write ``nodes.jsonl`` / ``edges.jsonl`` / ``vocabulary.json`` /
+             ``scoring.json`` / ``graph_state.json`` (the handoff document) /
              ``report.json``
 
 Nothing here writes to the graph database, and the report says so in a field
@@ -24,13 +25,15 @@ The honest failure modes are the sibling pipelines' own:
 
 from __future__ import annotations
 
+import argparse
 import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import emit, merge as merge_mod, settings, sources
+from . import emit, merge as merge_mod, settings, sources, state
+from . import normalize as norm
 from . import vocabulary as vocab
 
 log = logging.getLogger("graph_normalize.main")
@@ -54,6 +57,8 @@ class GraphNormalizeReport:
     sources: list[dict] = field(default_factory=list)
     orphans: dict[str, object] = field(default_factory=dict)
     conflicts: list[dict] = field(default_factory=list)
+    #: The S2 scoring pass: band distribution, top-scoring nodes, penalties.
+    scoring: dict[str, object] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     outputs: dict[str, str] = field(default_factory=dict)
     #: Always false until the schema is final — stated as data, not prose.
@@ -76,6 +81,7 @@ class GraphNormalizeReport:
             "sources": self.sources,
             "orphans": self.orphans,
             "conflicts": self.conflicts,
+            "scoring": self.scoring,
             "notes": self.notes,
             "outputs": self.outputs,
         }
@@ -148,6 +154,10 @@ def build_report(
     report.by_kind = model.counts_by_kind()
     report.by_type = model.counts_by_type()
     report.by_trust = model.counts_by_trust()
+    stats = result.score_stats
+    report.scoring = (
+        stats.to_dict() if stats is not None else {"skipped": "the scoring pass did not run"}
+    )
 
     scoped_kinds = (vocab.DOMAIN, vocab.IP, vocab.NETWORK)
     report.counts = {
@@ -168,6 +178,11 @@ def build_report(
             if result.scope_applied
             else 0
         ),
+        # Read from the stats object, not back out of the report dict, so the
+        # counts cannot disagree with the distribution below them.
+        "nodes_scored": stats.scored if stats is not None else 0,
+        "nodes_unscored": stats.unscored if stats is not None else 0,
+        "nodes_penalised": stats.penalised if stats is not None else 0,
         "wildcard_edges_withheld": result.wildcard_edges_truncated,
         "truncated_nodes": model.truncated_nodes,
         "truncated_edges": model.truncated_edges,
@@ -194,6 +209,9 @@ def run_pipeline(
     max_evidence: int = settings.MAX_EVIDENCE,
     max_wildcard_edges: int = settings.MAX_WILDCARD_EDGES,
     max_orphans: int = settings.MAX_ORPHANS,
+    scored: bool = settings.SCORE_MODEL,
+    max_score_audit: int = settings.MAX_SCORE_AUDIT,
+    top_scored: int = settings.MAX_TOP_SCORED,
 ) -> GraphNormalizeReport:
     """Run all three stages and write the model artifacts."""
     started = time.monotonic()
@@ -216,6 +234,9 @@ def run_pipeline(
         max_edges=max_edges,
         max_evidence=max_evidence,
         max_wildcard_edges=max_wildcard_edges,
+        scored=scored,
+        max_score_audit=max_score_audit,
+        top_scored=top_scored,
     )
     report = build_report(
         target,
@@ -225,15 +246,136 @@ def run_pipeline(
         max_orphans=max_orphans,
     )
 
-    outputs = emit.write_model(output_dir, result.model)
-    report.outputs = {name: str(path) for name, path in outputs.items()}
-
     report.finished_at = _utc_now()
     report.seconds = time.monotonic() - started
-
-    emit.write_json(Path(output_dir) / emit.REPORT_FILE, report.to_dict())
+    write_outputs(output_dir, result.model, report)
     return report
+
+
+def write_outputs(
+    output_dir: Path | str, model: norm.Model, report: GraphNormalizeReport
+) -> dict[str, str]:
+    """Write every artifact of a run; returns ``{name: path}``.
+
+    **One function for both entry points.**  The standalone run and the platform
+    contract must produce identically-populated output directories: when the
+    contract wrote the model and the report itself while this function also wrote
+    the graph state, a platform run silently omitted the handoff document — a
+    live run caught it, which is exactly the kind of drift the shared report was
+    meant to prevent.  Now neither path can write a partial set.
+    """
+    directory = Path(output_dir)
+    if not report.finished_at:
+        report.finished_at = _utc_now()
+    outputs = {name: str(path) for name, path in emit.write_model(directory, model).items()}
+    # The handoff document for downstream consumers (the vulnerability finder
+    # engine).  Built before the report so the report can name it as an output;
+    # it carries the run's own accounting, so a consumer needs no sibling file.
+    outputs["graph_state"] = str(
+        state.write_graph_state(
+            directory,
+            model,
+            target=report.target,
+            generated_at=report.finished_at,
+            report=report.to_dict(),
+        )
+    )
+    report.outputs = outputs
+    outputs["report"] = str(emit.write_json(directory / emit.REPORT_FILE, report.to_dict()))
+    report.outputs = outputs
+    return outputs
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# --------------------------------------------------------------------------- #
+# CLI — the standalone entry point, for a run outside the platform
+# --------------------------------------------------------------------------- #
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m service.recon_pipeline.pipelines.graph_normalize.main",
+        description=(
+            "Normalise the sibling pipelines' artifacts into one node/edge model "
+            "and write it as the final graph state. Reads files only: no network, "
+            "no database writes."
+        ),
+    )
+    parser.add_argument(
+        "-t", "--target", default=DEFAULT_TARGET, help="apex domain the run is about"
+    )
+    parser.add_argument("--output-dir", default=str(settings.OUTPUT_DIR), help="output directory")
+    for stream, attribute in (
+        ("names", "NAMES_DIR"),
+        ("ports", "PORTS_DIR"),
+        ("urls", "URLS_DIR"),
+        ("networks", "NETWORKS_DIR"),
+    ):
+        parser.add_argument(
+            f"--{stream}-dir",
+            default=str(getattr(settings, attribute)),
+            help=f"{stream} artifacts (default: this checkout's sibling pipeline)",
+        )
+    parser.add_argument(
+        "--no-score",
+        action="store_true",
+        help="skip the S2 scoring pass (the model carries no score/band fields)",
+    )
+    parser.add_argument("--max-nodes", type=int, default=settings.MAX_NODES, help="node cap")
+    parser.add_argument("--max-edges", type=int, default=settings.MAX_EDGES, help="edge cap")
+    parser.add_argument("--max-evidence", type=int, default=settings.MAX_EVIDENCE)
+    parser.add_argument("--max-wildcard-edges", type=int, default=settings.MAX_WILDCARD_EDGES)
+    parser.add_argument("--max-orphans", type=int, default=settings.MAX_ORPHANS, help="orphan ids in the report")
+    parser.add_argument("--max-score-audit", type=int, default=settings.MAX_SCORE_AUDIT)
+    parser.add_argument("--top-scored", type=int, default=settings.MAX_TOP_SCORED)
+    parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point.  Returns a process exit code."""
+    args = _build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)-7s %(name)s: %(message)s",
+    )
+
+    report = run_pipeline(
+        args.target,
+        output_dir=args.output_dir,
+        names_dir=args.names_dir,
+        ports_dir=args.ports_dir,
+        urls_dir=args.urls_dir,
+        networks_dir=args.networks_dir,
+        scored=not args.no_score,
+        max_nodes=args.max_nodes,
+        max_edges=args.max_edges,
+        max_evidence=args.max_evidence,
+        max_wildcard_edges=args.max_wildcard_edges,
+        max_orphans=args.max_orphans,
+        max_score_audit=args.max_score_audit,
+        top_scored=args.top_scored,
+    )
+
+    counts = report.counts
+    log.info(
+        "%s nodes / %s edges from %s row(s) in %.2fs — %s scored, %s unscored, %s orphan(s)",
+        counts.get("nodes"),
+        counts.get("edges"),
+        counts.get("rows_read"),
+        report.seconds,
+        counts.get("nodes_scored"),
+        counts.get("nodes_unscored"),
+        counts.get("orphan_nodes"),
+    )
+    log.info("graph state (handoff document): %s", report.outputs.get("graph_state"))
+    for note in report.notes:
+        log.warning(note)
+    return 0 if report.ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -66,6 +66,15 @@ class Node:
     trust: str = vocab.TRUST_UNKNOWN
     sources: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
+    #: Set by the scoring pass (S2), not by the merge: ``None`` means "not
+    #: scored" — either scoring was switched off for the run or the pass refused
+    #: to guess (see :mod:`~.score`).
+    score: int | None = None
+    band: str = ""
+    #: The engine's line-by-line explanation of the score, capped by
+    #: ``GN_MAX_SCORE_AUDIT`` — a score nobody can explain is a number, not a
+    #: decision.
+    score_audit: list[str] = field(default_factory=list)
 
     @property
     def id(self) -> str:
@@ -78,6 +87,8 @@ class Node:
             "identity": self.identity,
             "trust": self.trust,
             "sources": sorted(set(self.sources)),
+            **({"score": self.score, "band": self.band} if self.score is not None else {}),
+            **({"score_audit": self.score_audit} if self.score_audit else {}),
             "props": self.props,
             **({"evidence": self.evidence} if self.evidence else {}),
         }

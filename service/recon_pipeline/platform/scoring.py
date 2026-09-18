@@ -55,6 +55,12 @@ W_NAME_SIMILARITY = 20
 W_WORDLIST_DERIVATION = 10
 W_PERMUTATION_ONLY = 10
 
+#: A source the engine has no weight for.  It lands in the weakest tier rather
+#: than being given confidence it did not earn — and the audit *says* it was
+#: unknown, because a caller that misspells a source key would otherwise get a
+#: plausible-looking number and no way to notice (see ``signal_for_source``).
+UNKNOWN_SOURCE_WEIGHT = W_THIRD_PARTY_DATASET // 4
+
 #: Penalties.
 P_TAKEDOWN_NOTICE = -60
 P_WILDCARD_MATCH = -40
@@ -175,7 +181,11 @@ def score(asset: ScoredAsset) -> ScoreResult:
         f"floor: {floor.weight} ({floor.reason})" if floor.kind else f"floor: {floor.weight}"
     )
 
-    seen_kinds: set[str] = set()
+    # The floor's own kind is already counted: it *is* the claim.  Seeding the
+    # set with it is what makes "the same kind repeating adds nothing" true when
+    # the repeat happens to be the strongest signal (two artifacts of one kind
+    # at the top weight would otherwise buy themselves a bonus).
+    seen_kinds: set[str] = {floor.kind} if floor.kind else set()
     bonus = 0
     for signal in sorted(asset.signals, key=lambda s: s.weight, reverse=True):
         if signal is floor:
@@ -256,7 +266,13 @@ def signal_for_source(source: str) -> Signal:
         "dnsgen": W_PERMUTATION_ONLY,
         "wordlist": W_WORDLIST_DERIVATION,
     }
-    weight = mapping.get(source, W_THIRD_PARTY_DATASET // 4)
+    weight = mapping.get(source)
+    if weight is None:
+        return Signal(
+            weight=UNKNOWN_SOURCE_WEIGHT,
+            reason=f"unknown source, weakest tier: {source}",
+            kind=f"source:{source}",
+        )
     return Signal(weight=weight, reason=f"source: {source}", kind=f"source:{source}")
 
 

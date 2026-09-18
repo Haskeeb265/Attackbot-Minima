@@ -41,13 +41,16 @@ Be aware that the plan documents describe much more than what exists:
   behind the target, emit ports-stage-compatible *discovered* scope files, and
   never send a packet to the target or anything discovered
   (`service/recon_pipeline/pipelines/asn_cidr/`).
-- Pipeline `graph_normalize`, **built**: the asset model. It reads the four
-  collectors' artifacts (files only) and normalises every row into one model of
-  typed nodes and edges, each carrying its provenance, its trust class
-  (`declared` / `observed` / `discovered` / `inferred`) and — with a scope engine
-  present — its scope verdict. Deterministic JSONL output, and **no graph writes**:
-  the schema is not final, so the label mapping lives in one file that is
-  emitted with every run
+- Pipeline `graph_normalize`, **built**: the asset model *and the handoff to the
+  vulnerability finder*. It reads the four collectors' artifacts (files only) and
+  normalises every row into one model of typed nodes and edges, each carrying its
+  provenance, its trust class (`declared` / `observed` / `discovered` /
+  `inferred`), its S2 **score and band** — with the audit that produced them — and,
+  with a scope engine present, its scope verdict. The run emits
+  **`graph_state.json`**: one self-describing document (nodes + edges + both
+  contracts + a computed integrity check) that a consumer loads without joining
+  anything. Deterministic JSONL too, and **no graph writes**: the schema is not
+  final, so the label mapping lives in one file that is emitted with every run
   (`service/recon_pipeline/pipelines/graph_normalize/`).
 - **ASM platform** (`service/recon_pipeline/platform/`) — the layer every
   pipeline consumes: the plugin contract + registry + one run path, evidence
@@ -106,7 +109,7 @@ carries an implementation-status section:
 | `service/recon_pipeline/pipelines/port_service_host/` | the ports/services/hosts pipeline |
 | `service/recon_pipeline/pipelines/url_endpoint/` | the historical-URL / endpoints / parameters pipeline |
 | `service/recon_pipeline/pipelines/asn_cidr/` | the ASN / CIDR network-ownership discovery pipeline |
-| `service/recon_pipeline/pipelines/graph_normalize/` | the asset model — four pipelines' artifacts → one node/edge model (file-only) |
+| `service/recon_pipeline/pipelines/graph_normalize/` | the asset model — four pipelines' artifacts → one scored node/edge model, emitted as `graph_state.json` for the vulnerability finder (file-only) |
 | `shared/` | DB pool, color logging, API connectors |
 | `tests/` | `recon/` (hermetic pytest suite) · `scraper/` (live-DB scripts) |
 | `docs/` | all prose documentation — see [`docs/README.md`](docs/README.md) |
@@ -218,8 +221,8 @@ Raw per-tool Docker commands (and the resolver warning that matters) are in
 ## Tests
 
 ```bash
-python -m pytest tests/recon -q      # 1104 hermetic tests: no Docker, no DNS, no network
-python -m pytest tests/ -q           # 1104 passed, 1 skipped
+python -m pytest tests/recon -q      # 1123 hermetic tests: no Docker, no DNS, no network
+python -m pytest tests/ -q           # 1123 passed, 1 skipped
 ```
 
 The recon suite is the project's real test suite: it runs anywhere and covers every

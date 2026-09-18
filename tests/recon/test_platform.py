@@ -25,7 +25,14 @@ from service.recon_pipeline.platform.lifecycle import AssetRecord, Lifecycle, Li
 from service.recon_pipeline.platform.observability import RunRecord, RunRegistry, StageMetric
 from service.recon_pipeline.platform.registry import Registration, Registry
 from service.recon_pipeline.platform.scope import ScopeEngine
-from service.recon_pipeline.platform.scoring import ScoredAsset, band_for, score, score_many
+from service.recon_pipeline.platform.scoring import (
+    UNKNOWN_SOURCE_WEIGHT,
+    ScoredAsset,
+    band_for,
+    score,
+    score_many,
+    signal_for_source,
+)
 
 DAY = 86_400.0
 
@@ -74,8 +81,12 @@ def test_echoed_evidence_does_not_corroborate_itself() -> None:
     asset.add_signal(100, "first source", kind="dns")
     asset.add_signal(90, "same source, again", kind="dns")
 
-    # Same kind twice is one claim repeated; no bonus for it.
-    assert score(asset).score == 100
+    # Same kind twice is one claim repeated; no bonus for it.  Asserted on the
+    # bonus as well as the score, because the clamp to 100 would otherwise hide
+    # a 100 + 9 that was never earned.
+    result = score(asset)
+    assert result.corroboration_bonus == 0
+    assert result.score == 100
 
 
 def test_penalties_subtract_and_never_go_negative() -> None:
@@ -97,6 +108,20 @@ def test_score_many_orders_the_triage_queue_best_first() -> None:
     ordered = score_many([weak, strong])
 
     assert [pair[0].canonical_value for pair in ordered] == ["a.acme.test", "b.acme.test"]
+
+
+def test_an_unknown_source_scores_weak_and_the_audit_says_it_was_unknown() -> None:
+    """A source the engine has no weight for must not pass as evidence."""
+    unknown = signal_for_source("mystery:feed")
+    known = signal_for_source("active-resolve")
+
+    assert unknown.weight == UNKNOWN_SOURCE_WEIGHT
+    assert unknown.weight < known.weight
+    # The distinction is legible in the audit trail, not just in the number: a
+    # caller that misspells a source key can see that it did.
+    assert unknown.reason.startswith("unknown source")
+    assert "mystery:feed" in unknown.reason
+    assert known.reason == "source: active-resolve"
 
 
 def test_bands_are_named_ranges() -> None:

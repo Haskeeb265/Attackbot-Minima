@@ -6,7 +6,8 @@ platform** (`service/recon_pipeline/platform/`) that owns scoring, scope,
 queues, dispatch, persistence and observability, and five **pipelines**
 (`service/recon_pipeline/pipelines/`) that run through that platform: four asset
 collectors (names, ports/services/hosts, URLs/endpoints, network ownership) and
-`graph_normalize`, which fuses their artifacts into one node + edge model.
+`graph_normalize`, which fuses their artifacts into one scored node + edge model
+and emits it as `graph_state.json`.
 
 ```
 HackerOne API ──▶ scraper ──▶ PostgreSQL ──▶ (planned) seed ingestion ──▶ Neo4j
@@ -222,7 +223,8 @@ Its own R&D doc is [`url_endpoint/DESIGN.md`](../../service/recon_pipeline/pipel
  traffic to the target, so it belongs behind the platform's S10 dispatcher — and
 calling the platform's graph sink (`context.graph`), which exists and journals
 when Neo4j is down, but which this pipeline does not invoke yet. `graph_normalize`
-(§2f) is where the fusion happens in the meantime — as files.
+(§2f) is where the fusion happens in the meantime — as files, scored, with
+`graph_state.json` as the document the next engine is handed.
 
 ## 2e. Network-ownership pipeline — `asn_cidr` (built)
 
@@ -280,7 +282,10 @@ collect    names · ports · URL · network artifacts
    ↓
 merge      rows → nodes + edges, deduped by identity, trust merged strongest-wins
    ↓
-emit       nodes.jsonl · edges.jsonl · vocabulary.json · report.json · nodes.txt
+score      every claimed node → score + band + audit (platform S2, no local weights)
+   ↓
+emit       nodes.jsonl · edges.jsonl · vocabulary.json · scoring.json
+           · graph_state.json · report.json · nodes.txt
 ```
 
 Design rules the code enforces:
@@ -297,17 +302,32 @@ Design rules the code enforces:
   bare name list, so parameter nodes are emitted with no edge and counted as
   `unlinked_parameters`; a self-loop is refused; an edge always names the claim
   behind it.
-- **Deterministic output.** Two runs over the same artifacts are byte-identical,
-  which is what makes the model diffable between runs.
+- **Every claim is scored by the platform, not by the pipeline.** `score.py`
+  translates a node into the engine's `ScoredAsset` (artifact label → source key)
+  and asks `platform/scoring.py`, so weights, corroboration and bands cannot
+  drift; an ownership weight needs the `allocated_to` **edge** the merge wrote,
+  so a routing announcement never borrows it; a node nobody claimed carries no
+  `score` rather than a zero.
+- **Deterministic output.** Five of the seven artifacts are byte-identical
+  between runs over the same inputs (`graph_state.json` and `report.json` state
+  the run's timestamp), which is what makes the model diffable.
+- **The handoff is one document.** `graph_state.json` holds the nodes, the edges,
+  both contracts (label mapping + weight table) and a *computed* integrity check
+  (every edge endpoint resolves to a node in the file), so the downstream
+  vulnerability-finder engine joins nothing to act on a run.
 - **No database writes.** The Neo4j schema is not final, so `emit` writes files
   and `report.json` says `graph_written: false` with the reason. The mapping from
   neutral kinds to labels/relationships lives in one file (`vocabulary.py`) and
   is emitted with every run; a test asserts every kind and edge type has one.
 
-Measured on `qbsco.net` (2026-09-18, all four siblings present): 9 100 rows →
-**6 444 nodes / 6 481 edges** in 0.51 s, 3 467 nodes annotated with a scope
-verdict, 16 genuine orphans and 3 real property conflicts (Cymru and RIPEstat
-spell three AS names differently) reported rather than resolved. Its own doc is
+Measured on `qbsco.net` (2026-09-18, all four siblings refreshed that morning):
+9 812 rows → **6 817 nodes / 6 842 edges** in 0.25 s, 3 481 nodes annotated with a
+scope verdict, 6 815 scored (bands: 59 core, 11 high, 6 690 medium, 55 low; 2
+left unscored because nothing claimed them), 11 orphans and 3 real property
+conflicts (Cymru and RIPEstat spell three AS names differently) reported rather
+than resolved. Two live-run defects were found and fixed: the platform contract
+silently omitted the handoff document, and every pure RDAP allocation (Cloudflare,
+Microsoft ranges — no ASN in the row) was dropped from the model. Its own doc is
 [`graph_normalize/README.md`](../../service/recon_pipeline/pipelines/graph_normalize/README.md).
 
 ## 2g. Platform layer and the pipeline contract (built)
@@ -390,9 +410,12 @@ The contract every future writer must follow is
 
 What the spec family still describes and the code does not do:
 
-- **A graph writer for the asset model.** `graph_normalize` emits `nodes.jsonl` /
-  `edges.jsonl` with a provisional label mapping and deliberately writes no
-  database rows (§2f); the writer that consumes them waits on the final schema.
+- **A consumer for the graph state, and a writer for the graph.**
+  `graph_normalize` emits `graph_state.json` (plus `nodes.jsonl` / `edges.jsonl`)
+  with a provisional label mapping and deliberately writes no database rows (§2f).
+  The vulnerability-finder engine that would read the state document does not
+  exist yet, and the writer that would load it waits on the final schema;
+  `CONCERNS.md` #4 tracks both.
 - **Seed ingestion from Postgres (S4's other half).** The graph sink can write
   organization/anchor nodes, but nothing reads the scraper's program tables to
   create them — the HackerOne scrape is still a disconnected island, and scope
@@ -436,6 +459,7 @@ The stage-by-stage status is maintained in the plans themselves:
   `tests/recon/test_url_*.py`
 - `service/recon_pipeline/pipelines/asn_cidr/{main,normalize,sources,emit}.py`,
   and `tests/recon/test_asn_*.py`; the live runs cited in `asn_cidr/DESIGN.md`
-- `service/recon_pipeline/pipelines/graph_normalize/{vocabulary,normalize,sources,merge,emit,main,contract}.py`
-  and `tests/recon/test_graph_normalize.py`; the model counts cited in its README
+- `service/recon_pipeline/pipelines/graph_normalize/{vocabulary,normalize,sources,merge,score,state,emit,main,contract}.py`
+  and `tests/recon/test_graph_normalize.py` (53 tests); the model counts, band
+  distribution and the two live-run defects cited in its README
 - `docs/recon_docs/*` for the planned stages (explicitly marked as intent)

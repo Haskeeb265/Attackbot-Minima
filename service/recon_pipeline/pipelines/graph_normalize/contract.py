@@ -46,7 +46,11 @@ MANIFEST = Manifest(
     stages=(
         Stage("collect", "read every configured sibling artifact"),
         Stage("merge", "normalise rows into nodes and edges, annotate scope"),
-        Stage("emit", "write nodes.jsonl / edges.jsonl / vocabulary.json / report.json"),
+        Stage(
+            "emit",
+            "write nodes.jsonl / edges.jsonl / vocabulary.json / scoring.json / "
+            "graph_state.json / report.json",
+        ),
     ),
     passive_only=True,
 )
@@ -103,6 +107,7 @@ class GraphNormalizePipeline(BasePipeline):
             self._facts, target=context.target, scope=context.scope
         )
         model = self._result.model
+        stats = self._result.score_stats
         return {
             "ok": True,
             "counts": {
@@ -110,28 +115,28 @@ class GraphNormalizePipeline(BasePipeline):
                 "edges": len(model.edges),
                 "scope_annotated": self._result.scope_applied,
                 "unlinked_parameters": len(self._result.unlinked),
+                "nodes_scored": getattr(stats, "scored", 0),
+                "core_band": getattr(stats, "by_band", {}).get("core", 0),
             },
         }
 
     def _emit(self, context: RunContext) -> dict[str, Any]:
-        from . import emit, main, settings
+        from . import main, settings
 
         assert self._result is not None  # _merge ran immediately before
         output_dir = Path(context.options.get("output_dir") or settings.OUTPUT_DIR)
-        written = emit.write_model(output_dir, self._result.model)
-        outputs = {name: str(path) for name, path in written.items()}
 
-        # One report shape for both entry points: the standalone run and this
-        # contract build it with the same function, so they cannot drift.
+        # One report shape *and one writer* for both entry points: the standalone
+        # run and this contract build the report with the same function and write
+        # the same artifact set with the same function, so neither can drift into
+        # producing a partial output directory.
         report = main.build_report(
             context.target,
             facts=self._facts or [],
             result=self._result,
             max_orphans=settings.MAX_ORPHANS,
         )
-        report.outputs = outputs
-        report_path = emit.write_json(output_dir / emit.REPORT_FILE, report.to_dict())
-        outputs["report"] = str(report_path)
+        outputs = main.write_outputs(output_dir, self._result.model, report)
         return {
             "ok": report.ok,
             "counts": {

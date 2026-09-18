@@ -23,11 +23,15 @@ asserts.  The rules the whole file follows:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from . import normalize as norm
 from . import settings, vocabulary as vocab
 from .sources import SourceFacts
+
+if TYPE_CHECKING:  # a runtime import would be a cycle: score imports the model
+    from .score import ScoreStats
 
 #: Which stream carries which evidence, for the ``sources`` field of a node.
 SOURCE_LABEL = {
@@ -70,6 +74,8 @@ class MergeResult:
     notes: list[str] = field(default_factory=list)
     wildcard_edges_truncated: int = 0
     rows_by_stream: dict[str, int] = field(default_factory=dict)
+    #: What the S2 scoring pass did, or why it was skipped.
+    score_stats: ScoreStats | None = None
 
 
 def build_model(
@@ -81,8 +87,11 @@ def build_model(
     max_edges: int | None = settings.MAX_EDGES,
     max_evidence: int = settings.MAX_EVIDENCE,
     max_wildcard_edges: int = settings.MAX_WILDCARD_EDGES,
+    scored: bool = settings.SCORE_MODEL,
+    max_score_audit: int = settings.MAX_SCORE_AUDIT,
+    top_scored: int = settings.MAX_TOP_SCORED,
 ) -> MergeResult:
-    """Build the model from every enabled source, then annotate it with scope."""
+    """Build the model, annotate it with scope, then score every node."""
     model = norm.Model()
     result = MergeResult(model=model)
 
@@ -121,6 +130,7 @@ def build_model(
         result, max_edges=max_edges, cap=max_wildcard_edges, max_evidence=max_evidence
     )
     _annotate_scope(result, scope)
+    _annotate_scores(result, scored=scored, max_audit=max_score_audit, top=top_scored)
     return result
 
 
@@ -357,6 +367,11 @@ def _merge_ports(
                 source=SOURCE_LABEL["ownership"],
                 trust=vocab.DISCOVERED,
                 props={
+                    # The same row produces the ``allocated_to`` edge below, so the
+                    # node says so too: a reader filtering on ``classes`` must not
+                    # see "announced" on a network this model also allocates, or
+                    # the field contradicts the edge beside it.
+                    "classes": ["allocated"],
                     "registry": str(row.get("registry", "")),
                     "org": org,
                     "org_handle": handle,
@@ -811,32 +826,37 @@ def _merge_networks(
                     max_edges=max_edges,
                     max_evidence=max_evidence,
                 )
-            if "allocated" in classes:
-                holder = str(row.get("org", "")).strip() or str(row.get("org_handle", "")).strip()
-                if holder:
-                    org_id = vocab.node_id(vocab.ORGANIZATION, norm.organization_identity(holder))
-                    model.add_node(
-                        vocab.ORGANIZATION,
-                        norm.organization_identity(holder),
-                        source=SOURCE_LABEL["networks"],
-                        trust=vocab.DISCOVERED,
-                        props={
-                            "org": str(row.get("org", "")),
-                            "handles": [str(row.get("org_handle", ""))] if row.get("org_handle") else [],
-                        },
-                        max_nodes=max_nodes,
-                        max_evidence=max_evidence,
-                    )
-                    model.add_edge(
-                        vocab.ALLOCATED_TO,
-                        network_id,
-                        org_id,
-                        source=SOURCE_LABEL["networks"],
-                        trust=vocab.DISCOVERED,
-                        evidence=f"RDAP allocation: {holder} holds {network}",
-                        max_edges=max_edges,
-                        max_evidence=max_evidence,
-                    )
+        # Allocation is a claim *about the network*, not about any AS, so it is
+        # read here rather than inside the loop above: a pure allocation row
+        # (RDAP says "Cloudflare holds 104.16.0.0/12", with no announcement in
+        # the registry's routing view) carries no ASN at all, and nesting this in
+        # the ASN loop silently dropped exactly those claims.
+        if "allocated" in classes:
+            holder = str(row.get("org", "")).strip() or str(row.get("org_handle", "")).strip()
+            if holder:
+                org_id = vocab.node_id(vocab.ORGANIZATION, norm.organization_identity(holder))
+                model.add_node(
+                    vocab.ORGANIZATION,
+                    norm.organization_identity(holder),
+                    source=SOURCE_LABEL["networks"],
+                    trust=vocab.DISCOVERED,
+                    props={
+                        "org": str(row.get("org", "")),
+                        "handles": [str(row.get("org_handle", ""))] if row.get("org_handle") else [],
+                    },
+                    max_nodes=max_nodes,
+                    max_evidence=max_evidence,
+                )
+                model.add_edge(
+                    vocab.ALLOCATED_TO,
+                    network_id,
+                    org_id,
+                    source=SOURCE_LABEL["networks"],
+                    trust=vocab.DISCOVERED,
+                    evidence=f"RDAP allocation: {holder} holds {network}",
+                    max_edges=max_edges,
+                    max_evidence=max_evidence,
+                )
 
     for row in source.streams.get("asns", []):
         asn = str(row.get("asn", "")).strip()
@@ -916,6 +936,25 @@ def _merge_wildcard_coverage(
             )
         if len(covered) > cap:
             result.wildcard_edges_truncated += len(covered) - cap
+
+
+def _annotate_scores(
+    result: MergeResult, *, scored: bool, max_audit: int, top: int
+) -> None:
+    """Attach the platform's S2 score and band to every node.
+
+    The pass runs after scope annotation because the penalties read the model's
+    own relationships (wildcard coverage, resolutions, hosting verdicts) — the
+    score is a statement about the finished model, not about a row.
+    """
+    from . import score as score_mod
+
+    if not scored:
+        result.score_stats = score_mod.ScoreStats(skipped="GN_SCORE_MODEL is off")
+        return
+    result.score_stats = score_mod.score_model(
+        result.model, max_audit=max_audit, top_limit=top
+    )
 
 
 def _annotate_scope(result: MergeResult, scope) -> None:

@@ -21,6 +21,9 @@ Environment overrides
 ``GN_MAX_EDGES``                                 cap on emitted edges (400 000)
 ``GN_MAX_EVIDENCE``                              evidence strings kept per node/edge (8)
 ``GN_MAX_ORPHANS``                               orphan ids listed in the report (50)
+``GN_SCORE_MODEL``                               score every node with S2 (on)
+``GN_MAX_SCORE_AUDIT``                           audit lines kept per node (6)
+``GN_MAX_TOP_SCORED``                            top-scoring nodes in the report (20)
 =============================================== ==========================================
 
 The pipeline makes no network requests and reads no configuration beyond these
@@ -101,3 +104,19 @@ MAX_WILDCARD_EDGES = env_int("GN_MAX_WILDCARD_EDGES", 100)
 #: Scope string recorded on nodes whose kind poses no scope question (a URL, a
 #: service identity, an ASN).  Omitted entirely when a scope engine is absent.
 SCOPE_NOT_APPLICABLE = "not_applicable"
+
+# --------------------------------------------------------------------------- #
+# Scoring (S2)
+# --------------------------------------------------------------------------- #
+
+#: Score every node with the platform's S2 engine.  Off produces a model with no
+#: ``score``/``band`` fields at all — useful when only the shape is wanted, and
+#: the run report says which way it went.
+SCORE_MODEL = env_flag("GN_SCORE_MODEL", True)
+
+#: Audit lines kept per node.  The last line (the total and its band) is always
+#: kept, so a capped audit still states the outcome.
+MAX_SCORE_AUDIT = env_int("GN_MAX_SCORE_AUDIT", 6)
+
+#: Highest-scoring nodes listed in the report, for eyeballing a run.
+MAX_TOP_SCORED = env_int("GN_MAX_TOP_SCORED", 20)
