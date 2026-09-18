@@ -95,14 +95,24 @@ Attackbot-Minimal/
 │           │   ├── Dockerfile         # the gau image, smoke-tested at build time
 │           │   ├── DESIGN.md          # source/tool research + phased plan
 │           │   └── output/            # (gitignored) urls.jsonl, endpoints, parameters, reports
-│           └── asn_cidr/              # built pipeline 4: ASN / CIDR network ownership (never scans)
-│               ├── contract.py        # MANIFEST + PIPELINE
-│               ├── main.py            # orchestrator: seeds → lookup → merge → annotate → emit
-│               ├── normalize.py       # network canonicalization, claim merge, floors/ceilings
-│               ├── sources.py         # RIPEstat (announcements) + RDAP (allocations), keyless
-│               ├── emit.py            # networks.jsonl, asns.jsonl, ports-stage scope files
-│               ├── DESIGN.md          # claim-kind research + live-run lessons + phased plan
-│               └── output/            # (gitignored) discovered networks + scope files + report
+│           ├── asn_cidr/              # built pipeline 4: ASN / CIDR network ownership (never scans)
+│           │   ├── contract.py        # MANIFEST + PIPELINE
+│           │   ├── main.py            # orchestrator: seeds → lookup → merge → annotate → emit
+│           │   ├── normalize.py       # network canonicalization, claim merge, floors/ceilings
+│           │   ├── sources.py         # RIPEstat (announcements) + RDAP (allocations), keyless
+│           │   ├── emit.py            # networks.jsonl, asns.jsonl, ports-stage scope files
+│           │   ├── DESIGN.md          # claim-kind research + live-run lessons + phased plan
+│           │   └── output/            # (gitignored) discovered networks + scope files + report
+│           └── graph_normalize/       # built pipeline 5: the asset model — four artifacts → nodes + edges
+│               ├── contract.py        # MANIFEST + PIPELINE (consumes the other four; runs last)
+│               ├── vocabulary.py      # node kinds, edge types, trust classes + the PROVISIONAL graph mapping
+│               ├── normalize.py       # the model: identities, merge rules, dedupe, union props, orphans
+│               ├── sources.py         # counted artifact readers (missing ≠ empty ≠ corrupt)
+│               ├── merge.py           # per-stream mapping: artifact rows → nodes and edges
+│               ├── emit.py            # nodes.jsonl, edges.jsonl, vocabulary.json, nodes.txt
+│               ├── main.py            # collect → merge → emit, one report shape for both entry points
+│               ├── README.md          # the model's contract, measured numbers, honest gaps
+│               └── output/            # (gitignored) the model + report.json
 │
 │   (plus, at the run level) output/runs/<target>/<stamp>/{summary.json,stages/…}
 │   and the shared run timeline output/runs/runs.jsonl — both gitignored
@@ -118,7 +128,7 @@ Attackbot-Minimal/
 │
 ├── tests/
 │   ├── conftest.py             # makes the repo root importable for pytest
-│   ├── recon/                  # hermetic suite (1069 tests) — no Docker, DNS or network
+│   ├── recon/                  # hermetic suite (1104 tests) — no Docker, DNS or network
 │   └── scraper/                # live-PostgreSQL scripts; one real pytest test (skips without its fixture)
 │
 ├── docs/                       # see docs/README.md for the map
@@ -141,6 +151,7 @@ Attackbot-Minimal/
 | `.../port_service_host/pipeline.py` | Ports/services/hosts pipeline (all layers) | `python -m ...port_service_host.pipeline -t <target>` |
 | `.../url_endpoint/main.py` | URL/endpoint pipeline (all stages) | `python -m ...url_endpoint.main -t <target>` |
 | `.../asn_cidr/main.py` | ASN/CIDR network-ownership discovery (never scans) | `python -m ...asn_cidr.main -t <target>` |
+| `.../graph_normalize/main.py` | The asset model: four artifacts → nodes + edges (no DB writes) | `python -m ...graph_normalize.main -t <target>` |
 | `run_recon.py` | Every pipeline + combined report | `python run_recon.py -t <target>` |
 | `tests/recon/test_repository.py` | Neo4j graph integration test (script, needs a live Neo4j) | `python tests/recon/test_repository.py` |
 
@@ -158,6 +169,9 @@ Every recon CLI supports `--help`, and `--list` where there is something to list
 - `db/persistence/persistence.py` — `persist_program()`, the only writer.
 
 ### Recon
+- `service/recon_pipeline/pipelines/graph_normalize/vocabulary.py` — the neutral
+  asset vocabulary and the **only** place a graph label/relationship is named;
+  edit its two dicts when the schema is final.
 - `service/recon_pipeline/platform/contract.py` — `Manifest` / `RunContext` / the
   `Pipeline` protocol: the whole plugin contract.
 - `service/recon_pipeline/platform/registry.py` — folder discovery; a folder

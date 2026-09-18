@@ -14,7 +14,8 @@ service/recon_pipeline/
     ├── subdomain_domain_wildcards/   // names → live hosts
     ├── port_service_host/            // live hosts → ports/services
     ├── url_endpoint/                 // archives → URLs/endpoints/parameters
-    └── asn_cidr/                     // addresses → ASNs/CIDRs (discovery only)
+    ├── asn_cidr/                     // addresses → ASNs/CIDRs (discovery only)
+    └── graph_normalize/              // the four above → one node/edge model (file-only)
 ```
 
 ## Running
@@ -27,6 +28,10 @@ python -m service.recon_pipeline history -n 10           # the run registry (S14
 python -m service.recon_pipeline dlq                     # queue ops, degraded-aware
 python -m service.recon_pipeline replay                  # graph journal → Neo4j
 ```
+
+Dependency order comes from each manifest's declared `consumes`, so
+`graph_normalize` — which consumes the other four — always runs last, whether
+it was named explicitly or discovered as part of a full run.
 
 `run` writes `output/runs/<target>/<stamp>/{summary.json,stages/<pipeline>/<stage>.json}`
 and appends one row per run to the shared `output/runs/runs.jsonl` timeline.

@@ -15,6 +15,7 @@ below is the intended design — file an update to whichever is wrong.
 | run the ports/services/hosts pipeline | [`../service/recon_pipeline/pipelines/port_service_host/README.md`](../service/recon_pipeline/pipelines/port_service_host/README.md) |
 | run the historical-URL/endpoints pipeline | [`../service/recon_pipeline/pipelines/url_endpoint/README.md`](../service/recon_pipeline/pipelines/url_endpoint/README.md) |
 | run the ASN/CIDR network-ownership pipeline | [`../service/recon_pipeline/pipelines/asn_cidr/README.md`](../service/recon_pipeline/pipelines/asn_cidr/README.md) |
+| understand the asset model (nodes + edges from all four pipelines) | [`../service/recon_pipeline/pipelines/graph_normalize/README.md`](../service/recon_pipeline/pipelines/graph_normalize/README.md) — the vocabulary, the trust classes, the provisional graph mapping, and why it writes no database rows yet |
 | understand how active traffic is shaped, and why (stealth, spec §5.1) | [`../service/recon_pipeline/platform/stealth/README.md`](../service/recon_pipeline/platform/stealth/README.md) — what detectors measure, live-capture evidence, design, knobs, measured cost, and the not-built list |
 | understand what the whole system is meant to become | [`recon_docs/recon.md`](recon_docs/recon.md) + [`recon_docs/recon_v2.md`](recon_docs/recon_v2.md) |
 | know what is built versus planned | the status section in [`recon_docs/IMPLEMENTATION_PLAN.md`](recon_docs/IMPLEMENTATION_PLAN.md) and [`recon_docs/IMPLEMENTATION_PLAN_V2.md`](recon_docs/IMPLEMENTATION_PLAN_V2.md) |
@@ -68,7 +69,8 @@ v1 pair first.
 - Per-pipeline READMEs under `service/recon_pipeline/pipelines/` — the
   operator-facing documentation for the built pipelines
   (`subdomain_domain_wildcards/`, `port_service_host/`, `url_endpoint/`,
-  `asn_cidr/`): flags, outputs, settings, measured yields and live caveats.
+  `asn_cidr/`, `graph_normalize/`): flags, outputs, settings, measured yields
+  and live caveats.
   These are the most current docs in the repo.
 - [`stealth/README.md`](../service/recon_pipeline/platform/stealth/README.md) — the stealth
   layer's own doc: what modern detectors measure (JA4 + inter-request signals,

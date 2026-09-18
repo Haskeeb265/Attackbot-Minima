@@ -185,6 +185,11 @@ service/recon_pipeline/pipelines/url_endpoint/output/
 # Same rule as the siblings - reproduced by re-running the stage, never tracked.
 service/recon_pipeline/pipelines/asn_cidr/output/
 
+# graph_normalize stage run artifacts: the node/edge model, its vocabulary
+# mapping and the run report. Reproduced by re-running the stage over the
+# siblings' artifacts, never tracked.
+service/recon_pipeline/pipelines/graph_normalize/output/
+
 # ASM platform run artifacts: one directory per run (summary.json + a report per
 # stage), the shared run timeline runs.jsonl the `history` command reads, and the
 # graph journal written while Neo4j is down (flushed by `replay`). All of it is

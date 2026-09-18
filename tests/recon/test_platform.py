@@ -317,6 +317,7 @@ def test_the_registry_discovers_exactly_the_built_pipelines() -> None:
 
     assert registry.names() == [
         "asn_cidr",
+        "graph_normalize",
         "port_service_host",
         "subdomain_domain_wildcards",
         "url_endpoint",

@@ -38,19 +38,24 @@ managed limits.
 fails the run during the program-list fetch; sustained rate limiting means partial
 ingestion with no backoff to absorb it.
 
-### 4. No pipeline writes to the graph, so nothing is correlated or scored
+### 4. The asset model exists but nothing loads it, scores it, or writes it
 
-The platform now *has* the writers — `platform/graph/ingest.py`'s `GraphSink`
-(`write_asset` / `write_edge` / `write_resolution` / `ingest_program`) with an
-append-only journal that `python -m service.recon_pipeline replay` flushes when
-Neo4j is down — and the runner hands every pipeline a `context.graph`. But none
-of the four pipelines calls it: each still writes files under its own `output/`,
-and the S2 scoring engine is handed over in the context without being applied to
-anything. Seed ingestion from Postgres (the other half of S4) is also unbuilt.
+`graph_normalize` fuses the four collectors' artifacts into one node/edge model
+with provenance, trust classes and scope verdicts — but it emits **files**, and
+the Neo4j schema is not final, so that is deliberate rather than an oversight.
+Nothing consumes the model yet, which means:
 
-**Impact:** a platform run records *that* stages ran and what they counted, but
-discovered assets are not in the model, not scored, and not correlated across
-pipelines. The deliverable is still per-pipeline files plus a run report.
+* `platform/graph/ingest.py`'s `GraphSink` (`write_asset` / `write_edge` /
+  `write_resolution` / `ingest_program`) plus its replayable journal is built and
+  handed to every pipeline as `context.graph`, and **no pipeline calls it**;
+* the S2 scoring engine is passed in the context and applied to nothing — the
+  model carries no `score` field yet;
+* seed ingestion from Postgres (the other half of S4) is unbuilt.
+
+**Impact:** the model is queryable only by reading JSONL, and per-run scoring is
+work an operator would do by hand. The dependency chain is now short and
+explicit: **finalize the schema → map labels in `vocabulary.py` → a writer that
+reads `nodes.jsonl`/`edges.jsonl` into the graph → scoring as a model field.**
 
 ### 4b. The stealth layer is direct-mode only
 
@@ -76,7 +81,7 @@ containerised.
 
 ### 6. No CI
 
-No workflow configuration exists, so the 1069 hermetic recon tests are never run
+No workflow configuration exists, so the 1104 hermetic recon tests are never run
 automatically. They are fast (≈10 s) and dependency-light, which makes them the
 cheapest thing to wire into CI first.
 
@@ -93,7 +98,7 @@ anywhere — `platform/enrich.py` is built but permanently `available=False` her
 ### 8. The Neo4j integration test is not part of the suite
 
 `tests/recon/test_repository.py` needs a live Neo4j, so it is excluded from the
-1069 and easy to forget. It is also the only coverage for the multi-label write
+1104 and easy to forget. It is also the only coverage for the multi-label write
 contract that every future graph writer must follow.
 
 ### 9. Graph writes are only as idempotent as their label sets
@@ -166,7 +171,7 @@ true of the current code:
 - **The scraper test suite did not collect** (2026-09-16) —
   `test_hackerone_mapper.py` opened a fixture at import time and aborted `pytest`
   collection for the whole tree. It is now a skipping pytest test; `pytest tests/`
-  runs cleanly (1069 passed, 1 skipped).
+  runs cleanly (1104 passed, 1 skipped).
 - **`DATABASE_URL` printed to stdout** — `config.py` has no print statement.
 - **Missing per-program transaction boundary** — `ingest_program()` wraps each
   program in `db.atomic(conn)` inside a run-scoped connection, with failures
@@ -185,7 +190,7 @@ true of the current code:
 
 ## Evidence
 
-- `python -m pytest tests/ -q` → `1069 passed, 1 skipped`; `pytest tests/scraper --collect-only -q` → 1 collected (skips by design)
+- `python -m pytest tests/ -q` → `1104 passed, 1 skipped`; `pytest tests/scraper --collect-only -q` → 1 collected (skips by design)
 - `requirements.txt`, `config.py`, `shared/connectors/*`, `service/scraper/*`
 - `Dockerfile` (0 bytes), `docker/` (empty), `docker-compose.yml`
 - `service/recon_pipeline/platform/graph/*` and `tests/recon/test_repository.py`

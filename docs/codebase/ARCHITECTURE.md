@@ -3,9 +3,10 @@
 Attackbot is an attack surface management tool for bug bounty programs. It has a
 **scraper** that ingests HackerOne program data into PostgreSQL, an **ASM
 platform** (`service/recon_pipeline/platform/`) that owns scoring, scope,
-queues, dispatch, persistence and observability, and four **asset pipelines**
-(`service/recon_pipeline/pipelines/`: names, ports/services/hosts,
-URLs/endpoints, network ownership) that run through that platform.
+queues, dispatch, persistence and observability, and five **pipelines**
+(`service/recon_pipeline/pipelines/`) that run through that platform: four asset
+collectors (names, ports/services/hosts, URLs/endpoints, network ownership) and
+`graph_normalize`, which fuses their artifacts into one node + edge model.
 
 ```
 HackerOne API ──▶ scraper ──▶ PostgreSQL ──▶ (planned) seed ingestion ──▶ Neo4j
@@ -18,14 +19,17 @@ HackerOne API ──▶ scraper ──▶ PostgreSQL ──▶ (planned) seed in
                                   └───────────────▲───────────────┘
                                                   │ RunContext (contract)
 in-scope domain ──▶ subdomain_domain_wildcards ──▶ live hosts (files)
-                              │
-                              ├──▶ port_service_host ──▶ ports/services
-                              │
-                              ├──▶ url_endpoint ──▶ endpoints, params, JS
-                              │
-                              └──▶ asn_cidr ──▶ ASNs/CIDRs + discovered scope
+                              │                        │
+                              ├──▶ port_service_host ──┤
+                              │                        │  artifacts
+                              ├──▶ url_endpoint ───────┤  (files)
+                              │                        │
+                              ├──▶ asn_cidr ───────────┤
+                              │                        ▼
+                              └──────────────────▶ graph_normalize
+                                                   nodes + edges (JSONL, no DB write)
 
-     pipelines/ = one folder per asset type, discovered at run time
+     pipelines/ = one folder per pipeline, discovered at run time
      python -m service.recon_pipeline run -t <target>
 ```
 
@@ -217,7 +221,8 @@ Its own R&D doc is [`url_endpoint/DESIGN.md`](../../service/recon_pipeline/pipel
 **Not built:** light-active crawling of confirmed hosts (`katana`) — it sends
  traffic to the target, so it belongs behind the platform's S10 dispatcher — and
 calling the platform's graph sink (`context.graph`), which exists and journals
-when Neo4j is down, but which this pipeline does not invoke yet.
+when Neo4j is down, but which this pipeline does not invoke yet. `graph_normalize`
+(§2f) is where the fusion happens in the meantime — as files.
 
 ## 2e. Network-ownership pipeline — `asn_cidr` (built)
 
@@ -263,7 +268,49 @@ and graph writes — the `ASN`/`CIDR` labels and `BELONGS_TO_ASN`/`ANNOUNCED_BY`
 edges exist in `schema.py` and the platform sink can write them, but this
 pipeline still emits files only.
 
-## 2f. Platform layer and the pipeline contract (built)
+## 2f. Asset model — `graph_normalize` (built, file-only by design)
+
+`service/recon_pipeline/pipelines/graph_normalize/` is the pipeline that answers
+*what do the other four have to do with each other*. It reads their artifacts
+(files only — it imports no sibling code and re-runs nothing) and normalises
+every row into one model of typed nodes and edges:
+
+```
+collect    names · ports · URL · network artifacts
+   ↓
+merge      rows → nodes + edges, deduped by identity, trust merged strongest-wins
+   ↓
+emit       nodes.jsonl · edges.jsonl · vocabulary.json · report.json · nodes.txt
+```
+
+Design rules the code enforces:
+
+- **One identity per asset.** ``www.example.com`` named by passive OSINT,
+  resolved by the active stage and harvested from a Wayback URL is **one**
+  `domain` node whose `sources` list every artifact that saw it.
+- **Trust is per claim, not per asset.** Every contribution declares
+  `declared` / `observed` / `discovered` / `inferred`, and the node keeps the
+  strongest while retaining all sources. A port from InternetDB and a port from
+  our own scan are different facts about the same service, and both provers are
+  recorded.
+- **Nothing is invented to make the model look complete.** `parameters.txt` is a
+  bare name list, so parameter nodes are emitted with no edge and counted as
+  `unlinked_parameters`; a self-loop is refused; an edge always names the claim
+  behind it.
+- **Deterministic output.** Two runs over the same artifacts are byte-identical,
+  which is what makes the model diffable between runs.
+- **No database writes.** The Neo4j schema is not final, so `emit` writes files
+  and `report.json` says `graph_written: false` with the reason. The mapping from
+  neutral kinds to labels/relationships lives in one file (`vocabulary.py`) and
+  is emitted with every run; a test asserts every kind and edge type has one.
+
+Measured on `qbsco.net` (2026-09-18, all four siblings present): 9 100 rows →
+**6 444 nodes / 6 481 edges** in 0.51 s, 3 467 nodes annotated with a scope
+verdict, 16 genuine orphans and 3 real property conflicts (Cymru and RIPEstat
+spell three AS names differently) reported rather than resolved. Its own doc is
+[`graph_normalize/README.md`](../../service/recon_pipeline/pipelines/graph_normalize/README.md).
+
+## 2g. Platform layer and the pipeline contract (built)
 
 `service/recon_pipeline/platform/` is the ASM platform the four pipelines
 consume. It carries no asset logic; **adding a pipeline is adding a folder**
@@ -343,6 +390,9 @@ The contract every future writer must follow is
 
 What the spec family still describes and the code does not do:
 
+- **A graph writer for the asset model.** `graph_normalize` emits `nodes.jsonl` /
+  `edges.jsonl` with a provisional label mapping and deliberately writes no
+  database rows (§2f); the writer that consumes them waits on the final schema.
 - **Seed ingestion from Postgres (S4's other half).** The graph sink can write
   organization/anchor nodes, but nothing reads the scraper's program tables to
   create them — the HackerOne scrape is still a disconnected island, and scope
@@ -386,4 +436,6 @@ The stage-by-stage status is maintained in the plans themselves:
   `tests/recon/test_url_*.py`
 - `service/recon_pipeline/pipelines/asn_cidr/{main,normalize,sources,emit}.py`,
   and `tests/recon/test_asn_*.py`; the live runs cited in `asn_cidr/DESIGN.md`
+- `service/recon_pipeline/pipelines/graph_normalize/{vocabulary,normalize,sources,merge,emit,main,contract}.py`
+  and `tests/recon/test_graph_normalize.py`; the model counts cited in its README
 - `docs/recon_docs/*` for the planned stages (explicitly marked as intent)

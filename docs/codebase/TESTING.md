@@ -9,17 +9,17 @@
 
 | Suite | Style | Runs where | Count |
 |---|---|---|---|
-| `tests/recon/` | hermetic pytest tests | anywhere — no Docker, DNS, network, or `output/` reads | **1069** |
+| `tests/recon/` | hermetic pytest tests | anywhere — no Docker, DNS, network, or `output/` reads | **1104** |
 | `tests/scraper/` | script-style, live PostgreSQL | needs `docker compose up -d postgres` | 1 (skips without its fixture — see below) |
 
 ```bash
-python -m pytest tests/recon -q        # 1069 passed
-python -m pytest tests/ -q             # 1069 passed, 1 skipped
+python -m pytest tests/recon -q        # 1104 passed
+python -m pytest tests/ -q             # 1104 passed, 1 skipped
 ```
 
 ## `tests/recon/` — the hermetic suite
 
-Per file (1069 tests total), grouped by subsystem:
+Per file (1104 tests total), grouped by subsystem:
 
 **Names pipeline — `subdomain_domain_wildcards`**
 
@@ -74,6 +74,12 @@ Per file (1069 tests total), grouped by subsystem:
 | `test_asn_normalize.py` | 24 | network canonicalization (CIDR/start-end/bare forms), private-space refusal, prefix floors and aggregate ceilings, claim merging, containment, sibling annotation |
 | `test_asn_sources.py` | 13 | RIPEstat/RDAP parsers (defensive against RIR schema differences), "no data" vs "no answer" status discipline |
 | `test_asn_pipeline.py` | 14 | seed expansion with both sources failing/succeeding, merge + annotation end to end, the scope-file format contract, caps and refusal accounting |
+
+**Asset model — `graph_normalize`**
+
+| File | Tests | Covers |
+|---|---|---|
+| `test_graph_normalize.py` | 35 | the vocabulary (every node kind and edge type has a graph mapping — the guard against adding a kind the graph write would drop), identity canonicalisation (host/address/CIDR/URL fragment/wildcard/org), the model's merge rules (same asset from two artifacts = one node with both sources and the strongest trust; set-shaped props union while scalar disagreements are reported once; edges dedupe on `(type, from, to)`; self-loops and unknown vocabulary refused; caps counted), orphan and endpoint-only accounting, the readers (missing ≠ empty ≠ corrupt, comment stripping, disabled sources), one test per artifact family (names → `resolves_to`, ports → services/ASNs/`in_network`/verdicts, URLs → role union, parameters → nodes with no invented edge, networks → announcement + allocation claims, bounded wildcard coverage), scope annotation with a real `ScopeEngine` (and none invented without one), the pipeline end to end (artifacts written, `graph_written: false`, no journal, byte-identical on a second run, `ok: false` when nothing was readable, missing artifacts named in the notes), and the contract's three stages — including that asking for a later stage runs the earlier ones rather than half-running |
 
 **Platform — `service/recon_pipeline/platform`**
 
@@ -165,11 +171,11 @@ sentinel lets them propagate normally.
 - **No CI configuration** (no workflow files) — nothing runs the suite
   automatically.
 - `tests/recon/test_repository.py` (Neo4j CRUD + constraint enforcement) is a
-  script requiring a live Neo4j, so it is not part of the 1069.
+  script requiring a live Neo4j, so it is not part of the 1104.
 - No coverage measurement is configured; there is no coverage report to cite.
 
 ## Evidence
 
-- `python -m pytest tests/recon -q` → `1069 passed`
-- `python -m pytest tests/ -q` → `1069 passed, 1 skipped`
+- `python -m pytest tests/recon -q` → `1104 passed`
+- `python -m pytest tests/ -q` → `1104 passed, 1 skipped`
 - `tests/conftest.py`, `tests/recon/conftest.py`, and the per-file test lists

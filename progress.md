@@ -54,6 +54,7 @@ against the code, not the docs:
 | Certificate | none | CNAME chains are collected; no cert clustering (S20) |
 | Secret | none | no extractor (S21/S23) |
 | CloudResource | none | no bucket enumeration (S22) |
+| **Asset model (nodes + edges)** | **built (file-only)** | `graph_normalize/` fuses all four collectors' artifacts into one node/edge model with provenance, trust classes and scope verdicts. No database writes: the schema is not final |
 | Repository (Source Code) | none | no code-host dorking (S21) |
 | MobileApp (#7–#11) | none | no mobile teardown (S23) |
 | Binary (Executable) | none | no executable pipeline |
@@ -92,6 +93,19 @@ populates (`URL`, `Endpoint`, `Certificate`, `Secret`, `Technology`,
 - Built: seed building from `records.jsonl` + declared scope, keyless passive intel (Shodan InternetDB, RDAP, Team Cymru, `dnsx -ptr`), CDN classification with evidence (`cdn`/`dedicated`/`unknown` + today's `hosted`), the L0–L3 scan ladder (naabu SYN→CONNECT degradation, CDN web probe via httpx, bounded escalation), nmap service identification grouped by port signature, report.json with full ladder decisions and stealth state.
 - Not built (per that doc's deltas, phased as designed): **P4** keyed Censys/Shodan sources + cert pivot, **P5** graph writes. `censys.py`/`shodan.py` do not exist.
 - **Doc drift found:** the pipeline README's "Related" section cites "stages S22–S24 (port/service enumeration)", but plan-v2's S22–S24 are cloud-bucket enumeration, mobile teardown and JS crawl. The port stage maps to **no numbered plan stage** — its authority is its own R&D doc. Worth fixing in the README.
+
+### The asset model (outside both plans' numbering — built, file-only)
+- Location: `service/recon_pipeline/pipelines/graph_normalize/`; own contract in
+  `README.md`. It consumes all four collectors (declared in its manifest, so the
+  registry orders it last) and emits `nodes.jsonl` / `edges.jsonl` /
+  `vocabulary.json` / `report.json` — a node + edge model where every element
+  carries its sources, its trust class (`declared`/`observed`/`discovered`/
+  `inferred`) and, with a scope engine, its scope verdict.
+- **Deliberately writes no database rows:** the schema is not final. The
+  neutral→graph label mapping lives in `vocabulary.py` alone and travels with
+  every artifact set, so the schema decision is one file's worth of work.
+- Measured: `qbsco.net` → 6 444 nodes / 6 481 edges in 0.51 s from 9 100 rows,
+  deterministic across runs, 0.51 s and zero network access.
 
 ### The stealth layer (S12 — partial, direct mode)
 - Location: `service/recon_pipeline/platform/stealth/` — coherent per-host browser identities, pacing with jitter/backoff/`Retry-After`, WAF/challenge detection (evidence-gated), persistent quarantine escalating to passive-only, per-resolver DNS volume budgeting, transport capability report.
@@ -316,11 +330,54 @@ These need folding into `IMPLEMENTATION_PLAN*.md` status tables, `docs/recon_doc
   (writers exist but nothing calls them; no worker pool), S8 built and
   degrading. The graph is still empty because no pipeline writes to it.
 
+## Added 2026-09-18 (final session, part 3) — `graph_normalize`: the asset model
+
+- **New pipeline, `graph_normalize`** — the only pipeline that answers *what do
+  the other four have to do with each other*. It reads their artifacts (files
+  only; no sibling code, no re-runs) and normalises every row into one model of
+  typed nodes and edges: `domain`, `wildcard`, `ip`, `service`, `url`,
+  `parameter`, `asn`, `network`, `organization`, joined by eleven edge types
+  (`resolves_to`, `has_url`, `exposes_service`, `belongs_to_asn`, `announced_by`,
+  `allocated_to`, `in_network`, `ptr_maps_to`, `wildcard_covers`, `hosted_by`,
+  `attributed_to`).
+- **Context, not just values.** Every node and edge carries its **sources**
+  (which artifact, which source string), its **trust class** — `declared` /
+  `observed` / `discovered` / `inferred`, merged strongest-wins per claim, so an
+  InternetDB port and a scanned port stay different facts with both provers
+  recorded — and, with the platform's scope engine present, its **scope verdict**
+  and the reason for it.
+- **No graph writes, on purpose.** The schema is not final, so the pipeline
+  emits `nodes.jsonl` / `edges.jsonl` / `vocabulary.json` / `report.json` and
+  states `graph_written: false` with a reason. The neutral→graph label mapping
+  lives in `vocabulary.py` alone and is emitted with every run; a test asserts
+  every kind and edge type has one, so a new kind cannot slip past the future
+  writer. This is the first pipeline whose manifest declares `consumes` for all
+  four siblings — the registry runs it last automatically.
+- **Measured on `qbsco.net` (all four siblings present):** 9 100 rows →
+  **6 444 nodes / 6 481 edges** in **0.51 s**, with no network access at all.
+  By kind: network 3 431, url 2 898, service 60, ip 19, domain 17, organization
+  13, asn 3, parameter 3. By trust: discovered 6 415, observed 28, declared 1.
+  With a scope engine: 3 467 nodes annotated and 3 431 discovered networks
+  registered (all `needs_review` — announced ≠ owned ≠ in scope).
+- **The model reports what the artifacts disagree about** instead of picking a
+  winner: 3 property conflicts here, all Cymru vs. RIPEstat spelling of AS names.
+  It also surfaces 16 genuine orphans (`_dmarc`-style TXT-only names, passive
+  names nobody resolved, and the 3 parameter names whose artifact carries no URL
+  linkage) and refuses to invent the missing edges.
+- **Deterministic by test:** two runs over the same artifacts produce
+  byte-identical `nodes.jsonl` / `edges.jsonl` / `vocabulary.json`, which is what
+  makes the model diffable — the raw material for the S11 change feed.
+- Test count 1 069 → **1 104** (+35); the new package and its tests are
+  mypy-clean. Docs: `graph_normalize/README.md` (the model contract, the trust
+  table, measured numbers, honest gaps), `ARCHITECTURE.md` §2f, `STRUCTURE.md`,
+  `TESTING.md`, `docs/README.md`, root `README.md`.
+
 ## Suggested next moves (dependency order from the plans)
 
-1. **Wire the pipelines to `context.graph`** — the sink, the journal and `replay`
-   all exist and nothing calls them; this is the difference between a file
-   generator and an asset model (and it unblocks scoring and correlation).
+1. **Finalize the graph schema, then write the model into it** — map
+   `vocabulary.py`'s two dicts to the settled labels and have a writer feed
+   `context.graph` from `nodes.jsonl`/`edges.jsonl`. The model, the sink and the
+   journal all exist; the schema is the only missing piece.
 2. **S4 seed ingestion** — Postgres programs → `Organization`/anchor nodes; the
    scraper's data is still a disconnected island and scope files are hand-made.
 3. **Declare dependencies + wire CI** — cheapest reliability wins from CONCERNS.md
