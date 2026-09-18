@@ -31,7 +31,7 @@ def get_program_by_id(conn, master_id):
 ```
 
 Recon modules are imported absolutely from the repo root
-(`from service.recon_pipeline.asset_pipelines... import ...`), which is why the
+(`from service.recon_pipeline.pipelines... import ...`), which is why the
 CLIs are run with `python -m ...` from the project root. Relative imports are used
 *within* a stage package (`from ..passive.normalize import canonicalize_host`).
 
@@ -77,7 +77,7 @@ Every recon stage has `settings.py` as its single source of paths and tunables:
 - paths derived from `__file__` exactly once (never from cwd);
 - every knob is an environment variable (`PASSIVE_*`, `ACTIVE_*`,
   `PERMUTATION_*`, and `STEALTH_*` for the shared stealth layer at
-  `service/recon_pipeline/stealth/settings.py`) read through `env_flag` /
+  `service/recon_pipeline/platform/stealth/settings.py`) read through `env_flag` /
   `env_int` with a documented default, so a run is reproducible from the CLI
   alone;
 - settings shared across stages are **imported**, not duplicated (the active and
@@ -128,11 +128,11 @@ Every recon stage has `settings.py` as its single source of paths and tunables:
 ## Evidence
 
 - `shared/db.py`, `db/repos/*.py`, `db/persistence/persistence.py`
-- `service/recon_pipeline/stealth/settings.py` and the stage `settings.py` files
+- `service/recon_pipeline/platform/stealth/settings.py` and the stage `settings.py` files
   (`.../passive/settings.py`, `.../active/settings.py`, `.../permutation/settings.py`)
 - `.../passive/sources.py`, `.../active/wordlist.py`, `.../active/resolve.py`,
   `.../permutation/generate.py` (the four registries)
 - `.../active/output/resolvers.txt` vs the curated seed files in `.../active/resolvers/`
   (validated pool vs. candidates)
-- `service/recon_pipeline/graph/repository.py` (`_label_clause`, `TypeError`/`ValueError`)
+- `service/recon_pipeline/platform/graph/repository.py` (`_label_clause`, `TypeError`/`ValueError`)
 - `tests/recon/conftest.py` (fakes), `tests/recon/*` (hermetic suite)

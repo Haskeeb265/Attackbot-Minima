@@ -1,29 +1,29 @@
 # Recon Pipeline — Progress
 
-**Compiled:** 2026-09-17 · **Source docs:** `docs/recon_docs/IMPLEMENTATION_PLAN.md` (S0–S14 status table, checked 2026-09-16), `docs/recon_docs/IMPLEMENTATION_PLAN_V2.md` (S15–S26 status table, checked 2026-09-16), `docs/recon_docs/port_service_host.md` (marked *IMPLEMENTED, with deltas*), `docs/codebase/CONCERNS.md` (the honest gaps list), `docs/README.md`.
+**Compiled:** 2026-09-18 · **Source docs:** `docs/recon_docs/IMPLEMENTATION_PLAN.md` (S0–S14 status table, checked 2026-09-16), `docs/recon_docs/IMPLEMENTATION_PLAN_V2.md` (S15–S26 status table, checked 2026-09-16), `docs/recon_docs/port_service_host.md` (marked *IMPLEMENTED, with deltas*), `docs/codebase/CONCERNS.md` (the honest gaps list), `docs/README.md`.
 
 Per the docs' own rule: **specs and plans are intent, not inventory; the code is the source of truth.** Everything below reflects the docs' status sections; items from today's session (not yet reflected in any doc) are listed separately at the end.
 
 ## TL;DR
 
 ```
-S0  ███░░░░░░░░ partial  Infrastructure (Neo4j up, no Redis, no smoke test)
+S0  ███░░░░░░░░ partial  Infrastructure (Neo4j + Redis in compose; no smoke test)
 S1  ██████████ built   Graph schema + CRUD + indexing
-S2  ░░░░░░░░░░░ none    Scoring engine
+S2  ██████████ built   Scoring engine (pure, auditable, clamped to 0–100)
 S3  ████░░░░░░░ partial  Extraction & normalization (hostnames only)
-S4  ░░░░░░░░░░░ none    Seed ingestion (Postgres → graph)
+S4  ████░░░░░░░░ partial  GraphSink writers built + journal/replay; no Postgres seed ingestion
 S5  ██████░░░░░ built*  crt.sh (standalone, writes files not graph)
 S6  ██████░░░░░ built*  Wayback CDX (standalone)
-S7  ████░░░░░░░░ partial  E2E pipeline loop (no graph, no scoring)
-S8  ░░░░░░░░░░░░ none    Redis hot cache
-S9  ░░░░░░░░░░░░ none    Queue topology + workers
-S10 ████░░░░░░░ partial  Active techniques exist; no dispatcher/gate/priority
-S11 ░░░░░░░░░░░ none    Re-scoring / pruning
+S7  ██████░░░░░ partial  Platform run loop + writers exist; no pipeline calls the sink
+S8  ██████░░░░░ built   Redis hot cache (degrades to a miss)
+S9  ████░░░░░░░░ partial  Streams topology + DLQ + spool; no worker pool drains them
+S10 ██████████ built   Dispatcher/gate: deny-by-default, budgets, decision log
+S11 ██████████ built   Re-scoring (stale decay), pruning, appear/disappear diffs
 S12 ███████░░░░░ partial  Stealth layer (direct mode; no proxies/CAPTCHA/Redis)
-S13 ░░░░░░░░░░░ none    LLM classification
-S14 ░░░░░░░░░░░ none    Observability / DLQ / monitoring
+S13 ████████░░░░ built   LLM classification — advisory, key-gated (no key here)
+S14 ████████░░░░ built   Run registry + metrics + DLQ surface (no alerting sinks)
 ────────────────────────────────────────────────────────────────────
-S15 ░░░░░░░░░░░ none    Scope Engine (v2 chokepoint)
+S15 ██████████ built   Scope Engine (declared/discovered/needs_review)
 S16 ██████░░░░░ built*  DNS-brute/permutation techniques (built elsewhere)
 S17–S26 ░░░░░░░ none    All other v2 sources (CT APIs, ASN, WHOIS, fingerprints,
                         code-host dorking, buckets, mobile, JS, takeover, content disc)
@@ -75,26 +75,26 @@ populates (`URL`, `Endpoint`, `Certificate`, `Secret`, `Technology`,
 ## What is implemented
 
 ### The graph layer (S1 — built)
-- `service/recon_pipeline/graph/{schema,repository,client}.py` — labels, constraints, indexes, and the `Neo4jRepository` CRUD layer following `docs/recon_docs/graph_crud_contract.md` (the multi-label write contract).
+- `service/recon_pipeline/platform/graph/{schema,repository,client}.py` — labels, constraints, indexes, and the `Neo4jRepository` CRUD layer following `docs/recon_docs/graph_crud_contract.md` (the multi-label write contract).
 - Verified by `tests/recon/test_repository.py` — a live-Neo4j integration *script* (deliberately not part of the pytest count).
 - The v1 spec's appendix on the graph schema is the one part of the spec marked implemented.
 
 ### The subdomain/domain/wildcard asset pipeline (S5, S6, S7-partial, S10-partial, S16-partial — built standalone)
-- Location: `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/` with three stages + orchestrator (`passive/`, `active/`, `permutation/`, `main.py`).
+- Location: `service/recon_pipeline/pipelines/subdomain_domain_wildcards/` with three stages + orchestrator (`passive/`, `active/`, `permutation/`, `main.py`).
 - **Passive (S5/S6 plus extras):** crt.sh, Wayback, subfinder, chaos, assetfinder, findomain, amass — 7 sources, wildcard detection shared across stages (`passive/wildcard.py`), foreign-domain guard.
 - **Active (S10 techniques without the gate):** validated resolver pool (positive + `.invalid` NXDOMAIN probe — supersedes plan-v2's static resolver list), puredns resolve/bruteforce, bounded recursion, AXFR attempts, dnsx record enrichment, opt-in HTTP probe.
 - **Permutation (S16 technique):** dnsgen + batched stealth-paced resolution.
 - **Orchestrator (S7 shape):** `main.py` runs all three and writes `output/live_hosts.txt` + `summary.json` — but **writes files only; nothing reaches the graph** (CONCERNS.md #4).
-- 397+ hermetic tests at doc-check time; the suite has since grown (~866 tests passing as of 2026-09-17).
+- 397+ hermetic tests at doc-check time; the whole recon suite is now **1 069 passing (2026-09-18)**.
 
 ### The ports/services/host pipeline (outside plan numbering — built)
-- Location: `service/recon_pipeline/asset_pipelines/port_service_host/`; R&D doc `docs/recon_docs/port_service_host.md` is marked **IMPLEMENTED, with the deltas recorded there**.
+- Location: `service/recon_pipeline/pipelines/port_service_host/`; R&D doc `docs/recon_docs/port_service_host.md` is marked **IMPLEMENTED, with the deltas recorded there**.
 - Built: seed building from `records.jsonl` + declared scope, keyless passive intel (Shodan InternetDB, RDAP, Team Cymru, `dnsx -ptr`), CDN classification with evidence (`cdn`/`dedicated`/`unknown` + today's `hosted`), the L0–L3 scan ladder (naabu SYN→CONNECT degradation, CDN web probe via httpx, bounded escalation), nmap service identification grouped by port signature, report.json with full ladder decisions and stealth state.
 - Not built (per that doc's deltas, phased as designed): **P4** keyed Censys/Shodan sources + cert pivot, **P5** graph writes. `censys.py`/`shodan.py` do not exist.
 - **Doc drift found:** the pipeline README's "Related" section cites "stages S22–S24 (port/service enumeration)", but plan-v2's S22–S24 are cloud-bucket enumeration, mobile teardown and JS crawl. The port stage maps to **no numbered plan stage** — its authority is its own R&D doc. Worth fixing in the README.
 
 ### The stealth layer (S12 — partial, direct mode)
-- Location: `service/recon_pipeline/stealth/` — coherent per-host browser identities, pacing with jitter/backoff/`Retry-After`, WAF/challenge detection (evidence-gated), persistent quarantine escalating to passive-only, per-resolver DNS volume budgeting, transport capability report.
+- Location: `service/recon_pipeline/platform/stealth/` — coherent per-host browser identities, pacing with jitter/backoff/`Retry-After`, WAF/challenge detection (evidence-gated), persistent quarantine escalating to passive-only, per-resolver DNS volume budgeting, transport capability report.
 - Wired into the active and permutation stages and the port stage; every run's `report.json` carries a `stealth` block.
 - Not built: proxy pools (D4 defers them deliberately), CAPTCHA solving, Redis-backed shared quarantine (state is a JSON file), `curl_cffi` (supported, not installed — reports `tls_impersonation: false`).
 
@@ -102,33 +102,48 @@ populates (`URL`, `Endpoint`, `Certificate`, `Secret`, `Technology`,
 
 ## What is not implemented
 
-### v1 stages still open
+### Platform stages — state after the platform build (2026-09-18)
 
-| Stage | What it is | Why it matters / what unblocks |
+| Stage | State | Evidence / what is missing |
 |---|---|---|
-| **S2 Scoring engine** | Pure-math weights/penalties/thresholds/audit | Most standalone-testable stage; **no mandatory deps**; blocks meaningful S7, S10 gate, S11 |
-| **S4 Seed ingestion** | Postgres bounty scope → graph `Organization`/`Asset` nodes | Needs S1 (built) + S3; the input the whole graph side is waiting for |
-| **S8 Redis hot cache** | Score/node caching + bloom membership | Needs S0's missing Redis service |
-| **S9 Queues + workers** | Redis Streams topology, retry, DLQ | The event-driven spine; needs S7 + S8 |
-| **S10 dispatcher + gate** | Policy chokepoint: no active work without the gate; Redis token buckets | The active techniques exist but are self-paced, not policy-gated |
-| **S11 Re-scoring/pruning** | Background honesty loop | Needs S2 + S9 |
-| **S13 LLM classification** | Cerebras/Groq enrichment (advisory, gate-checked) | No provider SDK/endpoint/key anywhere in the repo |
-| **S14 Observability/DLQ/monitoring** | Audit queries, DLQ ops, differential monitoring | Needs S7+ |
+| **S2 Scoring** | **built** | `platform/scoring.py`; pure, clamped 0–100, floor + distinct-kind corroboration + penalties, audit per score |
+| **S4 Seed ingestion** | **partial** | `platform/graph/ingest.py` `GraphSink` writers + journal/replay are built; **nothing reads Postgres** to create org/anchor nodes |
+| **S8 Hot cache** | **built** | `platform/cache.py`; Redis-backed, degrades to a miss with a reason |
+| **S9 Queues + workers** | **partial** | `platform/queueing.py`: Streams topology, envelopes, DLQ, on-disk spool. **No worker pool drains the streams** |
+| **S10 Dispatcher + gate** | **built** | `platform/dispatch.py`: deny-by-default, scope first, score floor, per-host run budgets, cooldown, decision log in the run report |
+| **S11 Re-scoring/pruning** | **built** | `platform/lifecycle.py`: fresh-evidence wins, stale evidence decays 10/run, prune-after-N archived to JSONL, appear/disappear/change diffs |
+| **S13 LLM classification** | **built, key-gated** | `platform/enrich.py`: advisory labels only, taxonomy-shaped; without a key every call answers "no opinion" |
+| **S14 Observability** | **built (file-backed)** | `platform/observability.py`: `runs.jsonl` registry, per-stage metrics, `dlq` surface. No alerting sink |
+| **S15 Scope Engine** | **built** | `platform/scope.py`: `in_scope` / `needs_review` / `out_of_scope`, discovered networks never auto-claimed |
 
-### v2 stages still open (all of S15, S17–S26)
+### v2 source stages still open (S17–S26)
 
-- **S15 Scope Engine** — the v2 safety chokepoint (`scope_state` on every candidate, `needs_review` routing). Nothing depends on it yet because no v2 source exists; it is also designed to be retrofitted in front of v1 sources.
-- **S17** alt CT/aggregator APIs · **S18** ASN/BGP pivot · **S19** reverse WHOIS · **S20** favicon/JARM/cert clustering · **S21** code-host dorking (carries the Secret Handling Contract) · **S22** cloud bucket enumeration · **S23** mobile teardown · **S24** JS bundle crawl · **S25** SaaS footprint + takeover detector · **S26** content discovery.
-- Note on S25: the asset pipeline already *collects* CNAME chains (`active/output/records.jsonl`) — the raw material a takeover detector needs — but no detector exists.
+- **S17** alt CT/aggregator APIs · **S18** ASN/BGP pivot (partly delivered by
+  `asn_cidr`, as a pipeline rather than a graph pivot) · **S19** reverse WHOIS ·
+  **S20** favicon/JARM/cert clustering · **S21** code-host dorking (carries the
+  Secret Handling Contract) · **S22** cloud bucket enumeration · **S23** mobile
+  teardown · **S24** JS bundle crawl · **S25** SaaS footprint + takeover detector ·
+  **S26** content discovery.
+- Note on S25: the asset pipeline already *collects* CNAME chains
+  (`active/output/records.jsonl`) — the raw material a takeover detector needs —
+  but no detector exists.
+- **The cross-cutting gap after the platform build:** none of these need new
+  plumbing any more (the contract, gate, scoring, cache and registry exist), but
+  **no pipeline calls `context.graph` yet**, so the model is still empty. That
+  single wiring step is what turns four file-writing pipelines into an ASM
+  system.
 
 ---
 
 ## Known gaps and concerns (from `docs/codebase/CONCERNS.md`)
 
 1. **Dependencies are not declared** — `requirements.txt` is one commented-out line; `requests`, `dnspython`, `neo4j`, `python-dotenv`, `pytest` are undeclared. A fresh checkout cannot be set up from the manifest.
-2. **Recon results never reach the graph** — the pipelines write `output/` files only; S4/S7 are the unbuilt bridge. The pipeline's value today is per-run files (e.g. `RECON_<target>_OUTPUT.md`).
+2. **Recon results do not reach the graph** — the platform's `GraphSink`
+   (writers + journal + `replay`) exists and is handed to every pipeline as
+   `context.graph`, but no pipeline calls it. The value today is per-run files
+   plus a run report.
 3. **Stealth is direct-mode only** — a target that blocks by IP exhausts the single exit node; `report.json`'s stealth block is where to check what actually ran.
-4. **No CI** — the (fast, ~8s, dependency-light) recon test suite never runs automatically.
+4. **No CI** — the (fast, ~15 s, dependency-light) 1 069-test recon suite never runs automatically.
 5. Minor: `docker/` empty + 0-byte root Dockerfile; config/code drift for planned subsystems.
 
 ---
@@ -258,10 +273,59 @@ These need folding into `IMPLEMENTATION_PLAN*.md` status tables, `docs/recon_doc
   `STRUCTURE.md`, `TESTING.md`, root `README.md`, `docs/README.md`,
   `.gitignore`.
 
+## Added 2026-09-18 — the ASM platform layer + the plugin restructure
+
+- **The recon tree was rebuilt into platform + pipelines.**
+  `service/recon_pipeline/platform/` now holds the platform (contract, registry,
+  runner, scoring, scope, dispatch, cache, queueing, lifecycle, enrichment,
+  observability, `graph/`, `stealth/`, `common/`) and `pipelines/` holds one
+  folder per asset pipeline. Every pipeline consumes the platform through a
+  `RunContext` instead of importing sibling modules.
+- **Adding a pipeline is adding a folder.** A folder exposing `MANIFEST` +
+  `PIPELINE` (preferably in `contract.py`) is discovered at run time by
+  `platform/registry.py`; a folder missing either is skipped with a logged
+  reason, and a manifest whose name disagrees with its folder is refused. The
+  runner orders pipelines by their declared `consumes`, runs their declared
+  stages, and writes a per-stage report plus a run record. Contract, discovery
+  rules and the copy-pasteable template:
+  `service/recon_pipeline/README.md`.
+- **One canonical CLI:** `python -m service.recon_pipeline {list,run,history,dlq,replay}`.
+  `run_recon.py` remains as the legacy combined-report workflow and routes
+  through the same modules.
+- **Graceful degrade is now a tested contract.** With Redis and Neo4j down and
+  no LLM key, a live run of `asn_cidr` through the platform completed in 143 s,
+  wrote both stage reports and the registry row, and reported each cause
+  (`graph: ServiceUnavailable …7687 refused`, `queue: TimeoutError`,
+  `enrichment: LLM_API_KEY not set`). Verified live with **1 069 hermetic tests
+  passing** (31 new platform tests) and the new modules mypy-clean.
+- **Real bug caught by the new tests:** `Dispatcher.decide()` denied every
+  `needs_review` asset at the scope step, which made the documented
+  `allow_needs_review` operator override unreachable. The gate now only treats
+  `out_of_scope` as final and routes `needs_review` through the override branch.
+  Fixing it before the platform was wired into anything is the reason to test
+  the gate before the pipelines depend on it.
+- **Docs reconciled against the new tree:** new
+  `docs/codebase/PLATFORM.md` (module-by-module state and the not-built list),
+  new `service/recon_pipeline/README.md` (the contract), plus updates to
+  `ARCHITECTURE.md` (§2f platform layer, §3 graph now fed through the sink,
+  §4 rewritten to what is genuinely unbuilt), `STRUCTURE.md`, `TESTING.md`,
+  `CONCERNS.md` (#4 and #7 re-stated against the code), `docs/README.md`, root
+  `README.md` and every path reference under `docs/`.
+- **Coverage after the platform lands:** 4 asset pipelines built; of the
+  platform stages, S2/S10/S11/S13/S14/S15 are built, S4/S7/S9 are partial
+  (writers exist but nothing calls them; no worker pool), S8 built and
+  degrading. The graph is still empty because no pipeline writes to it.
+
 ## Suggested next moves (dependency order from the plans)
 
-1. **S2 scoring engine** — zero deps, pure, unblocks S7/S10/S11.
-2. **S4 seed ingestion** — deps already built (S1 + S3-partial); gives the graph its inputs.
-3. **Declare dependencies + wire CI** — cheapest reliability wins from CONCERNS.md.
-4. **Redis service (S0 remainder)** → S8 → S9 when the event-driven spine is wanted.
-5. **S15 Scope Engine** before any v2 source — by design it retrofits onto v1 too.
+1. **Wire the pipelines to `context.graph`** — the sink, the journal and `replay`
+   all exist and nothing calls them; this is the difference between a file
+   generator and an asset model (and it unblocks scoring and correlation).
+2. **S4 seed ingestion** — Postgres programs → `Organization`/anchor nodes; the
+   scraper's data is still a disconnected island and scope files are hand-made.
+3. **Declare dependencies + wire CI** — cheapest reliability wins from CONCERNS.md
+   (the suite is 1 069 tests in ~15 s and still runs nowhere automatically).
+4. **Queue workers (S9 remainder)** — the topology, spool and DLQ exist; a
+   consumer pool is what would make the spine event-driven.
+5. **Correlation** (cert/favicon/JARM clustering, reverse-WHOIS, takeover) — the
+   "18th asset type", and what the platform's asset model is for.

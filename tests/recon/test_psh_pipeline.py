@@ -16,23 +16,23 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.port_service_host import pipeline, seed_builder
-from service.recon_pipeline.asset_pipelines.port_service_host.active import (
+from service.recon_pipeline.pipelines.port_service_host import pipeline, seed_builder
+from service.recon_pipeline.pipelines.port_service_host.active import (
     ladder,
     naabu,
     nmap,
     webprobe,
 )
-from service.recon_pipeline.asset_pipelines.port_service_host.normalize import (
+from service.recon_pipeline.pipelines.port_service_host.normalize import (
     MODE_CONNECT,
     MODE_HTTP,
     MODE_SYN,
     PortObservation,
     ServiceObservation,
 )
-from service.recon_pipeline.asset_pipelines.port_service_host.passive import internetdb, ptr, rdap
-from service.recon_pipeline.stealth.pacing import FakeClock
-from service.recon_pipeline.stealth.session import StealthConfig, StealthSession
+from service.recon_pipeline.pipelines.port_service_host.passive import internetdb, ptr, rdap
+from service.recon_pipeline.platform.stealth.pacing import FakeClock
+from service.recon_pipeline.platform.stealth.session import StealthConfig, StealthSession
 
 
 # --------------------------------------------------------------------------- #

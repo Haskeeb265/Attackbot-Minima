@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive import wildcard as wc
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.passive import wildcard as wc
 
 APEX = "example.com"
 

@@ -16,17 +16,17 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active import (
     resolvers,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.resolvers import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.resolvers import (
     QueryOutcome,
     parse_resolvers,
     prepare_resolvers,
     probe_resolver,
     validate_resolvers,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.settings import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.settings import (
     PUBLIC_RESOLVERS_FILE,
     TRUSTED_RESOLVERS_FILE,
 )

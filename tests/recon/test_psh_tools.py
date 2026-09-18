@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.port_service_host.active import tools
-from service.recon_pipeline.asset_pipelines.port_service_host.active.tools import (
+from service.recon_pipeline.pipelines.port_service_host.active import tools
+from service.recon_pipeline.pipelines.port_service_host.active.tools import (
     NAABU_CONNECT,
     NAABU_SYN,
     TOP_PORTS_FULL,

@@ -13,17 +13,17 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.asn_cidr import emit, sources
-from service.recon_pipeline.asset_pipelines.asn_cidr.main import (
+from service.recon_pipeline.pipelines.asn_cidr import emit, sources
+from service.recon_pipeline.pipelines.asn_cidr.main import (
     expand_address_seed,
     expand_asn_seed,
     run_pipeline,
 )
-from service.recon_pipeline.asset_pipelines.asn_cidr.normalize import (
+from service.recon_pipeline.pipelines.asn_cidr.normalize import (
     ORIGIN_ALLOCATION,
     ORIGIN_ANNOUNCEMENT,
 )
-from service.recon_pipeline.asset_pipelines.asn_cidr.sources import FetchResult
+from service.recon_pipeline.pipelines.asn_cidr.sources import FetchResult
 
 ANNOUNCED_BODY = json.dumps(
     {
@@ -190,8 +190,15 @@ def test_run_pipeline_rejects_a_bad_target(tmp_path: Path) -> None:
 
 
 def test_run_pipeline_direct_asn_seed(tmp_path: Path) -> None:
+    # ``addresses=[]`` is "no address seeds" (explicitly none); ``None`` means
+    # "derive from the sibling stages' artifacts", which depends on other runs
+    # having happened and is therefore not a hermetic test input.
     report = run_pipeline(
-        "acme.test", asns=["400771"], output_dir=tmp_path, fetcher=_fake_fetcher
+        "acme.test",
+        asns=["400771"],
+        addresses=[],
+        output_dir=tmp_path,
+        fetcher=_fake_fetcher,
     )
     assert report.ok
     assert report.counts["announced"] == 1
@@ -204,7 +211,7 @@ def test_run_pipeline_direct_asn_seed(tmp_path: Path) -> None:
 
 
 def test_scope_lines_follow_the_ports_stage_comment_convention(tmp_path: Path) -> None:
-    from service.recon_pipeline.asset_pipelines.asn_cidr.normalize import NetworkClaim
+    from service.recon_pipeline.pipelines.asn_cidr.normalize import NetworkClaim
 
     claims = [
         NetworkClaim(
@@ -220,7 +227,7 @@ def test_scope_lines_follow_the_ports_stage_comment_convention(tmp_path: Path) -
 
 
 def test_asn_summary_rows_roll_up_by_asn() -> None:
-    from service.recon_pipeline.asset_pipelines.asn_cidr.normalize import NetworkClaim
+    from service.recon_pipeline.pipelines.asn_cidr.normalize import NetworkClaim
 
     claims = [
         NetworkClaim(

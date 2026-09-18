@@ -14,14 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.passive import (
     pipeline,
     sources,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive.normalize import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.passive.normalize import (
     ForeignDomainError,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive.wildcard import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.passive.wildcard import (
     WildcardVerdict,
     filter_wildcard_noise,
 )

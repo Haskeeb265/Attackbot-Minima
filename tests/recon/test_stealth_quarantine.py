@@ -6,9 +6,9 @@ import json
 
 import pytest
 
-from service.recon_pipeline.stealth.detect import Verdict, BLOCKED, CHALLENGE, OK, RATE_LIMITED
-from service.recon_pipeline.stealth.pacing import FakeClock
-from service.recon_pipeline.stealth.quarantine import (
+from service.recon_pipeline.platform.stealth.detect import Verdict, BLOCKED, CHALLENGE, OK, RATE_LIMITED
+from service.recon_pipeline.platform.stealth.pacing import FakeClock
+from service.recon_pipeline.platform.stealth.quarantine import (
     GLOBAL_SCOPE,
     WAF_ESCALATION_HOSTS,
     Quarantine,

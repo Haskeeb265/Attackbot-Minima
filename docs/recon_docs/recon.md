@@ -69,7 +69,7 @@ The system supports the following asset taxonomy. Each type has dedicated extrac
 | 18 | Cross-Asset Correlation Layer | Universal graph + scoring engine that links all of the above |
 
 > **How this maps to the code today.** The graph schema
-> (`service/recon_pipeline/graph/schema.py`) defines a typed label for #1 Domain,
+> (`service/recon_pipeline/platform/graph/schema.py`) defines a typed label for #1 Domain,
 > #2 Wildcard, #3 URL, #4 CIDR, #5 IP, #6 Source Code (`Repository`), #7–#11
 > (`MobileApp`), #12 Executable (`Binary`), #14 Smart Contract and #17 ASN, plus
 > the artifact types `Endpoint`, `Certificate`, `Secret`, `Technology` and
@@ -283,7 +283,7 @@ These scenarios serve both as acceptance tests and as educational walk-throughs 
 
 ## Appendix A — Graph Schema (Neo4j)
 
-**Source:** `service/recon_pipeline/graph/schema.py` · `service/recon_pipeline/graph/repository.py` · `IMPLEMENTATION_PLAN.md` Stage 1 (this appendix is the one part of this spec that **is** implemented — see [Implementation status](IMPLEMENTATION_PLAN.md#implementation-status))
+**Source:** `service/recon_pipeline/platform/graph/schema.py` · `service/recon_pipeline/platform/graph/repository.py` · `IMPLEMENTATION_PLAN.md` Stage 1 (this appendix is the one part of this spec that **is** implemented — see [Implementation status](IMPLEMENTATION_PLAN.md#implementation-status))
 
 ### Node Labels
 

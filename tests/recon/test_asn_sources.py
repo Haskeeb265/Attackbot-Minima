@@ -11,8 +11,8 @@ import json
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.asn_cidr import sources
-from service.recon_pipeline.asset_pipelines.asn_cidr.sources import FetchResult
+from service.recon_pipeline.pipelines.asn_cidr import sources
+from service.recon_pipeline.pipelines.asn_cidr.sources import FetchResult
 
 ANNOUNCED_BODY = json.dumps(
     {

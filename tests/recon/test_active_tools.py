@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active import (
     tools,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.tools import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.tools import (
     ToolImageMissingError,
     amass_active_args,
     dig_axfr_args,

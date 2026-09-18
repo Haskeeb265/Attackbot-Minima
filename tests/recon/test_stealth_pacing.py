@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from service.recon_pipeline.stealth.detect import Verdict, CHALLENGE, OK, RATE_LIMITED, SERVER_ERROR
-from service.recon_pipeline.stealth.pacing import (
+from service.recon_pipeline.platform.stealth.detect import Verdict, CHALLENGE, OK, RATE_LIMITED, SERVER_ERROR
+from service.recon_pipeline.platform.stealth.pacing import (
     FakeClock,
     Pacer,
     PacerConfig,

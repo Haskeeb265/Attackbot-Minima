@@ -12,20 +12,20 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active import (
     enrich as enrich_mod,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active import axfr as axfr_mod
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active import pipeline as active_pipeline
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.tools import httpx_args
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.permutation import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active import axfr as axfr_mod
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active import pipeline as active_pipeline
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.tools import httpx_args
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.permutation import (
     pipeline as permutation_pipeline,
 )
-from service.recon_pipeline.stealth.detect import CHALLENGE, OK, Verdict
-from service.recon_pipeline.stealth.identity import CHROME_WIN
-from service.recon_pipeline.stealth.pacing import FakeClock
-from service.recon_pipeline.stealth.quarantine import Quarantine, host_scope
-from service.recon_pipeline.stealth.session import StealthConfig, StealthSession
+from service.recon_pipeline.platform.stealth.detect import CHALLENGE, OK, Verdict
+from service.recon_pipeline.platform.stealth.identity import CHROME_WIN
+from service.recon_pipeline.platform.stealth.pacing import FakeClock
+from service.recon_pipeline.platform.stealth.quarantine import Quarantine, host_scope
+from service.recon_pipeline.platform.stealth.session import StealthConfig, StealthSession
 
 APEX = "example.com"
 

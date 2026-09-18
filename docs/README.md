@@ -9,23 +9,26 @@ below is the intended design — file an update to whichever is wrong.
 | You want to… | Read |
 |---|---|
 | run the project | [`../README.md`](../README.md) |
-| run or extend the subdomain/domain/wildcard pipeline | [`../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md`](../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md) |
-| run the ports/services/hosts pipeline | [`../service/recon_pipeline/asset_pipelines/port_service_host/README.md`](../service/recon_pipeline/asset_pipelines/port_service_host/README.md) |
-| run the historical-URL/endpoints pipeline | [`../service/recon_pipeline/asset_pipelines/url_endpoint/README.md`](../service/recon_pipeline/asset_pipelines/url_endpoint/README.md) |
-| run the ASN/CIDR network-ownership pipeline | [`../service/recon_pipeline/asset_pipelines/asn_cidr/README.md`](../service/recon_pipeline/asset_pipelines/asn_cidr/README.md) |
-| understand how active traffic is shaped, and why (stealth, spec §5.1) | [`../service/recon_pipeline/stealth/README.md`](../service/recon_pipeline/stealth/README.md) — what detectors measure, live-capture evidence, design, knobs, measured cost, and the not-built list |
+| add a new asset pipeline (the plugin contract) | [`../service/recon_pipeline/README.md`](../service/recon_pipeline/README.md) — a pipeline is a folder exposing `MANIFEST` + `PIPELINE`; that is the whole registration step |
+| understand the platform layer (scoring, scope, queues, dispatch, graph sink) | [`codebase/PLATFORM.md`](codebase/PLATFORM.md) |
+| run or extend the subdomain/domain/wildcard pipeline | [`../service/recon_pipeline/pipelines/subdomain_domain_wildcards/README.md`](../service/recon_pipeline/pipelines/subdomain_domain_wildcards/README.md) |
+| run the ports/services/hosts pipeline | [`../service/recon_pipeline/pipelines/port_service_host/README.md`](../service/recon_pipeline/pipelines/port_service_host/README.md) |
+| run the historical-URL/endpoints pipeline | [`../service/recon_pipeline/pipelines/url_endpoint/README.md`](../service/recon_pipeline/pipelines/url_endpoint/README.md) |
+| run the ASN/CIDR network-ownership pipeline | [`../service/recon_pipeline/pipelines/asn_cidr/README.md`](../service/recon_pipeline/pipelines/asn_cidr/README.md) |
+| understand how active traffic is shaped, and why (stealth, spec §5.1) | [`../service/recon_pipeline/platform/stealth/README.md`](../service/recon_pipeline/platform/stealth/README.md) — what detectors measure, live-capture evidence, design, knobs, measured cost, and the not-built list |
 | understand what the whole system is meant to become | [`recon_docs/recon.md`](recon_docs/recon.md) + [`recon_docs/recon_v2.md`](recon_docs/recon_v2.md) |
 | know what is built versus planned | the status section in [`recon_docs/IMPLEMENTATION_PLAN.md`](recon_docs/IMPLEMENTATION_PLAN.md) and [`recon_docs/IMPLEMENTATION_PLAN_V2.md`](recon_docs/IMPLEMENTATION_PLAN_V2.md) |
 | work on the scraper or the `bounty_*` schema | [`scraper_docs/schema.md`](scraper_docs/schema.md) |
-| get an orientation pass over the codebase | [`codebase/`](codebase) — stack, structure, architecture, conventions, integrations, testing, concerns |
+| get an orientation pass over the codebase | [`codebase/`](codebase) — stack, structure, architecture, conventions, integrations, testing, concerns, platform |
 
 ## The document sets
 
 ### `codebase/` — generated orientation docs
 
 A snapshot of the repository as it is: stack, structure, architecture,
-conventions, integrations, testing, and current concerns. Written to be read in
-that order; each file ends with the evidence it was written from.
+conventions, integrations, testing, and current concerns — plus
+[`PLATFORM.md`](codebase/PLATFORM.md), the platform layer's own map. Written to
+be read in that order; each file ends with the evidence it was written from.
 
 **These are checked against the code, not against the plans.** Where they describe
 a subsystem as not built, that is the plan's state, not a bug in the doc:
@@ -59,21 +62,24 @@ v1 pair first.
 
 ### Outside `docs/`
 
-- Per-stage READMEs under `service/recon_pipeline/asset_pipelines/` — the
+- [`service/recon_pipeline/README.md`](../service/recon_pipeline/README.md) —
+  the pipeline contract: the platform/pipelines split, the discovery rules, the
+  `MANIFEST`/`PIPELINE` template, and the graceful-degrade contract.
+- Per-pipeline READMEs under `service/recon_pipeline/pipelines/` — the
   operator-facing documentation for the built pipelines
-  (`subdomain_domain_wildcards/`, `port_service_host/`): flags, outputs,
-  settings, measured yields and live caveats. These are the most current docs in
-  the repo.
-- [`stealth/README.md`](../service/recon_pipeline/stealth/README.md) — the stealth
+  (`subdomain_domain_wildcards/`, `port_service_host/`, `url_endpoint/`,
+  `asn_cidr/`): flags, outputs, settings, measured yields and live caveats.
+  These are the most current docs in the repo.
+- [`stealth/README.md`](../service/recon_pipeline/platform/stealth/README.md) — the stealth
   layer's own doc: what modern detectors measure (JA4 + inter-request signals,
   DNS volume thresholds), the measurements taken on this repo's own toolchain,
   every knob, the measured cost of shaping, and what is deliberately not built.
-- [`port_service_host/DESIGN.md`](../service/recon_pipeline/asset_pipelines/port_service_host/DESIGN.md)
+- [`port_service_host/DESIGN.md`](../service/recon_pipeline/pipelines/port_service_host/DESIGN.md)
   — that pipeline's research doc: passive-first IP intelligence, the L0–L3 scan
   ladder, tool choices with verified vendor claims, efficiency math, and the
   phased plan. Its header records the deltas between this plan and the shipped
   build, so the doc stays true now that the code exists.
-- [`commands.txt`](../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/commands.txt)
+- [`commands.txt`](../service/recon_pipeline/pipelines/subdomain_domain_wildcards/commands.txt)
   — raw Docker commands for every bundled tool, for reproducing or debugging one
   tool by hand — including the shaped (identity + impersonation + rate limit)
   variants the stages actually build.
@@ -85,7 +91,7 @@ v1 pair first.
 - **Paths in backticks.** A backticked path containing `/` is either
   repo-root-relative or starts with `.../`, the one shorthand used throughout:
 
-  - `.../` = `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/`
+  - `.../` = `service/recon_pipeline/pipelines/subdomain_domain_wildcards/`
     — e.g. `.../passive/wildcard.py`
 
   Runtime artifacts are named without a path (`report.json`, `resolved.txt`,

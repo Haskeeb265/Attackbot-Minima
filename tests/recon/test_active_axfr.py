@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.axfr import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.axfr import (
     NAMESERVER_RE,
     attempt_transfer,
     parse_axfr,
@@ -24,7 +24,7 @@ from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.ax
     transfer_hosts,
     zone_transfer,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive.docker_tool import (
+from service.recon_pipeline.platform.common.docker_tool import (
     ContainerRun,
 )
 
@@ -237,7 +237,7 @@ def test_zone_transfer_filters_unsafe_discovered_nameservers(tmp_path: Path) -> 
 
 
 def test_transfer_hosts_unions_successful_transfers() -> None:
-    from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.axfr import (
+    from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.axfr import (
         ZoneTransfer,
     )
 

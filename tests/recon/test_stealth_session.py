@@ -8,17 +8,17 @@ from __future__ import annotations
 
 import pytest
 
-from service.recon_pipeline.stealth.detect import CHALLENGE, OK, RATE_LIMITED
-from service.recon_pipeline.stealth.identity import IdentityPool
-from service.recon_pipeline.stealth.pacing import FakeClock
-from service.recon_pipeline.stealth.quarantine import GLOBAL_SCOPE, Quarantine, host_scope
-from service.recon_pipeline.stealth.session import (
+from service.recon_pipeline.platform.stealth.detect import CHALLENGE, OK, RATE_LIMITED
+from service.recon_pipeline.platform.stealth.identity import IdentityPool
+from service.recon_pipeline.platform.stealth.pacing import FakeClock
+from service.recon_pipeline.platform.stealth.quarantine import GLOBAL_SCOPE, Quarantine, host_scope
+from service.recon_pipeline.platform.stealth.session import (
     PassiveOnly,
     QuarantineBlocked,
     StealthConfig,
     StealthSession,
 )
-from service.recon_pipeline.stealth.transport import Response, Selection
+from service.recon_pipeline.platform.stealth.transport import Response, Selection
 
 CHALLENGE_BODY = "<html><title>Just a moment...</title><div id='cf-chl-widget'></div></html>"
 CHALLENGE_HEADERS = {"cf-ray": "8a1b2c3d-LHR", "server": "cloudflare", "content-type": "text/html"}

@@ -15,12 +15,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.port_service_host.passive import (
+from service.recon_pipeline.pipelines.port_service_host.passive import (
     internetdb,
     ptr,
     rdap,
 )
-from service.recon_pipeline.asset_pipelines.port_service_host.passive.httpjson import FetchResult
+from service.recon_pipeline.pipelines.port_service_host.passive.httpjson import FetchResult
 
 NOW = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
 

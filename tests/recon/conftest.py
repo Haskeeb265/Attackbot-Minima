@@ -22,14 +22,14 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.resolve import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.resolve import (
     Engine,
     EngineResult,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.resolvers import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.resolvers import (
     QueryOutcome,
 )
-from service.recon_pipeline.stealth.transport import Capabilities, Request, Response
+from service.recon_pipeline.platform.stealth.transport import Capabilities, Request, Response
 
 #: Names the resolver-validation fakes claim to resolve.
 GOOD_NAMES = ("example.com", "cloudflare.com", "google.com")

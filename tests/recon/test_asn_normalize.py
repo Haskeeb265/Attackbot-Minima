@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.asn_cidr.normalize import (
+from service.recon_pipeline.pipelines.asn_cidr.normalize import (
     ORIGIN_ALLOCATION,
     ORIGIN_ANNOUNCEMENT,
     NetworkClaim,

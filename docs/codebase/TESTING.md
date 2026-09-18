@@ -9,17 +9,17 @@
 
 | Suite | Style | Runs where | Count |
 |---|---|---|---|
-| `tests/recon/` | hermetic pytest tests | anywhere — no Docker, DNS, network, or `output/` reads | **1038** |
+| `tests/recon/` | hermetic pytest tests | anywhere — no Docker, DNS, network, or `output/` reads | **1069** |
 | `tests/scraper/` | script-style, live PostgreSQL | needs `docker compose up -d postgres` | 1 (skips without its fixture — see below) |
 
 ```bash
-python -m pytest tests/recon -q        # 1038 passed
-python -m pytest tests/ -q             # 1038 passed, 1 skipped
+python -m pytest tests/recon -q        # 1069 passed
+python -m pytest tests/ -q             # 1069 passed, 1 skipped
 ```
 
 ## `tests/recon/` — the hermetic suite
 
-Per file (1038 tests total), grouped by subsystem:
+Per file (1069 tests total), grouped by subsystem:
 
 **Names pipeline — `subdomain_domain_wildcards`**
 
@@ -75,7 +75,19 @@ Per file (1038 tests total), grouped by subsystem:
 | `test_asn_sources.py` | 13 | RIPEstat/RDAP parsers (defensive against RIR schema differences), "no data" vs "no answer" status discipline |
 | `test_asn_pipeline.py` | 14 | seed expansion with both sources failing/succeeding, merge + annotation end to end, the scope-file format contract, caps and refusal accounting |
 
-**Stealth layer — `service/recon_pipeline/stealth`**
+**Platform — `service/recon_pipeline/platform`**
+
+| File | Tests | Covers |
+|---|---|---|
+| `test_platform.py` | 31 | scoring (floor vs. sum, echo ≠ corroboration, penalties clamp at 0, clamping to 100, triage ordering), scope (`in_scope`/`needs_review`/`out_of_scope`, the §5.4 rule that a discovered network never authorises itself, non-routable refusal), dispatch (deny-by-default, score floor, host budget → `DEFER`, out-of-scope cooldown, the `needs_review` operator override), lifecycle (fresh evidence, slow staleness decay, prune-then-archive idempotence, appear/disappear/change diffs), registry discovery + `consumes` ordering + name/folder mismatch refusal, the run registry (append-only, newest-first, `last_for`), graceful degrade (a broken cache client returns a miss, a Redis-less queue spools and still reports `False`, a keyless enricher has no opinion), and the runner end to end with a stubbed context (every declared stage runs in order, stage reports + `summary.json` + one registry row are written, and one failing stage is recorded without stopping the run) |
+
+The runner test stubs the single method that would open sockets
+(`build_context`); everything around it — stage sequencing, timing, report and
+registry writing, failure isolation — is the real code path. That keeps the
+suite hermetic while still covering orchestration, which is where the
+restructure's risk lives.
+
+**Stealth layer — `service/recon_pipeline/platform/stealth`**
 
 | File | Tests | Covers |
 |---|---|---|
@@ -153,11 +165,11 @@ sentinel lets them propagate normally.
 - **No CI configuration** (no workflow files) — nothing runs the suite
   automatically.
 - `tests/recon/test_repository.py` (Neo4j CRUD + constraint enforcement) is a
-  script requiring a live Neo4j, so it is not part of the 1038.
+  script requiring a live Neo4j, so it is not part of the 1069.
 - No coverage measurement is configured; there is no coverage report to cite.
 
 ## Evidence
 
-- `python -m pytest tests/recon -q` → `1038 passed`
-- `python -m pytest tests/ -q` → `1038 passed, 1 skipped`
+- `python -m pytest tests/recon -q` → `1069 passed`
+- `python -m pytest tests/ -q` → `1069 passed, 1 skipped`
 - `tests/conftest.py`, `tests/recon/conftest.py`, and the per-file test lists

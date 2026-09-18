@@ -14,13 +14,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from service.recon_pipeline.asset_pipelines.port_service_host.active import naabu, nmap, webprobe
-from service.recon_pipeline.asset_pipelines.port_service_host.active.tools import (
+from service.recon_pipeline.pipelines.port_service_host.active import naabu, nmap, webprobe
+from service.recon_pipeline.pipelines.port_service_host.active.tools import (
     NAABU_CONNECT,
     NAABU_SYN,
     TOP_PORTS_FULL,
 )
-from service.recon_pipeline.asset_pipelines.port_service_host.normalize import (
+from service.recon_pipeline.pipelines.port_service_host.normalize import (
     MODE_HTTP,
     MODE_SYN,
     ServiceObservation,

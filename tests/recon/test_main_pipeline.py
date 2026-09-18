@@ -21,11 +21,11 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards import main
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards import main
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active import (
     pipeline as active_pipeline,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.permutation import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.permutation import (
     pipeline as permutation_pipeline,
 )
 

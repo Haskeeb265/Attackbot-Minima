@@ -24,7 +24,7 @@ what is true about the repository today.
 | Stage | Status | Where it lives today |
 |---|---|---|
 | S0 Infrastructure & config | **partial** | `docker-compose.yml` runs PostgreSQL 16 + Neo4j; **no Redis service** and no connectivity smoke test |
-| S1 Graph schema + CRUD + indexing | **built** | `service/recon_pipeline/graph/{schema,repository,client}.py`; verified by `tests/recon/test_repository.py` (script, live Neo4j) |
+| S1 Graph schema + CRUD + indexing | **built** | `service/recon_pipeline/platform/graph/{schema,repository,client}.py`; verified by `tests/recon/test_repository.py` (script, live Neo4j) |
 | S2 Scoring engine | not started | — |
 | S3 Extraction & normalization | **partial** | hostname canonicalization/validation, provenance merge and source-output parsing in `.../passive/normalize.py`; no artifact/secret extractors and no `content_hash` |
 | S4 Seed ingestion (Postgres → graph) | not started | — |
@@ -35,7 +35,7 @@ what is true about the repository today.
 | S9 Queue topology + workers | not started | — |
 | S10 Active dispatcher, rate limiting, recursion gate | **partial** | `.../active/` resolves, brute-forces and recurses with its own bounded limits (validated resolver pool, capped recursion) and now paces that work through the stealth layer's per-host token buckets; there is still no dispatcher, queue-priority or scoring-driven policy gate |
 | S11 Re-scoring, penalty re-verification, pruning | not started | — |
-| S12 Stealth & resilience | **partial (direct mode)** | `service/recon_pipeline/stealth/` — coherent per-host browser identities, pacing with jitter/backoff/`Retry-After`, WAF + challenge detection, persistent quarantine escalating to passive-only, per-resolver DNS volume budgeting, and transports with a capability report. Wired into `.../active/` and `.../permutation/`. **Not built:** proxy pools (D4 defers them), CAPTCHA solving, and Redis-backed shared quarantine (state is a JSON file) |
+| S12 Stealth & resilience | **partial (direct mode)** | `service/recon_pipeline/platform/stealth/` — coherent per-host browser identities, pacing with jitter/backoff/`Retry-After`, WAF + challenge detection, persistent quarantine escalating to passive-only, per-resolver DNS volume budgeting, and transports with a capability report. Wired into `.../active/` and `.../permutation/`. **Not built:** proxy pools (D4 defers them), CAPTCHA solving, and Redis-backed shared quarantine (state is a JSON file) |
 | S13 LLM classification | not started | no provider SDK, endpoint or key anywhere in the repo |
 | S14 Observability, DLQ ops, monitoring | not started | each asset-pipeline stage writes its own `report.json`; there is no monitoring or queue-ops surface |
 
@@ -43,7 +43,7 @@ what is true about the repository today.
 pipeline (`passive/`, `active/`, `permutation/` + orchestrator) and two of the
 plan-v2 techniques (S16's DNS brute force and permutation) were built there first.
 Start with the
-[pipeline README](../../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md)
+[pipeline README](../../service/recon_pipeline/pipelines/subdomain_domain_wildcards/README.md)
 and [`../codebase/ARCHITECTURE.md`](../codebase/ARCHITECTURE.md).
 
 ---
@@ -209,7 +209,7 @@ service/recon_pipeline/
 
 - **Neo4j Community vs Enterprise.** Community is GPLv3, free, single-node only (no clustering/HA, no RBAC beyond basic auth, online backup is Enterprise-only per Neo4j docs). Trade-off: we accept single-node availability for zero cost; if a future prod deployment needs HA, that's a separate decision. Pin a specific community tag (e.g. `neo4j:5.26-community` or current 2025.x tag) for reproducibility. **[OPEN]** — do you want the latest 2025.x tag or a pinned 5.x LTS?
 - **Redis for both queues and cache.** Redis Streams provide consumer groups, message acknowledgment, and pending-entry re-delivery (`XREADGROUP`/`XACK`/`XAUTOCLAIM`) — enough for a single-machine "event-driven" topology without Kafka. Redis also serves the hot cache (S8). Trade-off: one extra infra dependency vs. Postgres-based queues (polling, slower) or in-process asyncio queues (no durability, no cross-process workers). Chosen: Redis (D2).
-- **Config location.** Extend the **root `config.py`** (which already centralizes env + rate limits per `scope.md` §3) with `NEO4J_URI/USER/PASSWORD`, `REDIS_URL`, and shared rate-limit values; `service/recon_pipeline/asset_pipelines/config.py` (the module that actually exists today) re-exports what recon needs. Trade-off: single source of truth (good) vs. root config growing (acceptable).
+- **Config location.** Extend the **root `config.py`** (which already centralizes env + rate limits per `scope.md` §3) with `NEO4J_URI/USER/PASSWORD`, `REDIS_URL`, and shared rate-limit values; `service/recon_pipeline/pipelines/config.py` (the module that actually exists today) re-exports what recon needs. Trade-off: single source of truth (good) vs. root config growing (acceptable).
 - **Connection wrappers.** New `shared/graph.py` (Neo4j `GraphDatabase.driver(...)`, function-first) and `shared/redis_client.py` (redis-py client + stream helpers) mirror `shared/db.py`. Trade-off: thin wrappers add a layer but keep call sites obviously infra-touching, matching convention #2.
 - **APOC plugin.** Deferred. Neo4j's APOC adds utility procedures but complicates the Docker image. v1 needs no APOC. Revisit if a stage needs `apoc.periodic.*` or text utilities.
 - **Auth for local dev.** Neo4j requires a password on first boot (`NEO4J_AUTH`). Use env-provided credentials; do not print them (avoid the `config.py` credential-print bug flagged in `CONCERNS.md`).
@@ -422,7 +422,7 @@ service/recon_pipeline/
 
 ### Stage 12 — Stealth & Resilience Layer
 
-**Objective:** implement spec §5.1 — protocol-aware request transport with adaptive rate limiting, CAPTCHA/challenge detection, graceful passive-only fallback, and source quarantine. **Real proxy pools are deferred** (D4) — the direct-mode layer is **built** at `service/recon_pipeline/stealth/` (see the status table): coherent per-host browser identities, pacing with jitter/backoff/`Retry-After`, WAF + challenge detection, persistent quarantine escalating to passive-only, and a per-resolver DNS volume budget. The sections below describe that layer as it now exists; the stage's own README and `stealth/README.md` carry the measured evidence.
+**Objective:** implement spec §5.1 — protocol-aware request transport with adaptive rate limiting, CAPTCHA/challenge detection, graceful passive-only fallback, and source quarantine. **Real proxy pools are deferred** (D4) — the direct-mode layer is **built** at `service/recon_pipeline/platform/stealth/` (see the status table): coherent per-host browser identities, pacing with jitter/backoff/`Retry-After`, WAF + challenge detection, persistent quarantine escalating to passive-only, and a per-resolver DNS volume budget. The sections below describe that layer as it now exists; the stage's own README and `stealth/README.md` carry the measured evidence.
 
 **Mandatory dependencies:** S10 (dispatcher integration point).
 
@@ -430,9 +430,9 @@ service/recon_pipeline/
 
 **Decisions & trade-offs:**
 
-- **Transport adapter — built at `service/recon_pipeline/stealth/transport.py`.** `Transport.send(request, identity) -> Response` with `RequestsTransport` (ordered headers, keep-alive, honest `tls_impersonation: false`) and `CurlCffiTransport` (full ClientHello + HTTP/2 + order, optional dependency), plus `select_transport()` which reports what ran and why. `ProxyTransport` remains the designed extension point for residential/datacenter pools (D4).
-- **CAPTCHA/challenge detection — built at `service/recon_pipeline/stealth/detect.py`.** Status codes (429/403), WAF header fingerprints (a data table covering Cloudflare, Akamai, Imperva, DataDome, PerimeterX, Fastly, CloudFront, F5, FortiWeb, …), strong challenge-page markers vs. weak words, body-size bounds, and `Retry-After` in both RFC 9110 forms. Evidence-gated by design: a challenge requires a challenge-specific marker; a bare 403 is a finding, not a block. On a served challenge the host is quarantined immediately; repeated denials need several incidents; a WAF blocking several hosts degrades the run to passive-only (`quarantine.py`).
-- **Traffic shaping.** Partially built (2026-09-16): identity-coherent header *contents* and real browser header *order* are handled by the `requests` transport, TLS ClientHello impersonation through the `httpx -tlsi` path (verified to produce the real Chrome JA4), and `curl_cffi` is implemented as an optional full-stack transport (not installed in this tree — the run report says so). What remains deferred with the proxies: HTTP/2 frame-level fingerprint shaping outside `curl_cffi`, and proxy/IP rotation. Evidence and captures: `service/recon_pipeline/stealth/README.md`.
+- **Transport adapter — built at `service/recon_pipeline/platform/stealth/transport.py`.** `Transport.send(request, identity) -> Response` with `RequestsTransport` (ordered headers, keep-alive, honest `tls_impersonation: false`) and `CurlCffiTransport` (full ClientHello + HTTP/2 + order, optional dependency), plus `select_transport()` which reports what ran and why. `ProxyTransport` remains the designed extension point for residential/datacenter pools (D4).
+- **CAPTCHA/challenge detection — built at `service/recon_pipeline/platform/stealth/detect.py`.** Status codes (429/403), WAF header fingerprints (a data table covering Cloudflare, Akamai, Imperva, DataDome, PerimeterX, Fastly, CloudFront, F5, FortiWeb, …), strong challenge-page markers vs. weak words, body-size bounds, and `Retry-After` in both RFC 9110 forms. Evidence-gated by design: a challenge requires a challenge-specific marker; a bare 403 is a finding, not a block. On a served challenge the host is quarantined immediately; repeated denials need several incidents; a WAF blocking several hosts degrades the run to passive-only (`quarantine.py`).
+- **Traffic shaping.** Partially built (2026-09-16): identity-coherent header *contents* and real browser header *order* are handled by the `requests` transport, TLS ClientHello impersonation through the `httpx -tlsi` path (verified to produce the real Chrome JA4), and `curl_cffi` is implemented as an optional full-stack transport (not installed in this tree — the run report says so). What remains deferred with the proxies: HTTP/2 frame-level fingerprint shaping outside `curl_cffi`, and proxy/IP rotation. Evidence and captures: `service/recon_pipeline/platform/stealth/README.md`.
 - **Quarantine state.** Lives in Redis (`quarantine:{source}` TTL); the S10 dispatcher consults it before enqueueing. Trade-off: Redis-based (shared across workers, simple) vs. DB-backed (durable, slower) — Redis.
 
 ---

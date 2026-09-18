@@ -15,13 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active import (
     wordlist,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.settings import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.settings import (
     GENERIC_WORDLIST,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.wordlist import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.wordlist import (
     WordlistProvider,
     build_wordlist,
     load_wordlist_file,

@@ -22,7 +22,7 @@ imports lazily or only from one subsystem.
 | `alembic` | `db/migrations/` | migrations; `env.py` uses `db.init.models.Base.metadata` |
 | `requests` | `shared/connectors/`, passive `crtsh`/`wayback`, stealth `transport.py` | HTTP; in the stealth layer it is the fallback transport that preserves header *order* but not the TLS fingerprint |
 | `dnspython` | passive `wildcard.py`, active `resolvers.py`/`axfr.py` | imported **lazily inside functions**, so it is optional at import time and required at run time for DNS work |
-| `neo4j` | `service/recon_pipeline/graph/` | official driver; only the graph layer needs it |
+| `neo4j` | `service/recon_pipeline/platform/graph/` | official driver; only the graph layer needs it |
 | `pytest` | `tests/recon/` | the hermetic suite |
 | `curl_cffi` *(optional)* | stealth `transport.py` | **not installed in this tree**; when present it is the strongest transport (browser ClientHello + HTTP/2 + header order). The layer falls back to `requests` and reports the downgrade |
 
@@ -35,7 +35,7 @@ LLM SDK. Neither is imported anywhere in the repo. `curl_cffi` is the one
 | Store | Version | Container | Used by |
 |---|---|---|---|
 | PostgreSQL | `postgres:16-alpine` | `attackbot_postgres` | scraper: `bounty_master`, `bounty_detail`, `bounty_weaknesses`, `bounty_exclusion` |
-| Neo4j | `neo4j:latest` (Community) | `neo4j_db` | `service/recon_pipeline/graph/` — bolt on 7687, browser on 7474 |
+| Neo4j | `neo4j:latest` (Community) | `neo4j_db` | `service/recon_pipeline/platform/graph/` — bolt on 7687, browser on 7474 |
 | Redis | — | *not in `docker-compose.yml`* | **nothing yet**: `config.py` defines `REDIS_URL`, but no code connects (plan stages S8/S9) |
 
 Both live services are defined in `docker-compose.yml` with healthchecks; Postgres
@@ -57,7 +57,7 @@ fresh volume.
 The recon stages deliberately do **not** import `config.py` for their own knobs;
 each stage has a `settings.py` that reads `PASSIVE_*` / `ACTIVE_*` /
 `PERMUTATION_*` environment variables with documented defaults, and the stealth
-layer has its own (`STEALTH_*`, in `service/recon_pipeline/stealth/settings.py`).
+layer has its own (`STEALTH_*`, in `service/recon_pipeline/platform/stealth/settings.py`).
 The only value the stages take from `config.py` is `TARGET` (the default target).
 Cross-layer settings are **imported, not redefined**: the active stage derives its
 HTTP rate limit from the stealth layer's default, so pacing cannot silently drift
@@ -80,4 +80,4 @@ containerised. See [CONCERNS.md](CONCERNS.md).
 - `requirements.txt`, `docker-compose.yml`, `config.py`
 - `shared/db.py` (pool: `min_size=2`, `max_size=10`, `row_factory=dict_row`)
 - `db/migrations/env.py` (`from db.init.models import Base`, `target_metadata`)
-- `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/{passive,active,permutation}/settings.py`
+- `service/recon_pipeline/pipelines/subdomain_domain_wildcards/{passive,active,permutation}/settings.py`

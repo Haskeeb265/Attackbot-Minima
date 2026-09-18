@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from service.recon_pipeline.stealth.detect import (
+from service.recon_pipeline.platform.stealth.detect import (
     BLOCKED,
     CHALLENGE,
     NETWORK_ERROR,

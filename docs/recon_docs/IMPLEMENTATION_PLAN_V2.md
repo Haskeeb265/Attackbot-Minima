@@ -40,7 +40,7 @@ pipeline rather than as a graph-writing source:
 | S26 Content discovery | not started | — |
 
 The built pipeline this exception refers to is documented in
-[the pipeline README](../../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md).
+[the pipeline README](../../service/recon_pipeline/pipelines/subdomain_domain_wildcards/README.md).
 
 ---
 

@@ -1,5 +1,5 @@
 """
-Tests for :mod:`passive.sources`, :mod:`passive.docker_tool`, and the keyless
+Tests for :mod:`passive.sources`, :mod:`platform.common.docker_tool`, and the keyless
 HTTP sources.
 
 No Docker container is started and no HTTP request is made: ``run_container``,
@@ -16,13 +16,15 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive import (
-    crtsh,
+from service.recon_pipeline.platform.common import (
     docker_tool,
+)
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.passive import (
+    crtsh,
     sources,
     wayback,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive.sources import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.passive.sources import (
     DOCKER_SOURCES,
     HTTP_SOURCES,
 )

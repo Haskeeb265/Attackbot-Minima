@@ -58,7 +58,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from service.recon_pipeline.asset_pipelines.port_service_host.active import (  # noqa: E402
+from service.recon_pipeline.pipelines.port_service_host.active import (  # noqa: E402
     naabu,
     nmap,
     webprobe,

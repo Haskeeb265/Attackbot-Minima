@@ -16,16 +16,16 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.resolvers import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.resolvers import (
     QueryOutcome,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.permutation import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.permutation import (
     pipeline,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.permutation import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.permutation import (
     generate as generate_mod,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.permutation.generate import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.permutation.generate import (
     Generator,
     GeneratorRunError,
     normalize_permutations,

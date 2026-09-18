@@ -48,7 +48,7 @@ Primary store for scraped program data. `postgres:16-alpine`, container
 The recon graph of record. `neo4j:latest` (Community), container `neo4j_db`,
 Bolt on `7687`, browser on `7474`; credentials and database from `NEO4J_*`.
 
-- **Client:** `service/recon_pipeline/graph/client.py` (`Neo4jClient`,
+- **Client:** `service/recon_pipeline/platform/graph/client.py` (`Neo4jClient`,
   driver + `verify()`).
 - **Schema:** `schema.py` — `:Asset` base label plus typed labels, relationship
   types, uniqueness constraint on `(asset_type, canonical_value)` for assets,
@@ -101,6 +101,6 @@ endpoint or API key appears anywhere in the code or `config.py`.
 - `shared/connectors/{base,hackerone_client}.py`, `config.py`
 - `shared/db.py`, `docker-compose.yml`, `db/init/001_schema.sql`,
   `db/migrations/versions/`
-- `service/recon_pipeline/graph/{client,schema,repository}.py`
-- `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/passive/sources.py`
+- `service/recon_pipeline/platform/graph/{client,schema,repository}.py`
+- `service/recon_pipeline/pipelines/subdomain_domain_wildcards/passive/sources.py`
   (upstream images) and the stage READMEs (measured yields)

@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 import requests
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive import httpget
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.passive import httpget
 
 
 class FakeResponse:
@@ -215,7 +215,7 @@ def test_a_body_over_the_cap_is_truncated_and_the_rest_is_not_read(install) -> N
 
 def test_the_default_cap_comes_from_the_stage_settings() -> None:
     """Pinned so a change to the setting is a deliberate one."""
-    from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive import settings
+    from service.recon_pipeline.pipelines.subdomain_domain_wildcards.passive import settings
 
     assert settings.HTTP_MAX_BYTES > 0
     assert settings.HTTP_RETRIES >= 1

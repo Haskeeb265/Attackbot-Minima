@@ -15,18 +15,18 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active import (
     pipeline,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.tools import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.tools import (
     ToolImageMissingError,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive.normalize import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.passive.normalize import (
     ForeignDomainError,
 )
-from service.recon_pipeline.stealth.dns_budget import DnsBudget
-from service.recon_pipeline.stealth.pacing import FakeClock
-from service.recon_pipeline.stealth.session import StealthConfig, StealthSession
+from service.recon_pipeline.platform.stealth.dns_budget import DnsBudget
+from service.recon_pipeline.platform.stealth.pacing import FakeClock
+from service.recon_pipeline.platform.stealth.session import StealthConfig, StealthSession
 
 APEX = "example.com"
 
@@ -339,7 +339,7 @@ def test_missing_image_aborts_before_any_work(tmp_path: Path, healthy_query, fak
 
     monkeypatch.setattr(pipeline, "ensure_image", boom)
 
-    from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.resolve import (
+    from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.resolve import (
         ENGINES,
     )
 
@@ -384,7 +384,7 @@ def test_enrichment_always_includes_the_apex_and_the_dmarc_name(
 
     def fake_enrich(hosts, *, output_dir, timeout, **_kwargs):
         captured["hosts"] = list(hosts)
-        from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active.enrich import (
+        from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active.enrich import (
             EnrichResult,
         )
 

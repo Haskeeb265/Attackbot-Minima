@@ -51,15 +51,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
-SDW_MODULE = "service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.main"
-PSH_MODULE = "service.recon_pipeline.asset_pipelines.port_service_host.pipeline"
-URL_MODULE = "service.recon_pipeline.asset_pipelines.url_endpoint.main"
-ASN_MODULE = "service.recon_pipeline.asset_pipelines.asn_cidr.main"
+SDW_MODULE = "service.recon_pipeline.pipelines.subdomain_domain_wildcards.main"
+PSH_MODULE = "service.recon_pipeline.pipelines.port_service_host.pipeline"
+URL_MODULE = "service.recon_pipeline.pipelines.url_endpoint.main"
+ASN_MODULE = "service.recon_pipeline.pipelines.asn_cidr.main"
 
-SDW_DIR = ROOT / "service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards"
-PSH_DIR = ROOT / "service/recon_pipeline/asset_pipelines/port_service_host"
-URL_DIR = ROOT / "service/recon_pipeline/asset_pipelines/url_endpoint"
-ASN_DIR = ROOT / "service/recon_pipeline/asset_pipelines/asn_cidr"
+SDW_DIR = ROOT / "service/recon_pipeline/pipelines/subdomain_domain_wildcards"
+PSH_DIR = ROOT / "service/recon_pipeline/pipelines/port_service_host"
+URL_DIR = ROOT / "service/recon_pipeline/pipelines/url_endpoint"
+ASN_DIR = ROOT / "service/recon_pipeline/pipelines/asn_cidr"
 
 #: The artifacts worth embedding, relative to each stage directory.  Anything
 #: absent or stale is skipped and reported.  The permutation stage's 26
@@ -517,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             sys.path.insert(0, str(ROOT))
-            from service.recon_pipeline.asset_pipelines.config import TARGET
+            from service.recon_pipeline.platform.common.config import TARGET
         except Exception as exc:  # pragma: no cover - only without .env
             parser.error(f"-t/--target is required when TARGET is unset ({exc})")
         apex = str(TARGET).strip().lower().rstrip(".")

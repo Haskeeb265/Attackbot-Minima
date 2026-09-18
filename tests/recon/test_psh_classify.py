@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.port_service_host.classify import cdn
+from service.recon_pipeline.pipelines.port_service_host.classify import cdn
 
 
 @dataclass

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from service.recon_pipeline.stealth.dns_budget import (
+from service.recon_pipeline.platform.stealth.dns_budget import (
     DnsBudget,
     batch_delay,
     plan,

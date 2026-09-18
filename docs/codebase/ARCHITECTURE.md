@@ -1,22 +1,32 @@
 # Architecture
 
-Attackbot is an attack surface management tool for bug bounty programs. Today it
-has four built subsystems — a **scraper** that ingests HackerOne program data into
-PostgreSQL, four **recon asset pipelines** (names, then ports/services/hosts,
-then URLs/endpoints, then network ownership), and a **graph layer** (Neo4j schema
-+ CRUD) that the recon results are not yet written into.
+Attackbot is an attack surface management tool for bug bounty programs. It has a
+**scraper** that ingests HackerOne program data into PostgreSQL, an **ASM
+platform** (`service/recon_pipeline/platform/`) that owns scoring, scope,
+queues, dispatch, persistence and observability, and four **asset pipelines**
+(`service/recon_pipeline/pipelines/`: names, ports/services/hosts,
+URLs/endpoints, network ownership) that run through that platform.
 
 ```
 HackerOne API ──▶ scraper ──▶ PostgreSQL ──▶ (planned) seed ingestion ──▶ Neo4j
                                                                           ▲
-in-scope domain ──▶ subdomain_domain_wildcards ──▶ live hosts (files) ────┤
-                              │                                           │
-                              ├──▶ port_service_host ──▶ ports/services ──┤
-                              │                                           │
-                              ├──▶ url_endpoint ──▶ endpoints, params, JS ┤
-                              │                                           │
-                              └──▶ asn_cidr ──▶ ASNs/CIDRs + discovered ──┘
-                                        (no pipeline wired into the graph yet)
+                                  ┌───────────────────────────────┐       │
+                                  │  platform/ (no asset logic)   │       │
+                                  │  scoring · scope · dispatch   │       │
+                                  │  cache · queue · lifecycle    │       │
+                                  │  graph sink · observability   │───────┘
+                                  └───────────────▲───────────────┘
+                                                  │ RunContext (contract)
+in-scope domain ──▶ subdomain_domain_wildcards ──▶ live hosts (files)
+                              │
+                              ├──▶ port_service_host ──▶ ports/services
+                              │
+                              ├──▶ url_endpoint ──▶ endpoints, params, JS
+                              │
+                              └──▶ asn_cidr ──▶ ASNs/CIDRs + discovered scope
+
+     pipelines/ = one folder per asset type, discovered at run time
+     python -m service.recon_pipeline run -t <target>
 ```
 
 ## 1. Scraper (built)
@@ -58,7 +68,7 @@ uses savepoints, and the unit-of-work rule is that only top-level code calls
 
 ## 2. Names pipeline — `subdomain_domain_wildcards` (built)
 
-`service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/` — three
+`service/recon_pipeline/pipelines/subdomain_domain_wildcards/` — three
 independently runnable stages plus an orchestrator. Each stage owns an `output/`
 directory, a `report.json`, and a README with measured numbers.
 
@@ -93,7 +103,7 @@ Design rules that the code enforces:
 - **Footprint is a code-level distinction.** DNS steps are on by default; the one
   step that sends application traffic (HTTP probing) is behind `--http`.
 - **All active traffic goes through one stealth chokepoint** —
-  `service/recon_pipeline/stealth/session.py`. Stage code never shapes its own
+  `service/recon_pipeline/platform/stealth/session.py`. Stage code never shapes its own
   requests: it asks the session, which applies pacing, per-host identity,
   block detection and quarantine, and refuses work when the run has degraded to
   passive-only. The DNS work additionally runs under a *volume* budget
@@ -106,7 +116,7 @@ Design rules that the code enforces:
 
 ## 2b. Stealth & resilience (built, direct mode)
 
-`service/recon_pipeline/stealth/` implements the spec's §5.1 layer — the part that
+`service/recon_pipeline/platform/stealth/` implements the spec's §5.1 layer — the part that
 keeps active recon from being trivially fingerprinted, and keeps DNS enumeration
 under published detection thresholds:
 
@@ -133,12 +143,12 @@ under published detection thresholds:
 enforce independently.
 
 Detailed contracts, flags and measured yields live in the
-[pipeline README](../../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md)
+[pipeline README](../../service/recon_pipeline/pipelines/subdomain_domain_wildcards/README.md)
 and each stage's README.
 
 ## 2c. Ports/services/hosts pipeline — `port_service_host` (built)
 
-`service/recon_pipeline/asset_pipelines/port_service_host/` is the second built
+`service/recon_pipeline/pipelines/port_service_host/` is the second built
 asset pipeline and the first stage that *chooses* whether to send packets. It maps
 the addresses stage 2 produced onto open ports and identified services:
 
@@ -175,7 +185,7 @@ writes (P5); `censys.py`/`shodan.py` do not exist. Its own R&D doc is
 
 ## 2d. URLs/endpoints pipeline — `url_endpoint` (built)
 
-`service/recon_pipeline/asset_pipelines/url_endpoint/` answers the third layer of
+`service/recon_pipeline/pipelines/url_endpoint/` answers the third layer of
 surface: *what did the target expose over HTTP, ever?* Its passive sources read
 third-party datasets only — nothing here touches the target.
 
@@ -203,14 +213,15 @@ Design rules that the code enforces:
 - **Only this run's sources count.** The merge reads only sources that succeeded
   in this run, so a stale raw file cannot contaminate the union.
 
-Its own R&D doc is [`url_endpoint/DESIGN.md`](../../service/recon_pipeline/asset_pipelines/url_endpoint/DESIGN.md).
+Its own R&D doc is [`url_endpoint/DESIGN.md`](../../service/recon_pipeline/pipelines/url_endpoint/DESIGN.md).
 **Not built:** light-active crawling of confirmed hosts (`katana`) — it sends
- traffic to the target, so it belongs behind the unbuilt S10 dispatcher/stealth
-chokepoint — and graph writes.
+ traffic to the target, so it belongs behind the platform's S10 dispatcher — and
+calling the platform's graph sink (`context.graph`), which exists and journals
+when Neo4j is down, but which this pipeline does not invoke yet.
 
 ## 2e. Network-ownership pipeline — `asn_cidr` (built)
 
-`service/recon_pipeline/asset_pipelines/asn_cidr/` answers the fourth layer:
+`service/recon_pipeline/pipelines/asn_cidr/` answers the fourth layer:
 *which networks does the target hold or announce — what exists that DNS never
 pointed at?* It is keyless, Docker-free and **never scans**: it reads
 third-party registries and writes artifacts.
@@ -246,14 +257,68 @@ Design rules the code enforces:
   there); a refused connection is a failure — the report keeps them apart, the
   same discipline the URL pipeline's sources follow.
 
-Its own R&D doc is [`asn_cidr/DESIGN.md`](../../service/recon_pipeline/asset_pipelines/asn_cidr/DESIGN.md).
-**Not built:** per-prefix RDAP sweeps (rate budget first), graph writes
-(`ASN`/`CIDR` labels and `BELONGS_TO_ASN`/`ANNOUNCED_BY` edges already exist in
-`schema.py`), peer-ASN expansion (needs scoring).
+Its own R&D doc is [`asn_cidr/DESIGN.md`](../../service/recon_pipeline/pipelines/asn_cidr/DESIGN.md).
+**Not built:** per-prefix RDAP sweeps (rate budget first), peer-ASN expansion,
+and graph writes — the `ASN`/`CIDR` labels and `BELONGS_TO_ASN`/`ANNOUNCED_BY`
+edges exist in `schema.py` and the platform sink can write them, but this
+pipeline still emits files only.
 
-## 3. Graph layer (built, not fed yet)
+## 2f. Platform layer and the pipeline contract (built)
 
-`service/recon_pipeline/graph/` holds the Neo4j design and its CRUD:
+`service/recon_pipeline/platform/` is the ASM platform the four pipelines
+consume. It carries no asset logic; **adding a pipeline is adding a folder**
+under `service/recon_pipeline/pipelines/` that exposes `MANIFEST` + `PIPELINE`
+in a `contract.py`. The registry discovers it, the runner orders it by its
+declared `consumes`, runs its declared stages, times and isolates each one, and
+the CLI lists it — with no edit anywhere else in the tree.
+
+```
+python -m service.recon_pipeline run -t example.com
+        │
+        ▼
+cli.py ─▶ runner.Runner
+            ├─ registry.discover()     every qualifying folder in pipelines/
+            ├─ build_context()         scope · scoring · cache · queue ·
+            │                          enricher · graph sink · dispatcher
+            ├─ registry.ordered()      consumers run after their producers
+            ├─ <pipeline>.run(stage, context)          timed, failures isolated
+            └─ reports                 runs/<target>/<stamp>/{summary.json,stages/}
+                                       + one row in runs/runs.jsonl
+```
+
+The platform's parts, and the honest state of each:
+
+| Module | Plan stage | State |
+|---|---|---|
+| `contract.py`, `registry.py`, `runner.py`, `cli.py` | — | **built** — the plugin contract, discovery, one run path, operator CLI |
+| `common/` | — | **built** — canonicalization, JSONL IO, env parsing, shared Docker runner, HTTP+JSON, `.env` config |
+| `scoring.py` | S2 | **built** — pure evidence scoring with a floor + corroboration + penalties and a per-score audit trail |
+| `scope.py` | S15 | **built** — `in_scope` / `needs_review` / `out_of_scope`; discovery-derived networks never auto-claim |
+| `dispatch.py` | S10 | **built** — `ALLOW`/`DEFER`/`DENY` with reasons, deny-by-default, per-host + global budgets, decision log in the report |
+| `cache.py` / `queueing.py` | S8 / S9 | **built (producer side)** — Redis cache and the Streams topology with spool + DLQ; the long-running worker pool that drains streams is not built |
+| `lifecycle.py` | S11 | **built** — re-scoring with evidence staleness, prune-after-N-runs to an archive, appear/disappear diffs |
+| `enrich.py` | S13 | **built, key-gated** — advisory labels only; without a key it reports `available=False` and every method answers "no opinion" |
+| `observability.py` | S14 | **built (file-backed)** — run registry, metrics, DLQ surface; no alerting sinks |
+| `graph/` | S1 + S4/S7 | **built, including the writers** — schema + CRUD plus the `GraphSink` (`write_asset`/`write_edge`/`write_resolution`/`ingest_program`) and its replayable journal |
+| `stealth/` | S12 | **built, direct mode** — see §2b |
+
+**Graceful degrade is a contract, not a nicety.** With Redis and Neo4j down the
+live run below still completed and reported each cause:
+
+```
+"graph":      {"available": false, "reason": "ServiceUnavailable: … 7687 refused"}
+"queue":      {"available": false, "reason": "TimeoutError: …"}
+"enrichment": {"available": false, "reason": "LLM_API_KEY not set"}
+"scope":      {"declared_domains": ["qbsco.net"], "discovered_networks": 0}
+```
+
+The full module-by-module detail is in [`PLATFORM.md`](PLATFORM.md); the
+contract itself is in
+[`service/recon_pipeline/README.md`](../../service/recon_pipeline/README.md).
+
+## 3. Graph layer (built, fed through the platform sink)
+
+`service/recon_pipeline/platform/graph/` holds the Neo4j design and its CRUD:
 
 - `schema.py` — `LABEL_*` constants (base `:Asset` + typed labels such as
   `:Domain`, `:Wildcard`, `:IP`, `:Other`), relationship types
@@ -264,6 +329,11 @@ Its own R&D doc is [`asn_cidr/DESIGN.md`](../../service/recon_pipeline/asset_pip
   `ValueError` for an empty list) and every write `MERGE`s on identity
   properties, which is what makes re-runs idempotent.
 - `client.py` — `Neo4jClient` (driver construction + `verify()`).
+- `ingest.py` — `GraphSink`, the S4/S7 writers the platform hands pipelines as
+  `context.graph` (`write_asset`, `write_edge`, `write_resolution`,
+  `ingest_program`). When Neo4j is unreachable every write is appended to a
+  journal file instead, and `python -m service.recon_pipeline replay` flushes it
+  once the database is back — no write is ever lost to a down container.
 
 The contract every future writer must follow is
 [`graph_crud_contract.md`](../recon_docs/graph_crud_contract.md). Verified by
@@ -271,16 +341,26 @@ The contract every future writer must follow is
 
 ## 4. Planned (not built)
 
-The spec family describes a much larger system: a scoring engine (the spec's
-scoring model is now **decay-free** — see `recon.md` §7), seed ingestion
-from Postgres into the graph, Redis queues and a hot cache, an active dispatcher
-with a recursion gate, LLM classification, and observability — then a v2
-extension adding a Scope Engine and eleven new source classes. The stealth
-layer is **partially built** (direct mode; no proxy pools, no CAPTCHA handling,
-no Redis-backed shared quarantine — see `stealth/README.md` §6).
+What the spec family still describes and the code does not do:
 
-None of that exists in code. The stage-by-stage status is maintained in the plans
-themselves:
+- **Seed ingestion from Postgres (S4's other half).** The graph sink can write
+  organization/anchor nodes, but nothing reads the scraper's program tables to
+  create them — the HackerOne scrape is still a disconnected island, and scope
+  files are still prepared by hand.
+- **Queue workers.** The Streams topology, producer, spool and DLQ exist; the
+  long-running consumer/worker pool that makes the loop event-driven does not —
+  execution is still one synchronous run.
+- **Correlation** (§3 row 18): certificate/favicon/JARM clustering, reverse-WHOIS
+  pivots, `ThirdPartyService` and takeover detection. Pipelines hand the platform
+  assets now, but nothing links one pipeline's asset to another's.
+- **LLM classification with a real provider** (S13 needs a key; the module is
+  built and key-gated) and **S14 alerting sinks** (no monitoring exists here).
+- **Stealth's remaining pieces:** proxy pools, CAPTCHA handling, Redis-backed
+  shared quarantine — see `stealth/README.md` §6.
+- **Asset types with no pipeline yet:** source code/repo, mobile (Android/iOS),
+  executables, hardware/IoT, smart contracts, AI models, Windows Store.
+
+The stage-by-stage status is maintained in the plans themselves:
 [`IMPLEMENTATION_PLAN.md`](../recon_docs/IMPLEMENTATION_PLAN.md) (S0–S14) and
 [`IMPLEMENTATION_PLAN_V2.md`](../recon_docs/IMPLEMENTATION_PLAN_V2.md)
 (S15–S26), with the design in [`recon.md`](../recon_docs/recon.md) and
@@ -290,18 +370,20 @@ themselves:
 
 - `service/scraper/ingest.py`, `db/persistence/persistence.py`, `db/repos/*.py`
 - `shared/connectors/base.py`
-- `service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/*/pipeline.py`
+- `service/recon_pipeline/pipelines/subdomain_domain_wildcards/*/pipeline.py`
   and the stage READMEs
-- `service/recon_pipeline/graph/{schema,repository,client}.py`,
+- `service/recon_pipeline/platform/{contract,registry,runner}.py` and
+  `service/recon_pipeline/cli.py`; `docs/codebase/PLATFORM.md`
+- `service/recon_pipeline/platform/graph/{schema,repository,client,ingest}.py`,
   `tests/recon/test_repository.py`
-- `service/recon_pipeline/stealth/{identity,pacing,detect,quarantine,dns_budget,transport,session}.py`,
+- `service/recon_pipeline/platform/stealth/{identity,pacing,detect,quarantine,dns_budget,transport,session}.py`,
   `tests/recon/test_stealth_*.py` (156 hermetic tests), and the live-capture
   evidence cited in `stealth/README.md`
-- `service/recon_pipeline/asset_pipelines/port_service_host/{pipeline,seed_builder,normalize}.py`,
+- `service/recon_pipeline/pipelines/port_service_host/{pipeline,seed_builder,normalize}.py`,
   its `passive/`, `active/` and `classify/` packages, and `tests/recon/test_psh_*.py`
-- `service/recon_pipeline/asset_pipelines/url_endpoint/{main,normalize,extract}.py`,
+- `service/recon_pipeline/pipelines/url_endpoint/{main,normalize,extract}.py`,
   its `passive/` package (wayback, commoncrawl, urlscan, gau), and
   `tests/recon/test_url_*.py`
-- `service/recon_pipeline/asset_pipelines/asn_cidr/{main,normalize,sources,emit}.py`,
+- `service/recon_pipeline/pipelines/asn_cidr/{main,normalize,sources,emit}.py`,
   and `tests/recon/test_asn_*.py`; the live runs cited in `asn_cidr/DESIGN.md`
 - `docs/recon_docs/*` for the planned stages (explicitly marked as intent)

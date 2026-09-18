@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.url_endpoint.main import (
+from service.recon_pipeline.pipelines.url_endpoint.main import (
     ENDPOINTS_FILE,
     HOSTS_FILE,
     INTERESTING_FILE,
@@ -21,7 +21,7 @@ from service.recon_pipeline.asset_pipelines.url_endpoint.main import (
     SUMMARY_FILE,
     run_pipeline,
 )
-from service.recon_pipeline.asset_pipelines.url_endpoint.passive import sources as registry
+from service.recon_pipeline.pipelines.url_endpoint.passive import sources as registry
 
 APEX = "example.com"
 

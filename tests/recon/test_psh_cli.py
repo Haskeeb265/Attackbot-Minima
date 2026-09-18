@@ -20,9 +20,9 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.port_service_host import pipeline, settings
-from service.recon_pipeline.asset_pipelines.port_service_host.classify import cdn
-from service.recon_pipeline.asset_pipelines.port_service_host.pipeline import PshReport, main
+from service.recon_pipeline.pipelines.port_service_host import pipeline, settings
+from service.recon_pipeline.pipelines.port_service_host.classify import cdn
+from service.recon_pipeline.pipelines.port_service_host.pipeline import PshReport, main
 
 
 @pytest.fixture
@@ -258,7 +258,7 @@ def test_list_reports_a_range_file_it_could_not_fully_parse(monkeypatch, capture
 
 
 def test_the_listed_tools_are_the_ones_in_the_registry(captured, capsys) -> None:
-    from service.recon_pipeline.asset_pipelines.port_service_host.active import tools
+    from service.recon_pipeline.pipelines.port_service_host.active import tools
 
     main(["--list"])
     output = capsys.readouterr().out

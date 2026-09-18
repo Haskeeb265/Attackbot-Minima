@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from service.recon_pipeline.asset_pipelines.port_service_host.active import ladder
-from service.recon_pipeline.asset_pipelines.port_service_host.classify import cdn
+from service.recon_pipeline.pipelines.port_service_host.active import ladder
+from service.recon_pipeline.pipelines.port_service_host.classify import cdn
 
 
 @dataclass

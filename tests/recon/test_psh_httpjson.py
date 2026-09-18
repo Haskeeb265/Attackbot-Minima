@@ -14,8 +14,8 @@ from __future__ import annotations
 import pytest
 import requests
 
-from service.recon_pipeline.asset_pipelines.port_service_host.passive import httpjson
-from service.recon_pipeline.asset_pipelines.port_service_host.passive.httpjson import (
+from service.recon_pipeline.pipelines.port_service_host.passive import httpjson
+from service.recon_pipeline.pipelines.port_service_host.passive.httpjson import (
     MAX_BYTES,
     STATUS_UNREACHABLE,
     FetchResult,

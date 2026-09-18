@@ -8,7 +8,7 @@ This doc visualizes the Attackbot_v2 recon pipeline as a set of Mermaid diagrams
 > **These diagrams describe the intended system, not the repository.** Almost every
 > component below is unbuilt — the `Status` column says which are not. The one built
 > subsystem is the standalone asset pipeline in
-> [`../../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/`](../../service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/README.md),
+> [`../../service/recon_pipeline/pipelines/subdomain_domain_wildcards/`](../../service/recon_pipeline/pipelines/subdomain_domain_wildcards/README.md),
 > which is not part of this component set (its crt.sh/Wayback/resolution/permutation
 > work overlaps S5, S6 and S16).
 
@@ -22,18 +22,18 @@ was intended to live, which is **not** a statement that the file exists.
 | # | Component | Stage | Role in the system | Planned home | Status |
 |---|-----------|-------|--------------------|---------------|--------|
 | — | **PostgreSQL 16** | existing | Source of seed data (HackerOne programs, scopes, weaknesses) | `db/` | **built** (`docker-compose.yml`, `db/`) |
-| — | **Neo4j Community** | S0/S1 | **Graph of record** — every node/edge with provenance | `service/recon_pipeline/graph/` | **client + schema + CRUD built**; nothing writes to it yet |
+| — | **Neo4j Community** | S0/S1 | **Graph of record** — every node/edge with provenance | `service/recon_pipeline/platform/graph/` | **client + schema + CRUD built**; nothing writes to it yet |
 | — | **Redis** | S0/S8/S9 | **Queues** (Streams) + **hot cache** (scores) | `shared/redis_client.py` | not started (URL configured only) |
 | **Seed Ingestion** | S4 | Reads Postgres → creates `Organization` + `Asset` seed nodes | `pipeline/seeds.py` | not started |
 | **crt.sh Source** | S5 | CT-log subdomain/SAN enumeration + wildcard detection | `sources/crtsh.py`, `sources/dns.py` | **built standalone** as `.../passive/crtsh.py` + `.../passive/wildcard.py` (files, not graph) |
 | **Wayback Source** | S6 | Historical URL harvest via CDX API | `sources/wayback.py` | **built standalone** as `.../passive/wayback.py` |
 | **Extraction & Normalization** | S3 | Raw artifacts → **canonical candidate nodes** + `content_hash` | `extract/` | partial: hostname canonicalization/validation + provenance in `passive/normalize.py`; no `content_hash`, no artifact extractors |
 | **Scoring Engine** | S2 | `FinalScore = Σ(w·d·c) − penalties` → Active/Warm/Cold + `ScoreAudit` | `scoring/` | not started |
-| **Graph CRUD** | S1 | Idempotent `MERGE` of nodes/edges, constraints, indexes | `service/recon_pipeline/graph/` | **built** (`schema.py`, `repository.py`, `client.py`) |
+| **Graph CRUD** | S1 | Idempotent `MERGE` of nodes/edges, constraints, indexes | `service/recon_pipeline/platform/graph/` | **built** (`schema.py`, `repository.py`, `client.py`) |
 | **Hot Cache** | S8 | Derived score cache for fast hot-path reads | `queue/` (cache layer) | not started |
 | **Queue Workers** | S9 | Redis Streams consumer groups; 5 worker roles | `queue/` | not started |
 | **Recursion Gate + Dispatcher** | S10 | Relevance filter (hard/soft signals), token-bucket rate limiting, priority | `pipeline/gate.py` | partial: the active stage resolves/brute-forces/recurses under its own limits, with no dispatcher or gate |
-| **Stealth & Resilience** | S12 | Transport adapter, identity coherence, pacing/backoff, WAF + CAPTCHA detection, source quarantine, DNS volume budget | `service/recon_pipeline/stealth/` | **partial** — direct mode only; no proxy pools |
+| **Stealth & Resilience** | S12 | Transport adapter, identity coherence, pacing/backoff, WAF + CAPTCHA detection, source quarantine, DNS volume budget | `service/recon_pipeline/platform/stealth/` | **partial** — direct mode only; no proxy pools |
 | **Re-scoring & Pruning** | S11 | Penalty re-verification, re-score on change, state flips, job cancel, archive | `pipeline/` (rescore loop) | not started |
 | **LLM Classification** | S13 | Advisory classification + recon plan (Cerebras / Groq fallback) | `llm/classifier.py` | not started (no provider SDK or key) |
 | **Observability** | S14 | Score audit, DLQ ops, differential monitoring | `observability/` | not started (each asset-pipeline stage writes its own `report.json`) |

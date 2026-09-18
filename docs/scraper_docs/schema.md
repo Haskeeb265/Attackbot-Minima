@@ -204,7 +204,7 @@ Table renamed to `bounty_weaknesses` across `001_schema.sql`, `models.py`, migra
 
 ### 4. `LABEL_WEAKNESSSES` typo — **✅ Fixed**
 
-Renamed to `LABEL_WEAKNESSES` in `service/recon_pipeline/graph/schema.py` and `docs/recon_docs/recon.md`.
+Renamed to `LABEL_WEAKNESSES` in `service/recon_pipeline/platform/graph/schema.py` and `docs/recon_docs/recon.md`.
 
 ### 5. `is_active` cascade gap — **✅ Fixed**
 

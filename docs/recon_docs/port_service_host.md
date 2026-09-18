@@ -135,7 +135,7 @@ expansion only enters the scan set through the scope-policy module (§5.4).
 
 **D8 — Budgets everywhere, same as the subdomain stage.** Ports-per-second,
 hosts-in-flight, and total packets are budgeted through the stealth layer
-(`service/recon_pipeline/stealth/`), not left to tool defaults.
+(`service/recon_pipeline/platform/stealth/`), not left to tool defaults.
 
 ---
 
@@ -373,7 +373,7 @@ provenance properties per Appendix A.
    paths from the sibling stage's `settings.py` (import through its settings
    module, never hardcode — the cross-layer rule from `docs/codebase/CONVENTIONS.md`).
 2. **StealthSession reuse**: HTTP probes (L2b, Censys/Shodan/RDAP calls) go
-   through `service/recon_pipeline/stealth/session.py`; port scans get their
+   through `service/recon_pipeline/platform/stealth/session.py`; port scans get their
    own budget knobs (`PSH_*`) but share the pacing clock and quarantine file,
    so an IP that WAF'd our HTTP probe is *also* deprioritised for scanning.
 3. **DNS budget**: PTR lookups join the existing `dns_budget` accounting.
@@ -439,5 +439,5 @@ provenance properties per Appendix A.
 
 Repo evidence **[measured]**: `active/output/records.jsonl` (493 hosts, A/AAAA),
 tesla.com passive run report.json (1,380 names), `docs/scraper_docs/schema.md`
-(scope CIDR/IP), `service/recon_pipeline/stealth/` (session/pacing/quarantine),
+(scope CIDR/IP), `service/recon_pipeline/platform/stealth/` (session/pacing/quarantine),
 sibling stage settings/normalize conventions.

@@ -1,0 +1,66 @@
+# url_endpoint — raw commands
+#
+# The stage builds these commands itself (see passive/sources.py); this file is
+# for reproducing or debugging one source by hand.  All of them are passive: no
+# command here sends a request to the target.
+
+# ---------------------------------------------------------------------------
+# Build the tool image (only the gau source needs it)
+# ---------------------------------------------------------------------------
+docker build -t url_endpoint_image \
+  service/recon_pipeline/pipelines/url_endpoint/
+
+# Confirm the tool and its version inside the image.
+docker run --rm url_endpoint_image gau --version
+
+# ---------------------------------------------------------------------------
+# gau — Wayback + Common Crawl + AlienVault OTX + urlscan in one pass
+# ---------------------------------------------------------------------------
+# --subs      include the target's subdomains (not just the apex)
+# --providers pin the upstream datasets, so coverage is declared rather than
+#             inherited from the image's defaults
+docker run --rm url_endpoint_image gau --subs \
+  --providers wayback,commoncrawl,otx,urlscan \
+  --threads 5 --timeout 30 example.com
+
+# One provider at a time (debugging which dataset produced a URL).
+docker run --rm url_endpoint_image gau --subs --providers wayback example.com
+docker run --rm url_endpoint_image gau --subs --providers otx example.com
+
+# ---------------------------------------------------------------------------
+# Wayback CDX — keyless, no key, no image
+# ---------------------------------------------------------------------------
+# fl=original      return the URL only
+# collapse=urlkey  server-side dedup (exact duplicates dominate the stream)
+# matchType=domain cover the apex and every subdomain
+curl -s 'https://web.archive.org/cdx/search/cdx?url=example.com&matchType=domain&fl=original&collapse=urlkey&output=json&limit=1000'
+
+# ---------------------------------------------------------------------------
+# Common Crawl index — keyless
+# ---------------------------------------------------------------------------
+# 1. find the newest index id
+curl -s 'https://index.commoncrawl.org/collinfo.json' | head -c 500
+
+# 2. query it.  Two patterns on purpose: `*.apex` covers subdomains, `apex/*`
+#    covers paths on the apex itself.
+curl -s 'https://index.commoncrawl.org/CC-MAIN-2026-05-index?url=*.example.com&output=json&fl=url&limit=500'
+curl -s 'https://index.commoncrawl.org/CC-MAIN-2026-05-index?url=example.com%2F*&output=json&fl=url&limit=500'
+#    A 404 with the body "No Captures found for: ..." means "never crawled" —
+#    a fact, not a failure.
+
+# ---------------------------------------------------------------------------
+# urlscan.io search — keyless with a small quota; URL_URLSCAN_KEY raises it
+# ---------------------------------------------------------------------------
+# Use the `api-key` header (not x-api-key); 429 is expected under load.
+curl -s 'https://urlscan.io/api/v1/search/?q=domain:example.com&size=100' \
+  -H "api-key: $URL_URLSCAN_KEY"
+# Check your own quota:
+curl -s 'https://urlscan.io/user/quotas/' -H "api-key: $URL_URLSCAN_KEY"
+
+# ---------------------------------------------------------------------------
+# Running the stage itself
+# ---------------------------------------------------------------------------
+python -m service.recon_pipeline.pipelines.url_endpoint.main -t example.com
+python -m service.recon_pipeline.pipelines.url_endpoint.main -t example.com --skip gau
+python -m service.recon_pipeline.pipelines.url_endpoint.main -t example.com --stages extract
+python -m service.recon_pipeline.pipelines.url_endpoint.passive.pipeline --list

@@ -13,15 +13,15 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.url_endpoint.passive import (
+from service.recon_pipeline.pipelines.url_endpoint.passive import (
     commoncrawl,
     sources as registry,
     urlscan,
     wayback,
 )
-from service.recon_pipeline.asset_pipelines.url_endpoint.passive.errors import SourceUnavailable
-from service.recon_pipeline.asset_pipelines.url_endpoint.passive.httpjson import HttpResult
-from service.recon_pipeline.asset_pipelines.url_endpoint.passive.pipeline import (
+from service.recon_pipeline.pipelines.url_endpoint.passive.errors import SourceUnavailable
+from service.recon_pipeline.pipelines.url_endpoint.passive.httpjson import HttpResult
+from service.recon_pipeline.pipelines.url_endpoint.passive.pipeline import (
     run_passive_stage,
     scan_url_file,
 )

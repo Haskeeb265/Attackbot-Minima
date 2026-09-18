@@ -11,7 +11,7 @@ import dataclasses
 
 import pytest
 
-from service.recon_pipeline.stealth.identity import (
+from service.recon_pipeline.platform.stealth.identity import (
     BY_NAME,
     CHROME_WIN,
     FIREFOX_WIN,

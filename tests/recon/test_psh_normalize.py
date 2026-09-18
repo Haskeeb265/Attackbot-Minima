@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.port_service_host.normalize import (
+from service.recon_pipeline.pipelines.port_service_host.normalize import (
     MODE_CONNECT,
     MODE_HTTP,
     MODE_SYN,

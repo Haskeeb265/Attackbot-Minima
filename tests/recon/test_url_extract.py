@@ -8,7 +8,7 @@ inflates silently.
 
 from __future__ import annotations
 
-from service.recon_pipeline.asset_pipelines.url_endpoint.extract import extract
+from service.recon_pipeline.pipelines.url_endpoint.extract import extract
 
 APEX = "example.com"
 

@@ -20,23 +20,23 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.port_service_host.active import (
+from service.recon_pipeline.pipelines.port_service_host.active import (
     naabu,
     nmap,
     tools,
     webprobe,
 )
-from service.recon_pipeline.asset_pipelines.port_service_host.active.tools import (
+from service.recon_pipeline.pipelines.port_service_host.active.tools import (
     NAABU_CONNECT,
     NAABU_SYN,
 )
-from service.recon_pipeline.asset_pipelines.port_service_host.normalize import (
+from service.recon_pipeline.pipelines.port_service_host.normalize import (
     MODE_CONNECT,
     MODE_SYN,
     PortObservation,
     ServiceObservation,
 )
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive.docker_tool import (
+from service.recon_pipeline.platform.common.docker_tool import (
     ContainerRun,
     DockerTimeoutError,
     DockerUnavailableError,

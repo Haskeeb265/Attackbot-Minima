@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.url_endpoint.normalize import (
+from service.recon_pipeline.pipelines.url_endpoint.normalize import (
     KIND_API,
     KIND_JS,
     KIND_JSON,
@@ -281,7 +281,7 @@ def test_ordinary_urls_are_not_junk() -> None:
     ],
 )
 def test_is_plausible_parameter(name: str, expected: bool) -> None:
-    from service.recon_pipeline.asset_pipelines.url_endpoint.normalize import (
+    from service.recon_pipeline.pipelines.url_endpoint.normalize import (
         is_plausible_parameter,
     )
 

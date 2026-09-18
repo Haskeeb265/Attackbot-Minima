@@ -12,8 +12,8 @@ import types
 
 import pytest
 
-from service.recon_pipeline.stealth.identity import CHROME_WIN, IdentityPool
-from service.recon_pipeline.stealth.transport import (
+from service.recon_pipeline.platform.stealth.identity import CHROME_WIN, IdentityPool
+from service.recon_pipeline.platform.stealth.transport import (
     CURL_CFFI,
     REQUESTS,
     CurlCffiTransport,
@@ -115,11 +115,11 @@ def test_selection_reports_what_it_installed():
 
 def test_auto_selection_prefers_curl_cffi_when_present(monkeypatch):
     monkeypatch.setattr(
-        "service.recon_pipeline.stealth.transport.curl_cffi_available",
+        "service.recon_pipeline.platform.stealth.transport.curl_cffi_available",
         lambda: True,
     )
     monkeypatch.setattr(
-        "service.recon_pipeline.stealth.transport.CurlCffiTransport",
+        "service.recon_pipeline.platform.stealth.transport.CurlCffiTransport",
         lambda **kwargs: RequestsTransport(**kwargs),
     )
     selection = select_transport()
@@ -128,7 +128,7 @@ def test_auto_selection_prefers_curl_cffi_when_present(monkeypatch):
 
 def test_auto_selection_falls_back_to_requests_when_absent(monkeypatch):
     monkeypatch.setattr(
-        "service.recon_pipeline.stealth.transport.curl_cffi_available",
+        "service.recon_pipeline.platform.stealth.transport.curl_cffi_available",
         lambda: False,
     )
     selection = select_transport(timeout=1.0)

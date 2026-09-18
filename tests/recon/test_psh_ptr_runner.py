@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.port_service_host.passive import ptr
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive.docker_tool import (
+from service.recon_pipeline.pipelines.port_service_host.passive import ptr
+from service.recon_pipeline.platform.common.docker_tool import (
     ContainerRun,
     DockerTimeoutError,
     DockerUnavailableError,
@@ -334,7 +334,7 @@ def test_the_default_runner_is_the_registry_and_uses_the_real_tool_name(
     found, in a live run, rather than by any test.  The lazy import is what makes
     the wiring testable at all.
     """
-    from service.recon_pipeline.asset_pipelines.port_service_host.active import tools as psh_tools
+    from service.recon_pipeline.pipelines.port_service_host.active import tools as psh_tools
 
     fake = runner()
     monkeypatch.setattr(psh_tools, "run_tool", fake)

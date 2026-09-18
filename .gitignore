@@ -155,7 +155,7 @@ activemq-data/
 .envrc
 
 # Recon tool configs with API keys (amass datasources)
-service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/passive/config/
+service/recon_pipeline/pipelines/subdomain_domain_wildcards/passive/config/
 
 # subdomain_domain_wildcards pipeline run artifacts: raw per-tool output,
 # per-tool logs, the normalized/resolved host lists, validated resolver pools,
@@ -164,26 +164,32 @@ service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/passive/config
 # `...permutation.pipeline`) or the orchestrator (`...main`), so none of it
 # belongs in git. The curated seed data (active/resolvers/, active/wordlists/)
 # is NOT ignored - that is source.
-service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/passive/output/
-service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/active/output/
-service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/permutation/output/
-service/recon_pipeline/asset_pipelines/subdomain_domain_wildcards/output/
+service/recon_pipeline/pipelines/subdomain_domain_wildcards/passive/output/
+service/recon_pipeline/pipelines/subdomain_domain_wildcards/active/output/
+service/recon_pipeline/pipelines/subdomain_domain_wildcards/permutation/output/
+service/recon_pipeline/pipelines/subdomain_domain_wildcards/output/
 
 # port_service_host stage run artifacts: the scan set, passive intel, CDN verdicts,
 # open ports, service identities, per-tool raw output and the run report. Like the
 # sibling stage's, these are fully reproducible by re-running the stage (see that
 # stage's README for the measured yields), so they are not tracked.
-service/recon_pipeline/asset_pipelines/port_service_host/output/
+service/recon_pipeline/pipelines/port_service_host/output/
 
 # url_endpoint stage run artifacts: per-source raw URL lists, the canonical union,
 # the derived endpoints/parameters/JS/interesting lists and the run reports. Same
 # rule as the siblings - reproduced by re-running the stage, never tracked.
-service/recon_pipeline/asset_pipelines/url_endpoint/passive/output/
-service/recon_pipeline/asset_pipelines/url_endpoint/output/
+service/recon_pipeline/pipelines/url_endpoint/passive/output/
+service/recon_pipeline/pipelines/url_endpoint/output/
 
 # asn_cidr stage run artifacts: discovered network claims and scope files.
 # Same rule as the siblings - reproduced by re-running the stage, never tracked.
-service/recon_pipeline/asset_pipelines/asn_cidr/output/
+service/recon_pipeline/pipelines/asn_cidr/output/
+
+# ASM platform run artifacts: one directory per run (summary.json + a report per
+# stage), the shared run timeline runs.jsonl the `history` command reads, and the
+# graph journal written while Neo4j is down (flushed by `replay`). All of it is
+# state, not source — the pipelines' curated inputs stay tracked.
+/output/
 
 # Scratch directories used for ad-hoc live verification runs (wordlist/resolver
 # experiments, temporary mounts). Never source.

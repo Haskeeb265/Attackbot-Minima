@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive import normalize as nz
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.passive import normalize as nz
 
 APEX = "qbsco.net"
 

@@ -38,20 +38,23 @@ managed limits.
 fails the run during the program-list fetch; sustained rate limiting means partial
 ingestion with no backoff to absorb it.
 
-### 4. The recon pipelines' results never reach the graph
+### 4. No pipeline writes to the graph, so nothing is correlated or scored
 
-Both built asset pipelines (`subdomain_domain_wildcards` and `port_service_host`)
-write files under their `output/` directories, but nothing maps those results into
-Neo4j — no code under `asset_pipelines/` imports the graph layer at all. Seed
-ingestion and the end-to-end pipeline stages (S4, S7) are unbuilt.
+The platform now *has* the writers — `platform/graph/ingest.py`'s `GraphSink`
+(`write_asset` / `write_edge` / `write_resolution` / `ingest_program`) with an
+append-only journal that `python -m service.recon_pipeline replay` flushes when
+Neo4j is down — and the runner hands every pipeline a `context.graph`. But none
+of the four pipelines calls it: each still writes files under its own `output/`,
+and the S2 scoring engine is handed over in the context without being applied to
+anything. Seed ingestion from Postgres (the other half of S4) is also unbuilt.
 
-**Impact:** the graph layer is exercised only by its own integration script;
-discovered assets are not correlated, scored or queryable. The pipeline's value
-is currently per-run files.
+**Impact:** a platform run records *that* stages ran and what they counted, but
+discovered assets are not in the model, not scored, and not correlated across
+pipelines. The deliverable is still per-pipeline files plus a run report.
 
 ### 4b. The stealth layer is direct-mode only
 
-`service/recon_pipeline/stealth/` shapes traffic, detects blocks and quarantines,
+`service/recon_pipeline/platform/stealth/` shapes traffic, detects blocks and quarantines,
 but every request leaves from this host's IP. **No proxy pools** (the spec's D4
 defers them deliberately), no CAPTCHA solving, and quarantine state is a JSON
 file rather than shared Redis-backed state. `curl_cffi` is supported but **not
@@ -73,21 +76,24 @@ containerised.
 
 ### 6. No CI
 
-No workflow configuration exists, so the 1038 hermetic recon tests are never run
+No workflow configuration exists, so the 1069 hermetic recon tests are never run
 automatically. They are fast (≈10 s) and dependency-light, which makes them the
 cheapest thing to wire into CI first.
 
 ### 7. Config/code drift for planned subsystems
 
-`config.py` exposes `REDIS_URL`, and `requirements.txt` names `sqlalchemy`
-(used only for Alembic metadata), while no code connects to Redis and no LLM
-provider SDK or key exists anywhere — yet the plans (S8, S9, S13) assume both.
-Config keys that nothing reads invite the assumption that a feature exists.
+`REDIS_URL` is now genuinely read (`platform/cache.py`, `platform/queueing.py`)
+and both degrade cleanly when Redis is down, but the **worker pool that would
+drain `asm:stream:*` does not exist** — publishes land in the DLQ/spool and stay
+there, so "Redis queues are built" overstates what runs today. `requirements.txt`
+still declares nothing, which means `redis`, `neo4j` and the recon stages'
+dependencies are undeclared (see #2), and no LLM provider SDK or key exists
+anywhere — `platform/enrich.py` is built but permanently `available=False` here.
 
 ### 8. The Neo4j integration test is not part of the suite
 
 `tests/recon/test_repository.py` needs a live Neo4j, so it is excluded from the
-1038 and easy to forget. It is also the only coverage for the multi-label write
+1069 and easy to forget. It is also the only coverage for the multi-label write
 contract that every future graph writer must follow.
 
 ### 9. Graph writes are only as idempotent as their label sets
@@ -160,7 +166,7 @@ true of the current code:
 - **The scraper test suite did not collect** (2026-09-16) —
   `test_hackerone_mapper.py` opened a fixture at import time and aborted `pytest`
   collection for the whole tree. It is now a skipping pytest test; `pytest tests/`
-  runs cleanly (1038 passed, 1 skipped).
+  runs cleanly (1069 passed, 1 skipped).
 - **`DATABASE_URL` printed to stdout** — `config.py` has no print statement.
 - **Missing per-program transaction boundary** — `ingest_program()` wraps each
   program in `db.atomic(conn)` inside a run-scoped connection, with failures
@@ -179,10 +185,10 @@ true of the current code:
 
 ## Evidence
 
-- `python -m pytest tests/ -q` → `1038 passed, 1 skipped`; `pytest tests/scraper --collect-only -q` → 1 collected (skips by design)
+- `python -m pytest tests/ -q` → `1069 passed, 1 skipped`; `pytest tests/scraper --collect-only -q` → 1 collected (skips by design)
 - `requirements.txt`, `config.py`, `shared/connectors/*`, `service/scraper/*`
 - `Dockerfile` (0 bytes), `docker/` (empty), `docker-compose.yml`
-- `service/recon_pipeline/graph/*` and `tests/recon/test_repository.py`
-- `service/recon_pipeline/stealth/*` and its README (§4 knobs, §5 measured cost, §6 not-built list)
+- `service/recon_pipeline/platform/graph/*` and `tests/recon/test_repository.py`
+- `service/recon_pipeline/platform/stealth/*` and its README (§4 knobs, §5 measured cost, §6 not-built list)
 - `git ls-files subdomains.txt`, `git check-ignore -v tests/recon/test_qbsco.sh`
 - §9b timings: `run_recon.py -t qbsco.net --skip-subdomain` (ports 105.4 s, URLs 94.2 s, report 376 692 bytes) and a direct full names run `--stages passive,active,permutation` → 1 123.6 s, 4 live hosts, permutation 910.9 s

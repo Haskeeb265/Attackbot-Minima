@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.active import resolve
-from service.recon_pipeline.asset_pipelines.subdomain_domain_wildcards.passive.docker_tool import (
+from service.recon_pipeline.pipelines.subdomain_domain_wildcards.active import resolve
+from service.recon_pipeline.platform.common.docker_tool import (
     ContainerRun,
     DockerTimeoutError,
     DockerUnavailableError,

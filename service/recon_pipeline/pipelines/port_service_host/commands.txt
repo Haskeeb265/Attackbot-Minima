@@ -1,0 +1,143 @@
+# =============================================================================
+# port_service_host_image — run commands for every bundled tool
+# =============================================================================
+#
+# Image:  port_service_host_image
+# Build:  docker build -t port_service_host_image \
+#           service/recon_pipeline/pipelines/port_service_host/
+#
+# -----------------------------------------------------------------------------
+# RUN THE PIPELINE, NOT THE TOOLS (read this first)
+# -----------------------------------------------------------------------------
+# This file exists to reproduce or debug ONE tool by hand. The supported way to
+# run this stage is the Python module, which already does everything below in the
+# right order — with the scan ladder, CDN classification, passive-first intel,
+# provenance and a machine-readable report:
+#
+#   # full stage: intel -> classify -> ladder -> scan -> services
+#   python -m service.recon_pipeline.pipelines.port_service_host.pipeline -t example.com
+#
+#   # what is in the image, and which CDN providers are known
+#   python -m ...port_service_host.pipeline --list
+#
+# See README.md for flags, the output contract and measured results, and
+# DESIGN.md for the research the design is built on.
+#
+# -----------------------------------------------------------------------------
+# SCOPE: READ THIS BEFORE RUNNING ANYTHING BELOW
+# -----------------------------------------------------------------------------
+# Every command in this file sends packets at a live address. The stage's whole
+# design is built around *not* doing that carelessly, and running these by hand
+# bypasses every one of those protections:
+#
+#   * no scope gate        — the stage scans only in-scope or declared addresses
+#   * no CDN exclusion     — the stage never port-scans CDN/WAF edge addresses
+#   * no rate budget       — the stage derives -rate from PSH_MAX_RATE
+#   * no ladder            — the stage never scans more than an address earned
+#   * no provenance gate   — the stage requires an address to have evidence
+#
+# So use these against addresses you are authorised to scan. The examples below
+# deliberately use scanme.nmap.org's address, which the nmap project publishes
+# for exactly this purpose, and Cloudflare's 1.1.1.1.
+#
+# -----------------------------------------------------------------------------
+# naabu — the port scan
+# -----------------------------------------------------------------------------
+# CONNECT scan (works with no capabilities at all; default for the stage's
+# fallback path). This is the polite default and proves each open port by
+# completing the TCP handshake.
+docker run --rm port_service_host_image \
+  naabu -host 45.33.32.156 -top-ports 1000 -s c -rate 500 -json -silent -duc -nc -Pn
+
+# SYN scan — needs NET_RAW. Standard Docker grants it; a hardened runtime does
+# not, and that failure surfaces as a socket-permission error on stderr rather
+# than a distinct exit code (see active/naabu.py).
+docker run --rm --cap-add=NET_RAW port_service_host_image \
+  naabu -host 45.33.32.156 -top-ports 1000 -s s -rate 500 -json -silent -duc -nc -Pn
+
+# Full range. This is 65,535 probes at ONE address — the L3 rung, which the
+# ladder grants only to a scope-declared address or one that already showed an
+# open port at L2. `-top-ports full` is naabu's own literal for the whole range.
+docker run --rm --cap-add=NET_RAW port_service_host_image \
+  naabu -host 45.33.32.156 -top-ports full -s s -rate 500 -json -silent -duc -nc -Pn
+
+# An address list from a file, with CDN/WAF addresses restricted to 80/443 and
+# naabu's own CDN attribution included in the JSON.
+docker run --rm --cap-add=NET_RAW -v "$PWD/output:/work" port_service_host_image \
+  naabu -list /work/ips_raw.txt -top-ports 1000 -s s -exclude-cdn -cdn \
+        -rate 500 -retries 2 -json -silent -duc -nc -Pn
+
+# Note on output: naabu re-verifies what it found and prints each port twice.
+# Measured on 45.33.32.156, four open ports produced eight output lines. The
+# stage collapses them by (ip, port); by hand you must dedupe or every count is
+# wrong by the duplication factor.
+
+# -----------------------------------------------------------------------------
+# nmap — service identification (open ports only, non-HTTP ports only)
+# -----------------------------------------------------------------------------
+# -Pn  every target is already known to be alive (it had an open port)
+# -n   no reverse DNS: the stage resolves names separately, and doing it twice
+#      is a second, redundant DNS pass
+# --open       keep closed ports out of the document entirely
+# -oX <file>   XML to a FILE, never `-oX -`: nmap's human-readable report would
+#              otherwise interleave with the document and break the parse
+# --version-light / --script ssl-cert   low-intensity identification + cert data
+#
+# One invocation per *distinct port set*, not per address: grouping by the port
+# signature means no port is probed at an address that never had it open.
+docker run --rm -v "$PWD/output:/work" port_service_host_image \
+  nmap -sV -Pn -n --open -oX /work/nmap-1.xml --version-light \
+       --script ssl-cert --max-rate 200 -p 22,9929,31337 45.33.32.156
+
+# The certificate detail the stage records (issuer, SANs, validity) comes from
+# the script's own output inside that XML:
+#   <script id="ssl-cert" output="Subject: ...&#10;Issuer: ...&#10;...">
+
+# -----------------------------------------------------------------------------
+# httpx — the CDN web probe (80/443 only)
+# -----------------------------------------------------------------------------
+# Used ONLY for addresses the ladder classified as CDN/WAF, because shared edge
+# infrastructure must never be port-scanned. The identity flags matter:
+# -random-agent=false is required because the CLI's randomiser is ON by default
+# and emits user agents no browser has ever sent (measured: "Firefox/3.6.13").
+# -irh captures response headers, which is how a WAF challenge is detected and
+# how CDN corroboration reaches classify/cdn.py.
+docker run --rm -v "$PWD/output:/work" port_service_host_image \
+  httpx -l /work/ips_raw.txt -p http:80,https:443 -json -silent \
+        -sc -td -irh -random-agent=false -rl 2 -t 5 -duc -nc
+
+# -----------------------------------------------------------------------------
+# dnsx — reverse DNS (and the address-gap fill)
+# -----------------------------------------------------------------------------
+# -json is REQUIRED, not cosmetic: verified against the real binary, the plain
+# output is the input list echoed back — the PTR answers only appear in the JSON
+# stream (as {"host": "<ip>", "ptr": ["<name>"]}).
+docker run --rm -v "$PWD/output:/work" port_service_host_image \
+  dnsx -silent -json -ptr -l /work/ips_raw.txt -t 100 -retry 2 -duc -nc
+
+# Forward resolution, used to fill the address gap for hosts the DNS stage knows
+# about but has no record for (the permutation stage's hosts are the real case).
+# The output shape is identical to records.jsonl, so one parser reads both.
+docker run --rm -v "$PWD/output:/work" port_service_host_image \
+  dnsx -silent -json -a -aaaa -cname -l /work/missing-resolve-input.txt -duc -nc
+
+# -----------------------------------------------------------------------------
+# Keyless passive intel (no Docker — these are plain HTTPS/DNS lookups)
+# -----------------------------------------------------------------------------
+# The stage does these in Python (passive/internetdb.py, passive/rdap.py). To
+# reproduce by hand:
+curl -s https://internetdb.shodan.io/45.33.32.156      # ports/hostnames/CVEs/tags
+curl -s https://rdap.org/ip/104.16.0.1 | head -c 600   # allocation record
+dig +short TXT 156.32.33.45.origin.asn.cymru.com       # origin ASN + prefix
+dig +short TXT AS63949.asn.cymru.com                   # AS registered name
+#
+# Read the InternetDB age note before trusting it: the endpoint is refreshed
+# weekly, so a record may be up to 7 days old. That is why every record carries
+# intel_age_days and why PSH_INTEL_MAX_AGE_DAYS exists (default 14) — stale data
+# may seed the ladder but is never reported as current state.
+#
+# And read the Cymru result carefully: it reports the *AS*, not the CDN. Linode's
+# AS name is now "AKAMAI-LINODE-AP - Akamai Connected Cloud", so a name match on
+# "akamai" says nothing about whether the address is Akamai's CDN edge. The
+# classifier treats hosting-provider names as corroboration only — see the
+# EDGE_NETWORKS comment in classify/cdn.py.
