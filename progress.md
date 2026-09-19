@@ -538,3 +538,40 @@ and the escalation plan is only as good as `cdn_classified.jsonl`'s freshness.
    consumer pool is what would make the spine event-driven.
 7. **Correlation** (cert/favicon/JARM clustering, reverse-WHOIS, takeover) — the
    "18th asset type", and what the platform's asset model is for.
+
+## 2026-09-19 — Task 2 of the recon-phase close-out: where the value lives
+
+Two benchmark findings from the production comparison were re-examined against
+what Attackbot actually is and **rejected as design goals**:
+
+1. **Run-over-run delta/monitoring.** Attackbot is an autonomous bug-bounty
+   platform: a program is engaged once, worked to completion, and not re-engaged.
+   Continuous monitoring is an EASM-product requirement (defenders watching their
+   own surface forever), not a bug-bounty requirement. The recon module
+   deliberately holds no engagement history, and nothing should be built that
+   assumes the next run happens. The *within-run* determinism/idempotency that
+   already exists is the only "state" the pipeline needs.
+
+2. **Vulnerability validation inside recon.** nuclei/takeover-verification/
+   secret-scanning belong to the **vulnerability-finder engine**, the next
+   module, which will consume the recon handoff. Recon's contract is: widen the
+   attack surface as far as scope and evidence allow, then stop — ranked,
+   explained, and validated only far enough (live/serving, honest hosting
+   verdicts, parameter provenance) for the engine to trust the handoff. Mixing
+   finding into recon would duplicate the engine and blur the one
+   responsibility boundary the platform's module split depends on.
+
+What recon owes the engine is therefore the **handoff surface**, and that is what
+the close-out leaves behind: `graph_state.json` (the full model, scores and
+evidence states), `escalation_refusals.jsonl` + `measurement.{json,md}` (why
+every asset did or did not progress), `active_candidates.jsonl` (the sanctioned
+active plan), validated URLs with status/redirect/parameter provenance, network
+relevance, and the bucket dangling-refs as the engine's takeover input.
+
+Corrected next-move ordering for the platform (supersedes the list above where
+they overlap): (1) finalise the graph schema and write `context.graph` from
+`graph_state.json`; (2) build the vulnerability-finder engine's first stages on
+the handoff surface (nuclei-on-validated-URLs, takeover-verify `dangling.jsonl`,
+secret-scan the JS already collected); (3) then the platform items that remain
+true regardless of this re-scoping — organisation reconciliation, S4 seed
+ingestion, CI, queue workers, correlation.
