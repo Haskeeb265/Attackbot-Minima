@@ -3,20 +3,20 @@
 Attackbot is an attack surface management tool for bug bounty programs. It has a
 **scraper** that ingests HackerOne program data into PostgreSQL, an **ASM
 platform** (`service/recon_pipeline/platform/`) that owns scoring, scope,
-queues, dispatch, persistence and observability, and five **pipelines**
-(`service/recon_pipeline/pipelines/`) that run through that platform: four asset
-collectors (names, ports/services/hosts, URLs/endpoints, network ownership) and
-`graph_normalize`, which fuses their artifacts into one scored node + edge model
-and emits it as `graph_state.json`.
+queues, dispatch, persistence and observability, and six **pipelines**
+(`service/recon_pipeline/pipelines/`) that run through that platform: five asset
+collectors (names, ports/services/hosts, URLs/endpoints, network ownership, cloud
+storage buckets) and `graph_normalize`, which fuses the collectors' artifacts
+into one scored node + edge model and emits it as `graph_state.json`.
 
 ```
-HackerOne API ──▶ scraper ──▶ PostgreSQL ──▶ (planned) seed ingestion ──▶ Neo4j
+HackerOne API ──▶ scraper ──▶ PostgreSQL ──▶ (planned) seed ingestion
                                                                           ▲
                                   ┌───────────────────────────────┐       │
                                   │  platform/ (no asset logic)   │       │
                                   │  scoring · scope · dispatch   │       │
                                   │  cache · queue · lifecycle    │       │
-                                  │  graph sink · observability   │───────┘
+                                  │  graph seam · observability   │───────┘
                                   └───────────────▲───────────────┘
                                                   │ RunContext (contract)
 in-scope domain ──▶ subdomain_domain_wildcards ──▶ live hosts (files)
@@ -26,6 +26,8 @@ in-scope domain ──▶ subdomain_domain_wildcards ──▶ live hosts (files
                               ├──▶ url_endpoint ───────┤  (files)
                               │                        │
                               ├──▶ asn_cidr ───────────┤
+                              │                        │
+                              ├──▶ cloud_resource ─────┤
                               │                        ▼
                               └──────────────────▶ graph_normalize
                                                    nodes + edges (JSONL, no DB write)
@@ -221,8 +223,8 @@ Design rules that the code enforces:
 Its own R&D doc is [`url_endpoint/DESIGN.md`](../../service/recon_pipeline/pipelines/url_endpoint/DESIGN.md).
 **Not built:** light-active crawling of confirmed hosts (`katana`) — it sends
  traffic to the target, so it belongs behind the platform's S10 dispatcher — and
-calling the platform's graph sink (`context.graph`), which exists and journals
-when Neo4j is down, but which this pipeline does not invoke yet. `graph_normalize`
+calling the platform's graph seam (`context.graph`), which journals every offered
+write while no schema exists, but which this pipeline does not invoke yet. `graph_normalize`
 (§2f) is where the fusion happens in the meantime — as files, scored, with
 `graph_state.json` as the document the next engine is handed.
 
@@ -333,7 +335,7 @@ Design rules the code enforces:
 - **Every claim is scored by the platform, not by the pipeline.** `score.py`
   translates a node into the engine's `ScoredAsset` (artifact label → source key)
   and asks `platform/scoring.py`, so weights, corroboration and bands cannot
-  drift; an ownership weight needs the `allocated_to` **edge** the merge wrote,
+  drift; an ownership weight needs the `owned_by` **edge** the merge wrote,
   so a routing announcement never borrows it; a node nobody claimed carries no
   `score` rather than a zero.
 - **Deterministic output.** Five of the seven artifacts are byte-identical
@@ -343,10 +345,13 @@ Design rules the code enforces:
   both contracts (label mapping + weight table) and a *computed* integrity check
   (every edge endpoint resolves to a node in the file), so the downstream
   vulnerability-finder engine joins nothing to act on a run.
-- **No database writes.** The Neo4j schema is not final, so `emit` writes files
-  and `report.json` says `graph_written: false` with the reason. The mapping from
-  neutral kinds to labels/relationships lives in one file (`vocabulary.py`) and
-  is emitted with every run; a test asserts every kind and edge type has one.
+- **No database writes.** The pre-run Neo4j schema was removed on 2026-09-19
+  (it predated any observed recon output); the replacement will be designed
+  from this pipeline's `graph_state.json`, so `emit` writes files and
+  `report.json` says `graph_written: false` with the reason. The mapping from
+  neutral kinds to whatever the new schema labels lives in one file
+  (`vocabulary.py`) and is emitted with every run; a test asserts every kind
+  and edge type has one.
 
 Measured on `qbsco.net` (2026-09-18, all four siblings refreshed that morning):
 9 812 rows → **6 817 nodes / 6 842 edges** in 0.8 s (an 8.58 MB state document),
@@ -363,10 +368,70 @@ picked *the first network in a set* containing an address, which made
 the same address report a different network in every process. Its own doc is
 [`graph_normalize/README.md`](../../service/recon_pipeline/pipelines/graph_normalize/README.md).
 
-## 2g. Platform layer and the pipeline contract (built)
+## 2g. Cloud-resource pipeline — `cloud_resource` (built)
 
-`service/recon_pipeline/platform/` is the ASM platform the four pipelines
-consume. It carries no asset logic; **adding a pipeline is adding a folder**
+`service/recon_pipeline/pipelines/cloud_resource/` answers the fifth layer of
+surface: *which storage buckets exist under names the target would plausibly
+use — and which of them its own DNS has claimed but the provider says are
+absent?* (The v2 plan's S22; the schema's `LABEL_CLOUD_RESOURCE` is the node it
+would feed.) Keyless, Docker-free, and the probes touch the **providers**, never
+the target — hence `passive_only=True` on the same reading `asn_cidr` makes for
+RIPEstat/RDAP.
+
+```
+seeds      sibling artifacts (CNAMEs, URLs, JS, endpoints) + --name overrides
+   ↓
+harvest    provider host patterns  → claimed names  (strongest)
+           brand tokens × name shapes → derived names (capped)
+           (all pure file reading — zero network)
+   ↓
+probe      one GET per (name, provider), classified by a body-aware matrix:
+           open · auth_required · dangling · absent ·
+           exists_other_region · unavailable · nxdomain_absent
+   ↓
+emit       verdicts.jsonl · buckets.jsonl · dangling.jsonl · report.json
+           passive/output/candidates.{jsonl,txt} + report.json
+```
+
+Design rules the code enforces:
+
+- **"No such bucket" and "no answer" stay apart.** A provider 404 is a usable
+  fact (`dangling` when a CNAME claimed the name, else `absent`); a refused
+  connection or 5xx is `unavailable`, counted as a failure and never a false
+  "absent" — the same lesson `url_endpoint/passive/errors.py` learned from
+  Common Crawl. The run report carries `ok: false` while any probe went
+  unanswered.
+- **Azure's quirk is body-aware.** An absent storage *account* answers
+  **409 `AccountNotFound`**, not 404, so Azure verdicts key on the body's
+  `<Code>` first. And an Azure **NXDOMAIN** becomes an absence fact
+  (`nxdomain_absent`) only when a sibling S3/GCS probe answered in the same run
+  — the network is provably up; without that corroboration the honest answer is
+  `unavailable`.
+- **Names are refused, never sanitized.** Each provider's own rules are the
+  validator (S3 3–63 `[a-z0-9.-]`; Azure 3–24 lowercase alnum; GCS 3–63
+  `[a-z0-9._-]`), and refusals are counted with reasons — a sanitized name
+  would be probed at the provider's cost for a bucket nobody could own.
+- **Every candidate carries its origin.** `cname` (the target's own DNS claimed
+  the name — strongest), `url` / `javascript` / `endpoint` (observed in the
+  target's artifacts), `derived` (brand tokens × name shapes, capped, with
+  generic tokens like `mail-app` marked `derived-generic`: a 200 on such a name
+  may be someone else's bucket), `explicit` (`--name`).
+- **One request per name per provider**, capped (`CLOUD_MAX_DERIVED`,
+  `CLOUD_MAX_PROBES`), and the cap-bite is reported. A S3 301 or
+  400-with-region-hint is recorded as *exists elsewhere* — following it across
+  ~30 region endpoints is a P2 request-budget decision.
+
+`dangling.jsonl` — CNAME-claimed names the provider says are absent — is the
+S25 takeover detector's raw material. **Not built:** the S3 region chase, a
+fourth/fifth provider, Azure account/container splitting, and graph writes;
+`graph_normalize` does not read this pipeline yet (its vocabulary has no cloud
+kind — a test pins exactly what changes when it does). Its own R&D doc is
+[`cloud_resource/DESIGN.md`](../../service/recon_pipeline/pipelines/cloud_resource/DESIGN.md).
+
+## 2h. Platform layer and the pipeline contract (built)
+
+`service/recon_pipeline/platform/` is the ASM platform the pipelines consume.
+It carries no asset logic; **adding a pipeline is adding a folder**
 under `service/recon_pipeline/pipelines/` that exposes `MANIFEST` + `PIPELINE`
 in a `contract.py`. The registry discovers it, the runner orders it by its
 declared `consumes`, runs its declared stages, times and isolates each one, and
@@ -382,8 +447,11 @@ cli.py ─▶ runner.Runner
             │                          enricher · graph sink · dispatcher
             ├─ registry.ordered()      consumers run after their producers
             ├─ <pipeline>.run(stage, context)          timed, failures isolated
+            ├─ rounds (--until-converged)   repeat_stages only, until the
+            │                          frontier stops growing or a cap says stop
             └─ reports                 runs/<target>/<stamp>/{summary.json,stages/}
                                        + one row in runs/runs.jsonl
+                                       + convergence.json + frontier_ledger.jsonl
 ```
 
 The platform's parts, and the honest state of each:
@@ -395,11 +463,13 @@ The platform's parts, and the honest state of each:
 | `scoring.py` | S2 | **built** — pure evidence scoring with a floor + corroboration + penalties and a per-score audit trail |
 | `scope.py` | S15 | **built** — `in_scope` / `needs_review` / `out_of_scope`; discovery-derived networks never auto-claim |
 | `dispatch.py` | S10 | **built** — `ALLOW`/`DEFER`/`DENY` with reasons, deny-by-default, per-host + global budgets, decision log in the report |
+| `receipt.py` | — | **built** — the attempt receipt (`(asset, operation)`, conclusive attempts only) that makes "already tried" answerable, so a repeat scans the addresses it has not paid for rather than all of them |
+| `convergence.py` | — | **built** — the round loop: canonical frontier tokens, the seen-ledger, and a pure stop decision that names its reason (`frontier_exhausted` vs. a cap vs. `blocked_by_target`). Only each pipeline's declared `repeat_stages` repeat — re-asking a subtree-wide archive query or a seed-keyed registry lookup cannot change the answer — and only when the previous round found a new asset of a kind the pipeline declared it works on (`repeat_on`), so a quiet round spends no packets at all |
 | `cache.py` / `queueing.py` | S8 / S9 | **built (producer side)** — Redis cache and the Streams topology with spool + DLQ; the long-running worker pool that drains streams is not built |
 | `lifecycle.py` | S11 | **built** — re-scoring with evidence staleness, prune-after-N-runs to an archive, appear/disappear diffs |
 | `enrich.py` | S13 | **built, key-gated** — advisory labels only; without a key it reports `available=False` and every method answers "no opinion" |
 | `observability.py` | S14 | **built (file-backed)** — run registry, metrics, DLQ surface; no alerting sinks |
-| `graph/` | S1 + S4/S7 | **built, including the writers** — schema + CRUD plus the `GraphSink` (`write_asset`/`write_edge`/`write_resolution`/`ingest_program`) and its replayable journal |
+| `graph/` | — | **seam only** — the pre-run schema/CRUD/client were removed 2026-09-19 (designed before any run existed); `GraphSink` journals offered writes until the schema is redesigned from `graph_state.json` |
 | `stealth/` | S12 | **built, direct mode** — see §2b |
 
 **Graceful degrade is a contract, not a nicety.** With Redis and Neo4j down the
@@ -416,43 +486,41 @@ The full module-by-module detail is in [`PLATFORM.md`](PLATFORM.md); the
 contract itself is in
 [`service/recon_pipeline/README.md`](../../service/recon_pipeline/README.md).
 
-## 3. Graph layer (built, fed through the platform sink)
+## 3. Graph layer (the seam, between schemas)
 
-`service/recon_pipeline/platform/graph/` holds the Neo4j design and its CRUD:
+`service/recon_pipeline/platform/graph/` holds one file with a deliberate job:
 
-- `schema.py` — `LABEL_*` constants (base `:Asset` + typed labels such as
-  `:Domain`, `:Wildcard`, `:IP`, `:Other`), relationship types
-  (`BELONGS_TO`, `DERIVED_FROM`, `RESOLVES_TO`, `HAS_CERTIFICATE`, …),
-  constraints and indexes.
-- `repository.py` — `run_query`, `merge_node`, `get_node`, `merge_relation`,
-  `get_relation`. Labels are always a **list** (`TypeError` for a bare string,
-  `ValueError` for an empty list) and every write `MERGE`s on identity
-  properties, which is what makes re-runs idempotent.
-- `client.py` — `Neo4jClient` (driver construction + `verify()`).
-- `ingest.py` — `GraphSink`, the S4/S7 writers the platform hands pipelines as
-  `context.graph` (`write_asset`, `write_edge`, `write_resolution`,
-  `ingest_program`). When Neo4j is unreachable every write is appended to a
-  journal file instead, and `python -m service.recon_pipeline replay` flushes it
-  once the database is back — no write is ever lost to a down container.
+- `ingest.py` — `GraphSink`, what a pipeline receives as `context.graph`. The
+  pre-run schema guess (labels, relationships, constraints, CRUD, client) was
+  **removed on 2026-09-19**: it was designed from the plan before a single
+  recon artifact existed, and the first converged run then produced
+  `graph_state.json` — 6 476 assets of observed reality the replacement schema
+  should be argued from, not guessed again. Until that discussion settles, the
+  sink journals every offered write (canonical identity + payload, written
+  schema-agnostically so the future migration can replay them) and reports
+  `available=False` with that reason; `python -m service.recon_pipeline replay`
+  reports the debt instead of pretending to flush anything.
 
-The contract every future writer must follow is
-[`graph_crud_contract.md`](../recon_docs/graph_crud_contract.md). Verified by
-`tests/recon/test_repository.py` against a live instance.
+Two mechanics the live runs *proved* carry into whatever comes next: a run must
+never fail because storage is down (journal-then-replay), and writes must merge
+by canonical identity rather than append (idempotent re-runs). The removed
+design's last revision is in git history if the schema discussion wants to
+consult it.
 
 ## 4. Planned (not built)
 
 What the spec family still describes and the code does not do:
 
-- **A consumer for the graph state, and a writer for the graph.**
+- **A consumer for the graph state, and the schema to write it to.**
   `graph_normalize` emits `graph_state.json` (plus `nodes.jsonl` / `edges.jsonl`)
-  with a provisional label mapping and deliberately writes no database rows (§2f).
-  The vulnerability-finder engine that would read the state document does not
-  exist yet, and the writer that would load it waits on the final schema;
-  `CONCERNS.md` #4 tracks both.
-- **Seed ingestion from Postgres (S4's other half).** The graph sink can write
-  organization/anchor nodes, but nothing reads the scraper's program tables to
-  create them — the HackerOne scrape is still a disconnected island, and scope
-  files are still prepared by hand.
+  and deliberately writes no database rows (§2f). The pre-run schema was
+  removed (2026-09-19) so the replacement can be designed from the observed
+  data; the vulnerability-finder engine that would read the state document does
+  not exist yet, and `CONCERNS.md` #4 tracks both.
+- **Seed ingestion from Postgres (S4's other half).** Nothing reads the
+  scraper's program tables — the HackerOne scrape is still a disconnected
+  island, and scope files are still prepared by hand. Whether the graph gets an
+  `Organization` anchor at all is part of the schema discussion.
 - **Queue workers.** The Streams topology, producer, spool and DLQ exist; the
   long-running consumer/worker pool that makes the loop event-driven does not —
   execution is still one synchronous run.
@@ -492,6 +560,9 @@ The stage-by-stage status is maintained in the plans themselves:
   `tests/recon/test_url_*.py`
 - `service/recon_pipeline/pipelines/asn_cidr/{main,normalize,sources,emit}.py`,
   and `tests/recon/test_asn_*.py`; the live runs cited in `asn_cidr/DESIGN.md`
+- `service/recon_pipeline/pipelines/cloud_resource/{main,seeds,verify,providers,normalize,emit,settings}.py`,
+  and `tests/recon/test_cloud_resource.py` (49 tests); the live run and the
+  Azure lessons cited in its `README.md`/`DESIGN.md`
 - `service/recon_pipeline/pipelines/graph_normalize/{vocabulary,normalize,sources,merge,score,state,emit,main,contract}.py`
   and `tests/recon/test_graph_normalize.py` (53 tests); the model counts, band
   distribution and the two live-run defects cited in its README

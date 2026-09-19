@@ -51,6 +51,9 @@ STREAM_NAMES = (
     # network pipeline
     "networks",
     "asns",
+    # cloud pipeline
+    "buckets",
+    "dangling",
 )
 
 
@@ -232,21 +235,46 @@ def read_networks(root: Path, *, enabled: bool = True) -> SourceFacts:
     return facts
 
 
+def read_cloud(root: Path, *, enabled: bool = True) -> SourceFacts:
+    """The cloud pipeline: probed buckets and the CNAME-claimed absent ones."""
+    facts = SourceFacts(name="cloud_resource", enabled=enabled)
+    if not enabled:
+        facts.skipped_reason = "GN_INCLUDE_CLOUD is off"
+        return facts
+    for stream, relative, reader in (
+        ("buckets", "output/buckets.jsonl", _jsonl),
+        ("dangling", "output/dangling.jsonl", _jsonl),
+    ):
+        artifact, rows = reader(stream, root / relative)
+        facts.add(artifact, rows)
+    return facts
+
+
 def read_all(
     *,
     names_root: Path,
     ports_root: Path,
     urls_root: Path,
     networks_root: Path,
+    cloud_root: Path | None = None,
     include_names: bool = True,
     include_ports: bool = True,
     include_urls: bool = True,
     include_networks: bool = True,
+    include_cloud: bool = True,
 ) -> list[SourceFacts]:
-    """Every configured source, in the order the model is built."""
-    return [
+    """Every configured source, in the order the model is built.
+
+    ``cloud_root=None`` omits the cloud source entirely rather than reading an
+    empty one — for a caller that has no cloud pipeline root to offer, "we did
+    not look" and "the pipeline produced nothing" stay distinct reports.
+    """
+    facts = [
         read_names(names_root, enabled=include_names),
         read_ports(ports_root, enabled=include_ports),
         read_urls(urls_root, enabled=include_urls),
         read_networks(networks_root, enabled=include_networks),
     ]
+    if cloud_root is not None:
+        facts.append(read_cloud(cloud_root, enabled=include_cloud))
+    return facts

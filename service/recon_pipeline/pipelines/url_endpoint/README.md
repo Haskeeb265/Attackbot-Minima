@@ -52,6 +52,7 @@ passive   Wayback CDX · Common Crawl index · urlscan.io search · gau (Docker)
 extract   URLs → endpoints, parameters (with their URLs), JS bundles, source maps
    ↓      → parameters.jsonl: one row per (url, parameter) observation
 validate  policy-gated live HTTP check of the candidates that deserve it
+jscrawl   S24: fetch in-scope JS bundles, extract API surface -> js_endpoints.jsonl
    ↓      → url_validation.jsonl: alive / status / final URL / chain / title /
             content-type / server / tech / timestamp, per URL
 ```
@@ -60,7 +61,7 @@ validate  policy-gated live HTTP check of the candidates that deserve it
 stored dataset, which is what makes the stage passive in the same sense the names
 stage's crt.sh source is. `extract` is pure local computation.
 
-`validate` is the one stage that sends requests, and it is deliberately last and
+`validate` is the first stage that sends requests (jscrawl, below, is the second), and it is deliberately last and
 separate: an archived URL is **never** treated as live, a historical claim and a
 current measurement travel as two different statements about the same URL, and
 the stage only asks about what passed the scope engine and the platform's
@@ -137,7 +138,7 @@ did not answer" are different facts, and only a source can tell them apart.
 | Flag | Purpose |
 |---|---|
 | `-t, --target` | apex domain (default: `TARGET` from `.env`) |
-| `--stages` | `passive`, `extract`, `validate`, or any subset (default: all three) |
+| `--stages` | `passive`, `extract`, `jscrawl`, `validate`, or any subset (default: all four) |
 | `--only` / `--skip` | select passive sources (e.g. `--skip gau`) |
 | `--max-urls` | cap the URL union after dedup (`0` = no cap) |
 | `--timeout` | per-source wall-clock budget in seconds (600) |

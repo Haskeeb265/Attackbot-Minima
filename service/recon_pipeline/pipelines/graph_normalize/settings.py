@@ -66,6 +66,7 @@ NAMES_DIR = _dir_override("GN_NAMES_DIR", PIPELINES_DIR / "subdomain_domain_wild
 PORTS_DIR = _dir_override("GN_PORTS_DIR", PIPELINES_DIR / "port_service_host")
 URLS_DIR = _dir_override("GN_URLS_DIR", PIPELINES_DIR / "url_endpoint")
 NETWORKS_DIR = _dir_override("GN_NETWORKS_DIR", PIPELINES_DIR / "asn_cidr")
+CLOUD_DIR = _dir_override("GN_CLOUD_DIR", PIPELINES_DIR / "cloud_resource")
 
 # --------------------------------------------------------------------------- #
 # Which sibling artifacts feed the model
@@ -77,6 +78,7 @@ INCLUDE_NAMES = env_flag("GN_INCLUDE_NAMES", True)
 INCLUDE_PORTS = env_flag("GN_INCLUDE_PORTS", True)
 INCLUDE_URLS = env_flag("GN_INCLUDE_URLS", True)
 INCLUDE_NETWORKS = env_flag("GN_INCLUDE_NETWORKS", True)
+INCLUDE_CLOUD = env_flag("GN_INCLUDE_CLOUD", True)
 
 # --------------------------------------------------------------------------- #
 # Caps

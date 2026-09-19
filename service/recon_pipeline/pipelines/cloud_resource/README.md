@@ -97,10 +97,10 @@ sanitized**: S3 3–63 `[a-z0-9.-]`; Azure 3–24 lowercase alnum; GCS 3–63
 - **Fourth/fifth providers** (P2) — DigitalOcean Spaces, Backblaze B2, Firebase.
 - **Azure account/container splitting** (P2) — CNAMEs point at account-shaped
   hosts; no sibling artifact separates the container name.
-- **Graph writes** (`CloudResource` nodes, `STORED_IN`/`POINTS_TO` edges) —
-  file-only like every sibling until the schema finalizes.
-- **Takeover handoff** (P3) — `dangling.jsonl` is already S25's shape; the
-  detector itself is a separate, unbuilt stage.
+- **Graph writes** — done at the platform seam: `graph_normalize`'s `publish`
+  stage journals every bucket and `cname_points_to` edge through `GraphSink`.
+- **Takeover handoff** (P3) — built: `takeover.py` probes fingerprint-matched
+  CNAME claims (S25); `dangling.jsonl` remains the detector's raw material.
 
 ## Related
 

@@ -65,6 +65,9 @@ class RunRecord:
     degradations: dict = field(default_factory=dict)
     gate: dict = field(default_factory=dict)
     queue: dict = field(default_factory=dict)
+    #: The convergence loop's account of itself (rounds, verdict, ledger) — empty
+    #: for a one-round run, so the row keeps its old shape when nothing loops.
+    convergence: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -78,6 +81,7 @@ class RunRecord:
             "degradations": self.degradations,
             "gate": self.gate,
             "queue": self.queue,
+            **({"convergence": self.convergence} if self.convergence else {}),
         }
 
 

@@ -76,6 +76,13 @@ MAX_PROBES = env_int("CLOUD_MAX_PROBES", 512)
 #: CNAME answers, its ``output/live_hosts.txt`` the brand tokens).
 NAMES_DIR = CLOUD_DIR.parent / "subdomain_domain_wildcards"
 
+#: The takeover policy gate (S25): what a vulnerable finding *does*.  Until S4
+#: program ingestion decides it from real metadata, this is the operator's
+#: hand — ``informational`` records findings without a scoring signal,
+#: ``enforced`` promotes them.  The report always names which way the gate was
+#: set, so an informational finding is never mistaken for a scored one.
+TAKEOVER_POLICY = "informational"
+
 #: The URL pipeline's root (``output/urls.jsonl`` / ``javascript.txt`` /
 #: ``endpoints.txt`` carry provider-hosted URLs and bucket-name strings).
 URLS_DIR = CLOUD_DIR.parent / "url_endpoint"

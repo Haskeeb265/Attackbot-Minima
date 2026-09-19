@@ -11,11 +11,12 @@ one self-describing document holding the nodes, the edges, both contracts and a
 computed integrity check, which is what a downstream consumer (the
 vulnerability-finder engine) is handed instead of a directory of files.
 
-**It does not write to the graph database.** The Neo4j schema is not final, and a
-writer against a moving schema bakes in a vocabulary about to change. `emit`
-writes files; the platform's `GraphSink` is one call away when the schema
-settles, and the only file that changes then is
-[`vocabulary.py`](vocabulary.py).
+**It does not write to the graph database.** The pre-run Neo4j schema was
+removed on 2026-09-19 — it was designed before any recon run existed, so this
+pipeline's observed output never got to argue with it. `emit` writes files;
+`graph_state.json` is the anchor the replacement schema will be designed from,
+and the platform's `GraphSink` is the seam a future writer goes through. The
+only file that changes then is [`vocabulary.py`](vocabulary.py).
 
 ```
 collect    names · ports · URL · network artifacts   (files only, no sibling code)
@@ -76,7 +77,7 @@ What the translation is careful about:
 |---|---|
 | **Signals come from the node's sources** | each artifact label maps to an engine source key, so the engine's §4 weight applies |
 | `records` and `live_hosts` are **one** key | both are our own resolution — two artifacts of one kind corroborate once, they do not count twice |
-| **Ownership ≠ routing** | only a network with an `allocated_to` **edge** earns the ownership weight; an announced-only prefix (and an AS known only from announcements) scores in the third-party tier. The claim is read from the edge the merge wrote, never from the node's aggregated `classes` |
+| **Ownership ≠ routing** | only a network with an `owned_by` **edge** earns the ownership weight; an announced-only prefix (and an AS known only from announcements) scores in the third-party tier. The claim is read from the edge the merge wrote, never from the node's aggregated `classes` |
 | **A verdict is not evidence** | `cdn_classified.jsonl` contributes no signal at all; its effect is the shared-infrastructure penalty, which is the shape a judgement should take |
 | **Only provable penalties** | wildcard coverage we never resolved, and a CDN/cloud verdict on the address. No takedown and no `dead_host` penalty is applied — this tree has no takedown feed and no NXDOMAIN re-check, and inventing either would put a number on evidence nobody collected |
 | **Nothing claimed ⇒ no score** | a node whose only contributor is a judgement (`organization:cloudflare`, `organization:microsoft 365` in the run below) gets **no `score` field** and is counted in the report, because "nobody claimed this" is not "this scored zero" |
@@ -94,7 +95,7 @@ files needed to interpret it:
   "graph_state_version": 1,
   "target": "qbsco.net", "generated_at": "…",
   "produced_by": { "pipeline": "graph_normalize", "module": "…state" },
-  "status": { "graph_written": false, "note": "…provisional…",
+  "status": { "graph_written": false, "note": "…no database writer yet…",
               "scoring": "…", "unscored_nodes": "…" },
   "vocabulary": { "labels": {…}, "relationships": {…}, … },
   "scoring":    { "weights": {…}, "bands": {…}, "penalties_applied": […] },
@@ -125,27 +126,31 @@ inside `run` differ between two runs over the same artifacts.
 
 ## Node kinds and edge types
 
+Ten asset kinds (the settled schema of 2026-09-19), twelve edge types. Edge
+types name the **claim**, not the data shape: claims differing only in detail
+share a type and carry the detail as a property (`method`, `claim`); claims
+differing in who made them or in kind of assertion keep separate types. `first_seen`
+(write-once) and `last_seen` (monotonic max) travel on every node and edge.
+
 | Node | Identity | | Edge | Direction |
 |---|---|---|---|---|
-| `domain` | hostname, lowercase | | `resolves_to` | domain → ip (forward DNS we ran) |
-| `wildcard` | `*.example.com` | | `ptr_maps_to` | ip → domain (the network operator's label) |
+| `domain` | hostname, lowercase | | `resolves_to` | name ↔ address, with `method`: `a`/`aaaa` (our forward DNS), `ptr` (the operator's reverse label), `shodan` (a third party's index) |
+| `wildcard` | `*.example.com` | | `cname_points_to` | domain → cloud, carrying the probe outcome (`open` / `auth_required` / **`dangling`**) |
 | `ip` | `ipaddress` form | | `has_url` | domain → url |
 | `service` | `address:port/proto` | | `wildcard_covers` | wildcard → domain |
 | `url` | canonical URL | | `exposes_service` | ip → service |
 | `parameter` | parameter name | | `observed_parameter` | url → parameter (**where it was seen**, not a global list) |
-| | | | `redirects_to` | url → url (a live validation's redirect) |
-| | | | `in_network` | ip → network (the registry's own prefix) |
-| `asn` | AS number | | `belongs_to_asn` | ip → asn |
-| `network` | CIDR, network address | | `announced_by` | network → asn (a routing claim) |
-| `organization` | org name or handle | | `allocated_to` | network → organization (a registry claim) |
-| | | | `registered_to` | asn → organization |
-| | | | `hosted_by` | ip → organization (a classification verdict) |
-| | | | `attributed_to` | domain → ip (a third party's index, not PTR) |
+| `cloud` | `provider:name` (endpoint spellings are properties, never identity) | | `redirects_to` | url → url (a live validation's redirect) |
+| `asn` | AS number | | `in_network` | ip → network (the registry's own prefix) |
+| `network` | CIDR, network address | | `belongs_to_asn` | ip → asn |
+| `organization` | org name or handle | | `announced_by` | network → asn (a routing claim, never ownership) |
+| | | | `owned_by` | network/asn → organization, with `claim`: `allocation` or `registration` |
+| | | | `hosted_by` | ip → organization (a classification verdict — inferred, never ownership) |
 
 `vocabulary.json` (written by every run) carries the same mapping against the
-graph's label and relationship names, with the note that they are provisional. A
-test asserts that every kind and every edge type has a mapping, so a new kind
-cannot be added without deciding what the graph write would call it.
+graph's label and relationship names. A test asserts that every kind and every
+edge type has a mapping, so a new kind cannot be added without deciding what
+the graph write would call it.
 
 ## Artifacts
 
@@ -184,7 +189,7 @@ emit 0.15 s).
 |---|---|
 | nodes / edges | **6 817 / 6 842** |
 | by kind | network 3 431 · url 3 254 · service 60 · ip 33 · domain 17 · organization 16 · asn 3 · parameter 3 |
-| by edge | announced_by 3 417 · has_url 3 254 · exposes_service 60 · resolves_to 25 · allocated_to 19 · belongs_to_asn 19 · in_network 19 · hosted_by 18 · registered_to 6 · attributed_to 5 |
+| by edge | announced_by 3 419 · has_url 2 898 · observed_parameter 319 · exposes_service 31 · owned_by 16 · resolves_to 27 · in_network 13 · belongs_to_asn 13 · redirects_to 80 · hosted_by 12 (measured rebuild after the settled schema; the earlier counts predate it) |
 | by trust | discovered 6 785 · observed 31 · declared 1 |
 | bands | medium 6 690 · core 59 · low 55 · high 11 · unscored 2 |
 | score range | 25 – 100 |
@@ -338,8 +343,9 @@ internet that merely resemble the target.
 
 ## Honest gaps
 
-- **No graph writes.** By design, until the schema is final. `graph_state.json`
-  is the state a writer would load; nothing consumes it yet.
+- **No graph writes.** By design, until a schema is designed from this
+  pipeline's own output. `graph_state.json` is the state a writer would load
+  and the evidence base for that design; nothing consumes it yet.
 - **Service nodes carry no scope verdict.** The scope engine asks its question of
   places (a domain, an address, a network), so a `service` node has to be read
   through its `exposes_service` edge to the address that is in or out of scope.
@@ -432,9 +438,10 @@ promote a discovered asset.
 1. **The vulnerability-finder engine consumes `graph_state.json`.** Everything it
    needs is in the one document: what each node is, what it is worth looking at,
    what it is connected to, and which claims are weak.
-2. **Settle the schema**, then edit `GRAPH_LABELS` / `GRAPH_RELATIONSHIPS` and
-   have a writer feed `context.graph` from the state document; `graph_written`
-   stays `false` until that writer exists.
+2. **Design the schema from `graph_state.json`** (the pre-run guess was removed
+   2026-09-19 for exactly this reason), then edit `GRAPH_LABELS` /
+   `GRAPH_RELATIONSHIPS` and have a writer feed `context.graph` from the state
+   document; `graph_written` stays `false` until that writer exists.
 3. **Reconcile organisations** (see the gap above) — the one place the model is
    knowingly fragmentary, and the one place a graph would beat a file.
 4. **Diff two runs' models** — the artifacts are deterministic, so the diff is

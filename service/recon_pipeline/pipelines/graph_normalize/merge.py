@@ -55,6 +55,9 @@ SOURCE_LABEL = {
     "url_validations": "url_endpoint:validation",
     "networks": "asn_cidr:networks",
     "asns": "asn_cidr:asns",
+    # cloud pipeline
+    "buckets": "cloud_resource:probe",
+    "dangling": "cloud_resource:dangling",
 }
 
 #: URL roles: which derived artifact a URL appeared in, and what that means.
@@ -190,6 +193,7 @@ def _merge_source(
         "port_service_host": _merge_ports,
         "url_endpoint": _merge_urls,
         "asn_cidr": _merge_networks,
+        "cloud_resource": _merge_cloud,
     }
     handler = dispatch.get(source.name)
     if handler is None:
@@ -272,6 +276,7 @@ def _merge_names(
             evidence=f"resolved by our DNS stage (status {row.get('status_code', '?')})",
             max_nodes=max_nodes,
             max_evidence=max_evidence,
+            at=str(row.get("timestamp", "")),
         )
         if domain is None:
             continue
@@ -288,6 +293,7 @@ def _merge_names(
                     props={"family": 6 if record_type == "aaaa" else 4},
                     max_nodes=max_nodes,
                     max_evidence=max_evidence,
+                    at=str(row.get("timestamp", "")),
                 )
                 model.add_edge(
                     vocab.RESOLVES_TO,
@@ -299,6 +305,7 @@ def _merge_names(
                     evidence=f"{record_type.upper()} answer for {host}",
                     max_edges=max_edges,
                     max_evidence=max_evidence,
+                    at=str(row.get("timestamp", "")),
                 )
 
     # Wildcards: the answer itself, and whether the stage suppressed it.
@@ -384,11 +391,12 @@ def _merge_ports(
                     max_evidence=max_evidence,
                 )
                 model.add_edge(
-                    vocab.REGISTERED_TO,
+                    vocab.OWNED_BY,
                     asn_id,
                     org_id,
                     source=SOURCE_LABEL["ownership"],
                     trust=vocab.DISCOVERED,
+                    props={"claim": "registration"},
                     evidence=f"registry names AS{asn} as {as_name}",
                     max_edges=max_edges,
                     max_evidence=max_evidence,
@@ -441,11 +449,12 @@ def _merge_ports(
                     max_evidence=max_evidence,
                 )
                 model.add_edge(
-                    vocab.ALLOCATED_TO,
+                    vocab.OWNED_BY,
                     network_id,
                     org_id,
                     source=SOURCE_LABEL["ownership"],
                     trust=vocab.DISCOVERED,
+                    props={"claim": "allocation"},
                     evidence=f"RDAP allocation: {holder} holds {prefix}",
                     max_edges=max_edges,
                     max_evidence=max_evidence,
@@ -560,11 +569,12 @@ def _merge_ports(
                 max_evidence=max_evidence,
             )
             model.add_edge(
-                vocab.ATTRIBUTED_TO,
+                vocab.RESOLVES_TO,
                 vocab.node_id(vocab.DOMAIN, host),
                 address_id,
                 source=SOURCE_LABEL["passive_intel"],
                 trust=vocab.DISCOVERED,
+                props={"method": "shodan"},
                 evidence=f"InternetDB lists {host} on {address}",
                 max_edges=max_edges,
                 max_evidence=max_evidence,
@@ -589,11 +599,12 @@ def _merge_ports(
                 max_evidence=max_evidence,
             )
             model.add_edge(
-                vocab.PTR_MAPS_TO,
+                vocab.RESOLVES_TO,
                 vocab.node_id(vocab.IP, address),
                 vocab.node_id(vocab.DOMAIN, host),
                 source=SOURCE_LABEL["ptr"],
                 trust=vocab.DISCOVERED,
+                props={"method": "ptr"},
                 evidence=f"PTR for {address}",
                 max_edges=max_edges,
                 max_evidence=max_evidence,
@@ -869,6 +880,7 @@ def _merge_url_validations(
             ),
             max_nodes=max_nodes,
             max_evidence=max_evidence,
+            at=str(row.get("validated_at", "")),
         )
         result.url_validations += 1
         if serving:
@@ -910,6 +922,7 @@ def _merge_url_validations(
             evidence=f"{url} answered with a redirect to {final_url}",
             max_edges=max_edges,
             max_evidence=max_evidence,
+            at=str(row.get("validated_at", "")),
         )
 
     # Contradictions are *represented*, not resolved by dropping one of the two
@@ -1076,11 +1089,12 @@ def _merge_networks(
                     max_evidence=max_evidence,
                 )
                 model.add_edge(
-                    vocab.REGISTERED_TO,
+                    vocab.OWNED_BY,
                     vocab.node_id(vocab.ASN, asn),
                     org_id,
                     source=SOURCE_LABEL["networks"],
                     trust=vocab.DISCOVERED,
+                    props={"claim": "registration"},
                     evidence=f"registry names AS{asn} as {as_name}",
                     max_edges=max_edges,
                     max_evidence=max_evidence,
@@ -1107,11 +1121,12 @@ def _merge_networks(
                     max_evidence=max_evidence,
                 )
                 model.add_edge(
-                    vocab.ALLOCATED_TO,
+                    vocab.OWNED_BY,
                     network_id,
                     org_id,
                     source=SOURCE_LABEL["networks"],
                     trust=vocab.DISCOVERED,
+                    props={"claim": "allocation"},
                     evidence=f"RDAP allocation: {holder} holds {network}",
                     max_edges=max_edges,
                     max_evidence=max_evidence,
@@ -1134,6 +1149,164 @@ def _merge_networks(
             max_nodes=max_nodes,
             max_evidence=max_evidence,
         )
+
+
+# --------------------------------------------------------------------------- #
+# cloud pipeline
+# --------------------------------------------------------------------------- #
+
+
+_CLOUD_OUTCOME = {
+    "open": "open",
+    "auth_required": "auth_required",
+    "dangling": "dangling",
+    "absent": "dangling",
+    "nxdomain_absent": "dangling",
+    "exists_other_region": "exists_other_region",
+}
+
+
+def _merge_cloud(
+    result: MergeResult,
+    source: SourceFacts,
+    *,
+    max_nodes: int | None,
+    max_edges: int | None,
+    max_evidence: int,
+) -> None:
+    """Cloud resources: the one asset kind the file model was missing.
+
+    A bucket row becomes a ``cloud`` node whose identity is ``provider:name`` —
+    the two facts about it that never change — with the probe outcome as
+    properties.  A row with CNAME claimants also writes one ``cname_points_to``
+    edge per claimant: the dangling reference, the run's most actionable
+    finding, is one traversable edge carrying its outcome, not a row in a pile.
+    """
+    model = result.model
+    label = SOURCE_LABEL["buckets"]
+
+    # One write per bucket: the *latest* probe's outcome is the node's state
+    # (that is what ``last_seen`` semantics mean), and the rows for one bucket
+    # are folded before any write so a later probe never dies as a property
+    # conflict.  Claimants union across every probe row; outcome, code and
+    # status come from the newest row.
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for row in source.streams.get("buckets", []):
+        name = str(row.get("name", "")).strip().lower()
+        provider = str(row.get("provider", "")).strip().lower()
+        if not name or not provider:
+            continue
+        grouped.setdefault((provider, name), []).append(row)
+    for (provider, name), rows in sorted(grouped.items()):
+        row = max(rows, key=lambda item: str(item.get("probed_at", "")))
+        claimants = sorted({str(c) for item in rows for c in _as_list(item.get("claimants"))})
+        state = str(row.get("state", "")).strip()
+        outcome = _CLOUD_OUTCOME.get(state, "")
+        at = str(row.get("probed_at", ""))
+        # A distinctive CNAME-claimed bucket is an asset the target's own DNS
+        # vouched for; a brand-derived candidate is a guess about naming, so it
+        # stays discovered.  Decided *before* the write: trust merges by taking
+        # the strongest claim, so a wrong first write cannot be taken back.
+        trust = vocab.OBSERVED if "cname" in _as_list(row.get("origins")) else vocab.DISCOVERED
+        cloud_identity = norm.cloud_identity(provider, name)
+        cloud_id = vocab.node_id(vocab.CLOUD, cloud_identity)
+        model.add_node(
+            vocab.CLOUD,
+            cloud_identity,
+            source=label,
+            trust=trust,
+            props={
+                "provider": provider,
+                "bucket": name,
+                # The outcome of the latest probe: open (listable), auth_required
+                # (exists, refuses anonymous reads), dangling (the provider says
+                # no such bucket), exists_other_region.  ``unavailable`` rows
+                # carry no outcome — the probe failed, which is not knowledge.
+                **({"outcome": outcome} if outcome else {}),
+                **({"probe_code": str(row.get("code", ""))} if row.get("code") else {}),
+                "probe_url": str(row.get("probe_url", "")),
+                "http_status": row.get("http_status"),
+                "evidence_class": str(row.get("evidence_class", "")),
+            },
+            evidence=f"probed: {state or 'unknown'}"
+            + (f" ({row.get('code')})" if row.get("code") else ""),
+            max_nodes=max_nodes,
+            max_evidence=max_evidence,
+            at=at,
+        )
+        # The edge is the finding: name -> cloud, with the outcome on it.  A row
+        # without claimants (derived/branded candidates) writes no edge — there is
+        # no name to hang it on, and inventing one would fabricate the relation.
+        for claimant in claimants:
+            host = norm.domain_identity(str(claimant))
+            if not host:
+                continue
+            model.add_node(
+                vocab.DOMAIN,
+                host,
+                source=label,
+                trust=vocab.OBSERVED,
+                evidence="this host's DNS names a cloud resource",
+                max_nodes=max_nodes,
+                max_evidence=max_evidence,
+                at=at,
+            )
+            model.add_edge(
+                vocab.CNAME_POINTS_TO,
+                vocab.node_id(vocab.DOMAIN, host),
+                cloud_id,
+                source=label,
+                trust=vocab.OBSERVED,
+                props={
+                    **({"outcome": outcome} if outcome else {}),
+                    **({"code": str(row.get("code", ""))} if row.get("code") else {}),
+                    "probe_url": str(row.get("probe_url", "")),
+                },
+                evidence=f"CNAME claim probed: {state or 'unknown'}",
+                max_edges=max_edges,
+                max_evidence=max_evidence,
+                at=at,
+            )
+
+    # The dangling artifact restates the strongest subset — keep it merged into
+    # the same nodes/edges rather than a second model: the artifact exists so the
+    # finding survives on its own, and reading it here corroborates the rows the
+    # buckets stream already produced.
+    for row in source.streams.get("dangling", []):
+        name = str(row.get("name", "")).strip().lower()
+        provider = str(row.get("provider", "")).strip().lower()
+        at = str(row.get("probed_at", ""))
+        if not name or not provider:
+            continue
+        cloud_identity = norm.cloud_identity(provider, name)
+        cloud_id = vocab.node_id(vocab.CLOUD, cloud_identity)
+        model.add_node(
+            vocab.CLOUD,
+            cloud_identity,
+            source=SOURCE_LABEL["dangling"],
+            trust=vocab.OBSERVED,
+            props={"outcome": "dangling"},
+            evidence="CNAME-claimed resource the provider reports as absent",
+            max_nodes=max_nodes,
+            max_evidence=max_evidence,
+            at=at,
+        )
+        for claimant_row in _as_list(row.get("claimants")):
+            host = norm.domain_identity(str(claimant_row))
+            if not host:
+                continue
+            model.add_edge(
+                vocab.CNAME_POINTS_TO,
+                vocab.node_id(vocab.DOMAIN, host),
+                cloud_id,
+                source=SOURCE_LABEL["dangling"],
+                trust=vocab.OBSERVED,
+                props={"outcome": "dangling", "code": str(row.get("code", ""))},
+                evidence="CNAME-claimed resource the provider reports as absent",
+                max_edges=max_edges,
+                max_evidence=max_evidence,
+                at=at,
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -1227,6 +1400,10 @@ def derived_operations(model: norm.Model, node: norm.Node) -> set[str]:
         operations.add("port_scan")
     if node.kind == vocab.DOMAIN and records in sources:
         operations.add("dns_resolution")
+    if node.kind == vocab.CLOUD and SOURCE_LABEL["buckets"] in sources:
+        # Our own probe is the only sound proof the bucket was checked — same
+        # rule as the scan: a third party's word is not an attempt by us.
+        operations.add("cloud_probe")
     if node.kind == vocab.URL and validations in sources:
         operations.add("url_validation")
     if node.kind == vocab.PARAMETER or any(
@@ -1261,7 +1438,7 @@ def _annotate_network_relevance(result: MergeResult) -> None:
     from service.recon_pipeline.platform import escalation
 
     allocated_ids = {
-        edge.source_id for edge in result.model.edges.values() if edge.type == vocab.ALLOCATED_TO
+        edge.source_id for edge in result.model.edges.values() if edge.type == vocab.OWNED_BY
     }
     counts: dict[str, int] = {}
     for node in result.model.nodes.values():
@@ -1489,16 +1666,25 @@ def _strings(values: list[object]) -> list[str]:
 def _register_dns_scope(result: MergeResult, scope) -> int:
     """Hand the engine the model's own DNS evidence: name → address.
 
-    A ``resolves_to`` edge is a record we observed, and it is the *only* thing
-    this adds — no inference, no names from artifacts nobody resolved.  Only
-    the target's own names count: a ``needs_review`` hostname cannot drag an
-    address into scope, and an explicit refusal always wins (both rules live in
-    the engine, not here).  Edges are walked in a deterministic order so the
-    registration — and therefore every verdict — is identical between runs.
+    A ``resolves_to`` edge the *records* stream contributed to is a resolution
+    we performed, and it is the only thing this adds — no inference, no names
+    from artifacts nobody resolved.  The same edge type also carries other
+    hands' claims of the same shape (``method: ptr`` — the operator's reverse
+    label; ``method: shodan`` — a third party's per-address list), and those
+    are not ours to act on: whose evidence an edge holds is read from its
+    ``sources``, not from its type, which is exactly why the fold kept one type
+    and put the method on the edge.  Only the target's own names count: a
+    ``needs_review`` hostname cannot drag an address into scope, and an
+    explicit refusal always wins (both rules live in the engine, not here).
+    Edges are walked in a deterministic order so the registration — and
+    therefore every verdict — is identical between runs.
     """
     registered = 0
+    records = SOURCE_LABEL["records"]
     for edge in sorted(result.model.edges.values(), key=lambda item: item.key):
         if edge.type != vocab.RESOLVES_TO:
+            continue
+        if records not in edge.sources:
             continue
         source = result.model.nodes.get(edge.source_id)
         target = result.model.nodes.get(edge.target_id)

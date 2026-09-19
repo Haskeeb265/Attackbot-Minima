@@ -60,6 +60,11 @@ class Candidate:
     sources: set[str] = field(default_factory=set)
     #: The exact strings that gave the name away (CNAME target, URL, …).
     evidence: list[str] = field(default_factory=list)
+    #: The hostnames whose own DNS *claimed* this resource — for a CNAME-origin
+    #: candidate, the target's hosts that point at it.  This is what lets the
+    #: graph write a ``cname_points_to`` edge with both ends: the claim travels
+    #: with the claim.
+    claimants: list[str] = field(default_factory=list)
     #: False when every token behind the name is a generic word (``mail``,
     #: ``cdn``): provider names are globally namespaced, so such a name could
     #: belong to anyone.  An *observed* claim (CNAME/URL) is distinctive by
@@ -73,6 +78,9 @@ class Candidate:
         for item in other.evidence:
             if item not in self.evidence:
                 self.evidence.append(item)
+        for item in other.claimants:
+            if item not in self.claimants:
+                self.claimants.append(item)
         if other.distinctive:
             self.distinctive = True
 
@@ -87,6 +95,7 @@ class Candidate:
             "origins": sorted(self.origins),
             "sources": sorted(self.sources),
             "evidence": list(self.evidence),
+            **({"claimants": sorted(self.claimants)} if self.claimants else {}),
             "distinctive": self.distinctive,
         }
 

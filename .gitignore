@@ -198,9 +198,17 @@ service/recon_pipeline/pipelines/cloud_resource/output/
 
 # ASM platform run artifacts: one directory per run (summary.json + a report per
 # stage), the shared run timeline runs.jsonl the `history` command reads, and the
-# graph journal written while Neo4j is down (flushed by `replay`). All of it is
-# state, not source — the pipelines' curated inputs stay tracked.
+# graph journal (writes offered to the graph sink while no schema exists — the
+# future migration's replay source). All of it is state, not source — the
+# pipelines' curated inputs stay tracked.
 /output/
+
+# `run_recon.py --until-converged` artifacts, written next to the combined report:
+# the round-by-round account and the per-engagement frontier ledger. State, not
+# source, and reproduced by re-running the loop.
+/recon_*_convergence_*.json
+/recon_*_ledger_*.jsonl
+/recon_*_attempts_*.jsonl
 
 # Scratch directories used for ad-hoc live verification runs (wordlist/resolver
 # experiments, temporary mounts). Never source.

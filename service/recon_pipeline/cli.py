@@ -6,7 +6,7 @@ Subcommands:
 - ``run``                  — run pipelines against a target (the default action)
 - ``history``              — the run registry (last N runs)
 - ``dlq``                  — inspect the dead-letter queue
-- ``replay``               — replay a graph journal into Neo4j
+- ``replay``               — reports the journaled graph writes awaiting the future schema (no schema exists yet)
 
 ``run_recon.py`` remains for the legacy combined-report workflow; everything
 it does routes through this module's runner.
@@ -46,13 +46,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="forward key=value to pipelines (repeatable)",
     )
     run.add_argument("--output-root", default=None, help="runs/ root (default: repo output/)")
+    run.add_argument(
+        "--until-converged", "--converge", action="store_true", dest="converge",
+        help=(
+            "loop rounds until the discovery frontier stops growing (or a budget "
+            "says stop); later rounds re-run only pipelines' declared repeat stages"
+        ),
+    )
+    run.add_argument(
+        "--max-rounds", type=int, default=None,
+        help="round ceiling for --until-converged (default 4)",
+    )
+    run.add_argument(
+        "--time-budget", type=float, default=None,
+        help="seconds allowed for the whole converged run (default 2700; 0 = no limit)",
+    )
+    run.add_argument(
+        "--max-active-actions", type=int, default=None,
+        help="cumulative active actions across all rounds (0 = unlimited)",
+    )
 
     history = sub.add_parser("history", help="show recent runs")
     history.add_argument("-n", "--limit", type=int, default=10)
     history.add_argument("-t", "--target", default=None, help="filter to one target")
 
     sub.add_parser("dlq", help="inspect the dead-letter queue")
-    sub.add_parser("replay", help="replay the graph journal into Neo4j")
+    sub.add_parser("replay", help="report journaled graph writes awaiting the future schema")
     return parser
 
 
@@ -121,10 +140,35 @@ def _cmd_run(args) -> int:
         pipelines=args.pipelines,
         stages=args.stages,
         options=options,
+        convergence=_stop_policy(args) if args.converge else None,
     )
 
     print(json.dumps(result.summary, indent=2, sort_keys=True))
+    if result.convergence:
+        verdict = result.convergence.get("verdict") or {}
+        message = (
+            f"converged after {result.convergence.get('rounds_run')} round(s): "
+            f"{verdict.get('reason')} — {verdict.get('detail')}"
+        )
+        if result.convergence.get("exhausted"):
+            colorlog.log.success(message)
+        else:
+            colorlog.log.warn(message)
     return 0 if result.ok else 1
+
+
+def _stop_policy(args):
+    """Build the loop's limits from the CLI, keeping the conservative defaults."""
+    from .platform.convergence import StopPolicy
+
+    policy = StopPolicy()
+    if args.max_rounds is not None:
+        policy.max_rounds = max(1, args.max_rounds)
+    if args.time_budget is not None:
+        policy.time_budget_seconds = max(0.0, args.time_budget)
+    if args.max_active_actions is not None:
+        policy.max_active_actions = max(0, args.max_active_actions)
+    return policy
 
 
 def _cmd_history(args) -> int:
@@ -176,16 +220,15 @@ def _cmd_dlq() -> int:
 
 
 def _cmd_replay() -> int:
-    from .platform.graph.ingest import GraphSink, connect_repository
+    from .platform.graph.ingest import GraphSink
 
-    repository = connect_repository()
-    sink = GraphSink(repository=repository, journal_path=_runs_root() / "graph_journal.jsonl")
-    if not sink.available:
-        colorlog.log.failed(f"graph unavailable: {sink.health.reason}")
-        return 1
-    replayed = sink.replay_journal()
-    colorlog.log.success(f"replayed {replayed} journaled write(s) into Neo4j")
-    return 0
+    sink = GraphSink(journal_path=_runs_root() / "graph_journal.jsonl")
+    pending = sink.replay_journal()
+    colorlog.log.failed(
+        f"no graph schema is defined yet — {pending} write(s) replayed; "
+        f"the journal at {sink.journal_path} is preserved for the migration"
+    )
+    return 1
 
 
 def _runs_root() -> Path:

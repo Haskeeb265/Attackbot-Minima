@@ -51,8 +51,25 @@ MANIFEST = Manifest(
             "write nodes.jsonl / edges.jsonl / vocabulary.json / scoring.json / "
             "graph_state.json / report.json",
         ),
+        Stage(
+            "publish",
+            "feed the settled model through the platform's graph sink "
+            "(context.graph) — journaled per write while no database is wired",
+        ),
     ),
     passive_only=True,
+    #: A model reader: it consumes the frontier, it does not feed one.  Its own
+    #: front-matter is the node set, which the convergence driver does not need to
+    #: look at — the collectors' artifacts say the same thing more cheaply.
+    frontier_artifacts=(),
+    #: Rebuilt every round, always: the whole point of the handoff document is to
+    #: describe the surface *as it ended up*, not as it looked after round 1.  It is
+    #: pure file reading over artifacts, measured at 0.5–0.8 s.
+    repeat_stages=("collect", "merge", "emit", "publish"),
+    #: Rebuilt whenever *anything* new appeared.  When nothing did, the last round's
+    #: document already describes the current surface and re-emitting it would be
+    #: churn, so the loop skips this too.
+    repeat_on=("host", "ip", "url", "net"),
 )
 
 
@@ -62,6 +79,17 @@ class GraphNormalizePipeline(BasePipeline):
     def __init__(self) -> None:
         self._facts: list[Any] | None = None
         self._result: Any = None
+
+    def reset(self) -> None:
+        """Re-collect from scratch, so a convergence round rebuilds the model.
+
+        ``collect``/``merge``/``emit`` share one pass's intermediate state; kept
+        across rounds it would re-emit round 1's model while the round's fresh
+        artifacts sat unread — the handoff document would describe a surface that
+        no longer exists.
+        """
+        self._facts = None
+        self._result = None
 
     # ------------------------------------------------------------------ #
 
@@ -78,8 +106,15 @@ class GraphNormalizePipeline(BasePipeline):
             if self._result is None:
                 earlier = {**earlier, **self._merge(context)}
             return {**earlier, **self._emit(context)}
+        if stage == "publish":
+            prior: dict[str, Any] = {}
+            if self._facts is None:
+                prior = self._collect(context)
+            if self._result is None:
+                prior = {**prior, **self._merge(context)}
+            return {**prior, **self._publish(context)}
         raise ValueError(
-            f"graph_normalize has no stage {stage!r}; declared: collect, merge, emit"
+            f"graph_normalize has no stage {stage!r}; declared: collect, merge, emit, publish"
         )
 
     # ------------------------------------------------------------------ #
@@ -149,6 +184,53 @@ class GraphNormalizePipeline(BasePipeline):
             "notes": report.notes,
         }
 
+
+    def _publish(self, context: RunContext) -> dict[str, Any]:
+        """Offer every node and edge to ``context.graph`` — the consumer seam.
+
+        The sink is the platform's, not this pipeline's: when it is absent
+        (standalone run) publishing is skipped with a note, never an error. Each
+        write is one call — identity pair plus payload — and the sink decides
+        what a write means (today: journal it; tomorrow: merge it into a
+        database). This stage never needs re-running between two emitters of the
+        same model, so its report counts what it offered, honestly.
+        """
+        assert self._result is not None  # _merge ran immediately before
+        sink = context.graph
+        if sink is None:
+            return {
+                "ok": True,
+                "counts": {"graph_offered": 0},
+                "notes": ["publish: no graph sink in this run context — skipped"],
+            }
+        model = self._result.model
+        offered = 0
+        for node in model.sorted_nodes():
+            sink.write(node.kind, node.identity, node.to_dict(), source="graph_normalize:model")
+            offered += 1
+        for edge in model.sorted_edges():
+            sink.write(
+                edge.type,
+                f"{edge.source_id}->{edge.target_id}",
+                edge.to_dict(),
+                source="graph_normalize:model",
+            )
+            offered += 1
+        health = getattr(sink, "health", None)
+        return {
+            "ok": True,
+            "counts": {
+                "graph_offered": offered,
+                "graph_available": bool(getattr(sink, "available", False)),
+                "graph_journaled": getattr(health, "journaled", 0),
+            },
+            "notes": [
+                f"publish: {offered} write(s) offered to the graph sink"
+                + (
+                    f" ({getattr(health, 'reason', '')})" if health else ""
+                ),
+            ],
+        }
 
     @staticmethod
     def _dir_options(options: dict[str, str]) -> dict[str, Any]:

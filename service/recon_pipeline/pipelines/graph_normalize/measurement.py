@@ -44,7 +44,7 @@ from . import vocabulary as vocab
 #: Node kinds whose evidence state is worth counting in the evidence block.  The
 #: three that carry operational weight: names/addresses (hosts and IPs), URLs, and
 #: networks.
-EVIDENCE_KINDS: tuple[str, ...] = (vocab.DOMAIN, vocab.IP, vocab.URL, vocab.NETWORK)
+EVIDENCE_KINDS: tuple[str, ...] = (vocab.DOMAIN, vocab.IP, vocab.URL, vocab.NETWORK, vocab.CLOUD)
 
 #: Evidence states, in report order, so two runs print the same table.
 EVIDENCE_STATES: tuple[str, ...] = (

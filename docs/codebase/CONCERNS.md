@@ -1,9 +1,9 @@
 # Concerns
 
 Current, verified gaps. Everything here was checked against the code on
-2026-09-16 unless marked otherwise. Items that older revisions of this document
-listed and that no longer apply are noted at the bottom — do not re-add them
-without checking.
+2026-09-16 unless marked otherwise (counts re-verified 2026-09-19). Items that
+older revisions of this document listed and that no longer apply are noted at
+the bottom — do not re-add them without checking.
 
 ## Blocking
 
@@ -44,19 +44,26 @@ ingestion with no backoff to absorb it.
 with provenance, trust classes, scope verdicts and **an S2 score and band on
 every claimed node**, and emits the whole thing as `graph_state.json` — a
 self-describing handoff document for the vulnerability-finder engine. It still
-emits **files** and writes no database rows, because the Neo4j schema is not
-final; that is deliberate rather than an oversight. What remains:
+emits **files** and writes no database rows: the pre-run Neo4j schema was
+removed on 2026-09-19 (it was designed before any recon run existed, so every
+label in it was a guess), and the replacement is to be designed **from**
+`graph_state.json` before code is written again. What remains:
 
 * nothing **ingests** `graph_state.json` yet — the vulnerability-finder engine
   does not exist, so the state document is verified by tests and by hand, not by
   its intended consumer;
-* `platform/graph/ingest.py`'s `GraphSink` (`write_asset` / `write_edge` /
-  `write_resolution` / `ingest_program`) plus its replayable journal is built and
-  handed to every pipeline as `context.graph`, and **no pipeline calls it**;
+* `platform/graph/ingest.py`'s `GraphSink` is handed to every pipeline as
+  `context.graph` and **no pipeline calls it**; until the schema exists it
+  journals every offered write and reports `available=False` with that reason;
 * seed ingestion from Postgres (the other half of S4) is unbuilt;
 * organisations are not reconciled — one real organisation appears as several
   `organization` nodes (Cymru's name, RDAP's name, the handle), which is the one
-  place the model is knowingly fragmentary.
+  place the model is knowingly fragmentary;
+* the newest collector, `cloud_resource` (buckets, 2026-09-18), is **not read by
+  the model at all yet** — `graph_normalize`'s vocabulary has no cloud kind, so
+  its manifest does not declare `cloud_resource` in `consumes` (P2; a test pins
+  exactly what changes when it does), which means `graph_state.json` currently
+  has no representation of buckets or their dangling references.
 
 **Impact:** the model is consumable as one JSON document rather than a directory,
 but its only reader is currently a human or a test. The dependency chain is
@@ -88,9 +95,9 @@ containerised.
 
 ### 6. No CI
 
-No workflow configuration exists, so the 1128 hermetic recon tests are never run
-automatically. They are fast (≈10 s) and dependency-light, which makes them the
-cheapest thing to wire into CI first.
+No workflow configuration exists, so the 1 373 hermetic recon tests are never
+run automatically. They are fast (≈51 s) and dependency-light, which makes them
+the cheapest thing to wire into CI first.
 
 ### 7. Config/code drift for planned subsystems
 
@@ -102,19 +109,22 @@ still declares nothing, which means `redis`, `neo4j` and the recon stages'
 dependencies are undeclared (see #2), and no LLM provider SDK or key exists
 anywhere — `platform/enrich.py` is built but permanently `available=False` here.
 
-### 8. The Neo4j integration test is not part of the suite
+### 8. There is no graph schema to test
 
-`tests/recon/test_repository.py` needs a live Neo4j, so it is excluded from the
-1128 and easy to forget. It is also the only coverage for the multi-label write
-contract that every future graph writer must follow.
+The pre-run schema and its live-Neo4j test (`tests/recon/test_repository.py`)
+were removed with the guess on 2026-09-19 — designing them from the plan before
+any recon run existed made every label speculation. The schema discussion starts
+from `graph_state.json` (6 476 observed assets). Whatever design comes out of it
+needs its own verification story from day one — hermetic against a fake driver
+plus one live smoke test — so this concern does not repeat.
 
-### 9. Graph writes are only as idempotent as their label sets
+### 9. Graph writes must merge on identity, whatever the schema says
 
-`MERGE` matches on the full label set, so writing the same
-`(asset_type, canonical_value)` under a *different* set of labels raises a
-constraint violation instead of updating. This is by design (documented in
-`graph_crud_contract.md`) but it is a sharp edge for every new writer: typed
-labels must not drift for one identity.
+The removed design's one sharp lesson worth keeping: `MERGE` matches on the
+full label set, so writing the same `(asset_type, canonical_value)` under a
+different set of labels would duplicate or violate instead of update. The
+requirement — one canonical identity per asset, stable across writes — survives
+the schema change; the journal already records exactly that identity pair.
 
 ### 9b. A full three-pipeline run takes ~22 minutes, and the names stage is the slow part by design
 
@@ -176,9 +186,9 @@ These appeared in earlier revisions of this document and are fixed or were never
 true of the current code:
 
 - **The scraper test suite did not collect** (2026-09-16) —
-  `test_hackerone_mapper.py` opened a fixture at import time and aborted `pytest`
-  collection for the whole tree. It is now a skipping pytest test; `pytest tests/`
-  runs cleanly (1128 passed, 1 skipped).
+`test_hackerone_mapper.py` opened a fixture at import time and aborted `pytest`
+collection for the whole tree. It is now a skipping pytest test; `pytest tests/`
+runs cleanly (1 373 passed, 1 skipped).
 - **`DATABASE_URL` printed to stdout** — `config.py` has no print statement.
 - **Missing per-program transaction boundary** — `ingest_program()` wraps each
   program in `db.atomic(conn)` inside a run-scoped connection, with failures
@@ -197,7 +207,7 @@ true of the current code:
 
 ## Evidence
 
-- `python -m pytest tests/ -q` → `1128 passed, 1 skipped`; `pytest tests/scraper --collect-only -q` → 1 collected (skips by design)
+- `python -m pytest tests/ -q` → `1 373 passed, 1 skipped`; `pytest tests/scraper --collect-only -q` → 1 collected (skips by design)
 - `requirements.txt`, `config.py`, `shared/connectors/*`, `service/scraper/*`
 - `Dockerfile` (0 bytes), `docker/` (empty), `docker-compose.yml`
 - `service/recon_pipeline/platform/graph/*` and `tests/recon/test_repository.py`

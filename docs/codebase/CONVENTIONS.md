@@ -52,7 +52,7 @@ breaking every import.
   for master/detail rows, full delete-then-insert for weaknesses/exclusions, and
   `MERGE` on identity properties for graph nodes.
 - **Pass parameters, never interpolate** — every query takes a params tuple.
-  Identifiers that must be interpolated (Neo4j labels, `SET` keys) go through a
+  Identifiers that must be interpolated (database labels, `SET` keys) go through a
   dedicated escaping helper (`_label_clause`).
 
 ## Function-first, registry-driven

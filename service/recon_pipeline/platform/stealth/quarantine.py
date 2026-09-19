@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -306,3 +307,31 @@ class Quarantine:
 def host_scope(host: str) -> str:
     """Scope key for a host: namespaced so it cannot collide with ``global``."""
     return f"host:{host.strip().lower().rstrip('.')}"
+
+
+def blocked_state(paths: Iterable[Path | str] = ()) -> tuple[bool, str]:
+    """Is any persisted quarantine refusing work right now, and why?
+
+    The caller passes every store worth consulting, because there is usually
+    more than one: unless ``STEALTH_QUARANTINE_FILE`` points them all at a shared
+    file, each active stage keeps its own under its ``output/`` directory — so a
+    reader that checked only the shared setting would see nothing on the default
+    configuration and quietly conclude "never blocked".
+
+    Best-effort by design: an absent or unreadable store is not a block, and a
+    failure to check must never end a run.
+    """
+    scopes: set[str] = set()
+    for path in paths:
+        try:
+            store = Quarantine(path=path)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("ignoring quarantine store %s: %s", path, exc)
+            continue
+        if store.passive_only:
+            return True, "the stealth layer escalated the run to passive-only"
+        scopes |= {str(entry.scope) for entry in store.active()}
+    if scopes:
+        listed = ", ".join(sorted(scopes)[:3])
+        return True, f"{len(scopes)} quarantined scope(s): {listed}"
+    return False, ""

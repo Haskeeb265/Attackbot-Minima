@@ -23,8 +23,12 @@ Be aware that the plan documents describe much more than what exists:
 
 - Scraper: HackerOne ingestion end to end (fetch → map → persist), with the
   `bounty_*` schema and Alembic migrations.
-- Recon graph layer: Neo4j client, schema (multi-label assets, constraints,
-  indexes) and the CRUD repository (`service/recon_pipeline/platform/graph/`).
+- Recon graph seam (`service/recon_pipeline/platform/graph/`): the journaling
+  write sink with the degrade contract. The pre-run Neo4j schema (labels,
+  constraints, CRUD repository) was removed on 2026-09-19 — it was designed
+  before any recon run existed; the replacement will be designed from
+  `graph_state.json`, the observed-reality anchor the first converged run
+  produced.
 - Recon asset pipeline, `subdomain_domain_wildcards`, **complete**: passive
   enumeration, active resolution/bruteforce/recursion/zone-transfers, and
   permutation — each independently runnable with its own report.
@@ -41,8 +45,15 @@ Be aware that the plan documents describe much more than what exists:
   behind the target, emit ports-stage-compatible *discovered* scope files, and
   never send a packet to the target or anything discovered
   (`service/recon_pipeline/pipelines/asn_cidr/`).
+- Recon asset pipeline, `cloud_resource`, **built**: storage-bucket discovery —
+  candidate names harvested from the siblings' artifacts (CNAME claims, URLs, JS,
+  endpoints, brand shapes), then one keyless probe per candidate against its
+  **provider** (S3 / Azure Blob / GCS, never the target), classified into
+  open / auth_required / dangling / absent / exists-elsewhere. The dangling
+  CNAME claims are the takeover detector's raw material
+  (`service/recon_pipeline/pipelines/cloud_resource/`).
 - Pipeline `graph_normalize`, **built**: the asset model *and the handoff to the
-  vulnerability finder*. It reads the four collectors' artifacts (files only) and
+  vulnerability finder*. It reads the collector pipelines' artifacts (files only) and
   normalises every row into one model of typed nodes and edges, each carrying its
   provenance, its trust class (`declared` / `observed` / `discovered` /
   `inferred`), its S2 **score and band** — with the audit that produced them — and,
@@ -60,7 +71,8 @@ Be aware that the plan documents describe much more than what exists:
   (S4/S7). Every service degrades instead of failing a run.
 - **`python -m service.recon_pipeline`** — the canonical CLI: `list` the
   discovered pipelines, `run` them against a target, read the run `history`,
-  inspect the `dlq`, `replay` the graph journal. Adding an asset pipeline means
+  inspect the `dlq`, and `replay` reports the graph writes awaiting the future
+  schema. Adding an asset pipeline means
   adding one folder under `pipelines/` exposing `MANIFEST` + `PIPELINE`; nothing
   else in the tree changes (see
   [`service/recon_pipeline/README.md`](service/recon_pipeline/README.md)).
@@ -80,7 +92,7 @@ Be aware that the plan documents describe much more than what exists:
   long-running consumer pool drains the streams yet.
 - Correlation (certificate/favicon/JARM clustering, reverse-WHOIS pivots,
   third-party/takeover detection) and the remaining v2 source classes (code
-  dorking, cloud, mobile, secrets).
+  dorking, mobile, secrets).
 - A real LLM provider key (S13 is built but key-gated) and alerting sinks (S14).
 - Proxy pools and CAPTCHA handling in the stealth layer; Redis-backed shared
   quarantine.
@@ -99,23 +111,27 @@ carries an implementation-status section:
 | Path | What it holds |
 |---|---|
 | `main.py`, `config.py` | the scraper entry point and the single `.env` loader |
-| `run_recon.py` | runs all four recon pipelines and assembles the combined report |
+| `run_recon.py` | runs all five recon pipelines and assembles the combined report |
 | `db/` | PostgreSQL schema, mapper, persistence, repos, Alembic migrations |
 | `service/scraper/` | HackerOne ingestion |
 | `service/recon_pipeline/cli.py` + `__main__.py` | the canonical platform CLI (`python -m service.recon_pipeline`) |
-| `service/recon_pipeline/platform/` | the ASM platform — contract, registry, runner, scoring, scope, dispatch, cache, queues, lifecycle, enrichment, observability, `graph/` (Neo4j + sink), `stealth/`, `common/` |
+| `service/recon_pipeline/platform/` | the ASM platform — contract, registry, runner, scoring, scope, dispatch, cache, queues, lifecycle, enrichment, observability, `graph/` (journaling sink; schema pending), `stealth/`, `common/` |
 | `service/recon_pipeline/pipelines/` | one folder per asset pipeline, auto-discovered; each exposes a `contract.py` with `MANIFEST` + `PIPELINE` |
 | `service/recon_pipeline/pipelines/subdomain_domain_wildcards/` | the passive + active + permutation pipeline |
 | `service/recon_pipeline/pipelines/port_service_host/` | the ports/services/hosts pipeline |
 | `service/recon_pipeline/pipelines/url_endpoint/` | the historical-URL / endpoints / parameters pipeline |
 | `service/recon_pipeline/pipelines/asn_cidr/` | the ASN / CIDR network-ownership discovery pipeline |
-| `service/recon_pipeline/pipelines/graph_normalize/` | the asset model — four pipelines' artifacts → one scored node/edge model, emitted as `graph_state.json` for the vulnerability finder (file-only) |
+| `service/recon_pipeline/pipelines/cloud_resource/` | the storage-bucket discovery pipeline (S3 / Azure / GCS; probes providers, never the target) |
+| `service/recon_pipeline/pipelines/graph_normalize/` | the asset model — the collectors' artifacts → one scored node/edge model, emitted as `graph_state.json` for the vulnerability finder (file-only) |
 | `shared/` | DB pool, color logging, API connectors |
 | `tests/` | `recon/` (hermetic pytest suite) · `scraper/` (live-DB scripts) |
 | `docs/` | all prose documentation — see [`docs/README.md`](docs/README.md) |
 
 The full file-by-file tree is in
-[`docs/codebase/STRUCTURE.md`](docs/codebase/STRUCTURE.md).
+[`docs/codebase/STRUCTURE.md`](docs/codebase/STRUCTURE.md), and the diagram-led
+walkthrough of the whole recon module — one run, each collector, the platform
+services, the convergence loop, the attempt receipt — is
+[`docs/codebase/RECON_GUIDE.md`](docs/codebase/RECON_GUIDE.md).
 
 Each recon stage has its own README with flags, outputs and measured yields:
 [stage](service/recon_pipeline/pipelines/subdomain_domain_wildcards/README.md) ·
@@ -195,12 +211,21 @@ python -m service.recon_pipeline.pipelines.url_endpoint.main -t example.com
 # recon: network ownership -> ASNs, CIDRs, discovered scope files (never scans)
 python -m service.recon_pipeline.pipelines.asn_cidr.main -t example.com
 
-# recon: the asset model -> nodes + edges from all four pipelines' artifacts
-# (the platform runs it last automatically, because it declares that it consumes them)
+# recon: storage buckets -> candidates from sibling artifacts, provider probes,
+# and the dangling CNAME claims a takeover detector feeds on
+python -m service.recon_pipeline.pipelines.cloud_resource.main -t example.com
+
+# recon: the asset model -> nodes + edges from the collector pipelines' artifacts
+# (the platform runs it last automatically, because it declares what it consumes)
 python -m service.recon_pipeline.pipelines.graph_normalize.main -t example.com
 
 # recon: every pipeline + one combined report (RECON_<target>_OUTPUT.md)
 python run_recon.py -t example.com
+
+# recon: keep going while the surface keeps growing, then stop for a named
+# reason — later rounds re-run only the stages a new asset can change
+python run_recon.py -t example.com --until-converged
+python -m service.recon_pipeline run -t example.com --until-converged
 ```
 
 Recon modules are run **from the repo root** — their imports are absolute. Every
@@ -208,7 +233,11 @@ entry point supports `--help`, and `--list` where there is something to list.
 
 A platform run also records itself: `output/runs/<target>/<stamp>/summary.json`
 plus one JSON file per stage, and one row per run in the shared
-`output/runs/runs.jsonl` timeline. Pipelines still write their own artifacts into
+`output/runs/runs.jsonl` timeline. A `--until-converged` run adds
+`convergence.json` (the rounds, the new-asset counts and the verdict) and
+`frontier_ledger.jsonl` (every asset token this engagement has seen).
+`frontier_exhausted` is the only verdict that claims the surface ran out;
+every other verdict names the cap that stopped it. Pipelines still write their own artifacts into
 their own `output/` directories — that file contract is what lets one pipeline
 consume another's results. To add a new asset pipeline, see
 [`service/recon_pipeline/README.md`](service/recon_pipeline/README.md).
@@ -221,8 +250,8 @@ Raw per-tool Docker commands (and the resolver warning that matters) are in
 ## Tests
 
 ```bash
-python -m pytest tests/recon -q      # 1128 hermetic tests: no Docker, no DNS, no network
-python -m pytest tests/ -q           # 1128 passed, 1 skipped
+python -m pytest tests/recon -q      # 1373 hermetic tests: no Docker, no DNS, no network
+python -m pytest tests/ -q           # 1373 passed, 1 skipped
 ```
 
 The recon suite is the project's real test suite: it runs anywhere and covers every

@@ -34,6 +34,22 @@ MANIFEST = Manifest(
     # who want the old behaviour set URL_VALIDATE=off (or ask for stages
     # ``passive,extract``), and the stage records that it was switched off.
     passive_only=False,
+    #: The URLs, endpoints and JS bundles this pipeline found — what the cloud
+    #: pipeline harvests bucket names out of, and what the model counts as surface.
+    frontier_artifacts=(
+        "passive/output/urls.txt",
+        "output/endpoints.txt",
+        "output/javascript.txt",
+        "output/hosts.txt",
+    ),
+    #: Empty on purpose, and worth stating: every source is queried **per domain**
+    #: (Wayback's ``matchType=domain``, Common Crawl's per-domain index, urlscan,
+    #: ``gau``), so a second pass asks the same question of the same archive and
+    #: gets the same union — the cost of the URL stage is real (94–393 s measured)
+    #: and the answer cannot change.  The stage that will genuinely grow this
+    #: pipeline on a second pass is the **JS crawl (S24)**, which does not exist
+    #: yet; declaring nothing is what makes that a decision rather than a default.
+    repeat_stages=(),
 )
 
 

@@ -32,9 +32,11 @@ from pathlib import Path
 import shared.colorlog as colorlog
 
 from . import observability
+from .common.io import write_json
 from .contract import RunContext
+from .convergence import ConvergenceDriver, Ledger, Round, StopPolicy, token_kind
 from .dispatch import DispatchPolicy, Dispatcher
-from .graph.ingest import GraphSink, connect_repository
+from .graph.ingest import GraphSink
 from .registry import Registry
 from .scope import ScopeEngine
 
@@ -42,6 +44,9 @@ log = logging.getLogger("platform.runner")
 
 RUNS_DIRNAME = "runs"
 SUMMARY_FILE = "summary.json"
+#: The convergence loop's two artifacts, written inside the run directory.
+CONVERGENCE_FILE = "convergence.json"
+LEDGER_FILE = "frontier_ledger.jsonl"
 
 
 @dataclass
@@ -86,6 +91,9 @@ class RunResult:
     scope_summary: dict = field(default_factory=dict)
     #: Which platform services degraded, with reasons.
     degradations: dict = field(default_factory=dict)
+    #: The convergence report (rounds, verdict, ledger) — empty for a one-round
+    #: run, which is what a run without ``StopPolicy`` still is.
+    convergence: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -149,9 +157,7 @@ class Runner:
             spool_path=(output_dir / "queue_spool.jsonl") if output_dir else None
         )
         enricher = LLMEnricher()
-        repository = connect_repository()
         graph = GraphSink(
-            repository=repository,
             journal_path=(output_dir / "graph_journal.jsonl") if output_dir else None,
         )
         dispatcher = Dispatcher(scope_engine, policy=self._policy)
@@ -183,8 +189,17 @@ class Runner:
         pipelines: list[str] | None = None,
         stages: list[str] | None = None,
         options: dict[str, str] | None = None,
+        convergence: StopPolicy | None = None,
     ) -> RunResult:
-        """Run the selected pipelines (default: all discovered) against *target*."""
+        """Run the selected pipelines (default: all discovered) against *target*.
+
+        Without ``convergence`` this is one round of every selected pipeline's
+        declared stages — unchanged behaviour.  With it, the run loops: round 1 is
+        that same pass, and every later round re-runs only the stages a pipeline
+        declared as ``repeat_stages``, until
+        :func:`platform.convergence.decide` stops the loop and names the reason
+        (see :mod:`platform.convergence` for why only some stages may repeat).
+        """
         started_wall = datetime.now(timezone.utc)
         started = time.monotonic()
 
@@ -208,22 +223,15 @@ class Runner:
         )
         scope_engine, cache, queue, enricher, graph, dispatcher = services
 
-        for registration in ordered:
-            manifest = registration.manifest
-            wanted = stages or list(manifest.stage_names())
-            for stage_name in wanted:
-                if stage_name not in manifest.stage_names():
-                    log.warning(
-                        "%s: no stage %r (declared: %s)",
-                        manifest.name,
-                        stage_name,
-                        ", ".join(manifest.stage_names()),
-                    )
-                    continue
-                outcome = self._run_stage(registration, stage_name, context, run_dir)
-                result.outcomes.append(outcome)
-                if not outcome.ok:
-                    result.ok = False
+        if convergence is None:
+            result.outcomes = self._run_round(
+                ordered, self._stage_map(ordered, stages), context, run_dir
+            )
+        else:
+            result.outcomes, result.convergence = self._run_converged(
+                ordered, stages, context, run_dir, dispatcher, convergence, target
+            )
+        result.ok = all(outcome.ok for outcome in result.outcomes)
 
         result.seconds = time.monotonic() - started
         result.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -239,7 +247,194 @@ class Runner:
         self._write_reports(result)
         return result
 
-    def _run_stage(self, registration, stage_name: str, context: RunContext, run_dir: Path) -> StageOutcome:
+    # ------------------------------------------------------------------ #
+    # rounds
+    # ------------------------------------------------------------------ #
+
+    def _stage_map(
+        self, ordered: list, stages: list[str] | None
+    ) -> dict[str, list[str]]:
+        """Which stages each pipeline should run, honouring an operator's list."""
+        return {
+            registration.name: list(stages or registration.manifest.stage_names())
+            for registration in ordered
+        }
+
+    def _run_round(
+        self,
+        selection: list,
+        stage_map: dict[str, list[str]],
+        context: RunContext,
+        run_dir: Path,
+        round_index: int | None = None,
+    ) -> list[StageOutcome]:
+        """Execute one round's selected stages, in registry order."""
+        outcomes: list[StageOutcome] = []
+        for registration in selection:
+            manifest = registration.manifest
+            # A round boundary is a pass boundary.  A pipeline that caches the
+            # first stage's intermediate work for the second (graph_normalize's
+            # collected facts, asn_cidr's already-produced artifacts) must forget
+            # it here, or round 2 would re-emit round 1's output and look
+            # convergent purely because it was stale.
+            reset = getattr(registration.pipeline, "reset", None)
+            if callable(reset):
+                reset()
+            for stage_name in stage_map.get(registration.name, []):
+                if stage_name not in manifest.stage_names():
+                    log.warning(
+                        "%s: no stage %r (declared: %s)",
+                        manifest.name,
+                        stage_name,
+                        ", ".join(manifest.stage_names()),
+                    )
+                    continue
+                outcomes.append(
+                    self._run_stage(
+                        registration, stage_name, context, run_dir, round_index
+                    )
+                )
+        return outcomes
+
+    def _run_converged(
+        self,
+        ordered: list,
+        stages: list[str] | None,
+        context: RunContext,
+        run_dir: Path,
+        dispatcher,
+        policy: StopPolicy,
+        target: str,
+    ) -> tuple[list[StageOutcome], dict]:
+        """Loop rounds until the frontier stops growing, or a limit says stop."""
+        driver = ConvergenceDriver(
+            policy=policy,
+            ledger=Ledger(run_dir / LEDGER_FILE),
+            frontier_paths=self._frontier_paths(ordered),
+            log_round=lambda message: colorlog.log.info(f"[convergence] {message}"),
+        )
+        collected: list[StageOutcome] = []
+
+        def round_fn(index: int, found: frozenset[str]) -> Round:
+            skipped: list[str] = []
+            if index == 1:
+                selection = ordered
+                stage_map = self._stage_map(ordered, stages)
+            else:
+                # Only the stages a pipeline declared as repeatable: re-running an
+                # apex-wide archive query or a seed-keyed registry lookup would ask
+                # a question whose answer cannot have changed.
+                kinds = {token_kind(token) for token in found}
+                repeatable = [reg for reg in ordered if reg.manifest.repeatable]
+                selection = [reg for reg in repeatable if reg.manifest.wanted_by(kinds)]
+                # ...and only when the previous round put something on the table
+                # that this pipeline can act on.  A round in which no new address
+                # appeared spends no port-scan packets and no registry queries.
+                skipped = [reg.name for reg in repeatable if reg not in selection]
+                stage_map = {
+                    reg.name: list(reg.manifest.repeat_stages) for reg in selection
+                }
+            # A gated round is not the same as a pipeline that declares no repeat
+            # stages: the first has converged, the second never had a loop.
+            gated = bool(skipped)
+            before = self._active_actions(dispatcher)
+            started = time.monotonic()
+            outcomes = self._run_round(selection, stage_map, context, run_dir, index)
+            collected.extend(outcomes)
+            blocked, why = self._quarantine_blocked(selection)
+            failed = [outcome for outcome in outcomes if not outcome.ok]
+            notes = [why] if why else []
+            if skipped:
+                found_kinds = sorted({token_kind(token) for token in found})
+                notes.append(
+                    f"skipped {'/'.join(skipped)}: nothing new of kind "
+                    f"{'/'.join(found_kinds) if found_kinds else 'any'} to spend on"
+                )
+            return Round(
+                index=index,
+                seconds=time.monotonic() - started,
+                stages_run=len(outcomes),
+                stages_failed=len(failed),
+                gated=gated,
+                active_actions=self._active_actions(dispatcher) - before,
+                # A *partial* failure is a degradation of this round's coverage;
+                # a total failure is its own stop reason.  A missing Redis or
+                # Neo4j is not counted here on purpose: the collectors are
+                # file-based, so a degraded service is not a degraded look at the
+                # target, and treating it as one would hedge every exhaustion
+                # verdict this tree produces.
+                degraded=bool(failed) and len(failed) < len(outcomes),
+                blocked=blocked,
+                stages=[f"{outcome.pipeline}:{outcome.stage}" for outcome in outcomes],
+                notes=notes,
+            )
+
+        report = driver.run(round_fn, target=target)
+        payload = report.to_dict()
+        write_json(run_dir / CONVERGENCE_FILE, payload)
+        return collected, payload
+
+    def _frontier_paths(self, ordered: list) -> list[Path]:
+        """Absolute paths of every declared frontier artifact, in registry order."""
+        paths: list[Path] = []
+        for registration in ordered:
+            source = getattr(registration.module, "__file__", "") or ""
+            if not source:
+                continue
+            folder = Path(source).resolve().parent
+            paths.extend(
+                folder / relative
+                for relative in registration.manifest.frontier_artifacts
+            )
+        return paths
+
+    @staticmethod
+    def _active_actions(dispatcher) -> int:
+        """How many active actions the gate has allowed so far this run."""
+        try:
+            return int(dispatcher.summary().get("run_actions") or 0)
+        except Exception:
+            return 0
+
+    def _quarantine_blocked(self, selection: list) -> tuple[bool, str]:
+        """Did the stealth layer block or challenge us during this round?
+
+        A quarantine store is the one place a block outlives the stage that
+        suffered it, which is why the loop reads the stores rather than trying to
+        infer a block from a stage's return value.  Every store the round's
+        pipelines keep is consulted: unless ``STEALTH_QUARANTINE_FILE`` points
+        them at one shared file, each active stage writes its own under its
+        ``output/`` directory, and checking only the shared setting would report
+        "never blocked" on the default configuration.  Best-effort by design: an
+        unreadable store is not a block, and failing to check must not end a run.
+        """
+        try:
+            from .stealth import settings as stealth_settings
+            from .stealth.quarantine import blocked_state
+
+            paths: list[Path] = []
+            if stealth_settings.QUARANTINE_FILE:
+                paths.append(Path(stealth_settings.QUARANTINE_FILE))
+            for registration in selection:
+                source = getattr(registration.module, "__file__", "") or ""
+                if not source:
+                    continue
+                paths.extend(
+                    sorted(Path(source).resolve().parent.glob("**/output/quarantine.json"))
+                )
+            return blocked_state(paths)
+        except Exception as exc:
+            log.debug("quarantine check skipped: %s", exc)
+            return False, ""
+
+    def _run_stage(
+        self,
+        registration,
+        stage_name: str,
+        context: RunContext,
+        run_dir: Path,
+        round_index: int | None = None,
+    ) -> StageOutcome:
         manifest = registration.manifest
         started = time.monotonic()
         colorlog.log.info(f"[{manifest.name}] === {stage_name} stage ===")
@@ -269,10 +464,12 @@ class Runner:
             colorlog.log.failed(
                 f"[{manifest.name}] {stage_name} failed: {outcome.error}"
             )
-        self._write_stage_report(outcome, run_dir)
+        self._write_stage_report(outcome, run_dir, round_index)
         return outcome
 
-    def _write_stage_report(self, outcome: StageOutcome, run_dir: Path) -> None:
+    def _write_stage_report(
+        self, outcome: StageOutcome, run_dir: Path, round_index: int | None = None
+    ) -> None:
         """Snapshot one stage's report under ``runs/<target>/<stamp>/stages/``.
 
         The pipeline's own artifacts live in its own output directories; this
@@ -281,7 +478,12 @@ class Runner:
         """
         import json
 
-        stage_dir = run_dir / "stages" / outcome.pipeline
+        base = run_dir / "stages"
+        if round_index:
+            # Round-scoped: one stage report per round, never overwritten, so the
+            # run directory shows what round 3 actually did to round 1's surface.
+            base = base / f"round-{round_index}"
+        stage_dir = base / outcome.pipeline
         try:
             stage_dir.mkdir(parents=True, exist_ok=True)
             payload: dict = {
@@ -303,7 +505,7 @@ class Runner:
             log.warning("stage report write failed: %s", exc)
 
     def _summarise(self, result: "RunResult", dispatcher, queue, cache, graph, enricher) -> dict:
-        return {
+        summary = {
             "counts": {
                 "stages_run": len(result.outcomes),
                 "stages_ok": sum(1 for o in result.outcomes if o.ok),
@@ -317,6 +519,11 @@ class Runner:
             "pipelines_run": list(result.pipelines_run),
             "scope": dict(result.scope_summary),
         }
+        if result.convergence:
+            # Only a converged run carries this, so a one-round run's summary is
+            # exactly what it always was.
+            summary["convergence"] = result.convergence
+        return summary
 
     def _write_reports(self, result: RunResult) -> None:
         import json
@@ -355,6 +562,7 @@ class Runner:
             degradations=result.summary.get("graph", {}),
             gate=result.summary.get("gate", {}),
             queue=result.summary.get("queue", {}),
+            convergence=result.convergence,
         )
         # The registry lives at the runs/ root, not inside a stamped run dir:
         # ``--history`` reads the timeline across all runs, not one run's copy.

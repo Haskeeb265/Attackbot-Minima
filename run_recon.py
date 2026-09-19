@@ -17,6 +17,18 @@ What it does, in order:
    summary (read from the stages' machine reports, never hand-written) followed
    by every curated artifact verbatim, then the console logs.
 
+With ``--until-converged`` step 1–5 become a **loop**: round 1 is the run above,
+and every later round re-runs only the stages whose answer a grown frontier can
+change — the names stage's ``active``/``permutation`` (its generators), ports
+(new addresses), ASN/CIDR (new addresses) and cloud buckets (new names and
+URLs).  The passive names sources, the URL archives and ASN's registry lookups
+are asked the same question once and answered in full (see
+``service/recon_pipeline/platform/convergence.py``), so re-running them buys
+nothing.  The loop stops on a measured fixed point *or* a limit
+(``--max-rounds``, ``--time-budget``, a quarantine), and the report always names
+which of the two it was — ``frontier_exhausted`` is the only verdict that claims
+the surface ran out.
+
 Two properties it exists to guarantee:
 
 * **Only this run's artifacts are embedded.**  Every output directory is
@@ -46,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -135,6 +148,49 @@ ASN_ARTIFACTS: tuple[str, ...] = (
     "output/report.json",
 )
 
+#: What each pipeline puts *on the table*, mirrored from its manifest's
+#: ``frontier_artifacts``.  ``test_convergence.py`` pins the two against each
+#: other, so this cannot drift into a loop that measures a file nobody writes.
+FRONTIER_ARTIFACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
+    "names": (
+        SDW_DIR,
+        (
+            "output/live_hosts.txt",
+            "active/output/resolved.txt",
+            "permutation/output/resolved.txt",
+        ),
+    ),
+    "ports": (PSH_DIR, ("output/ips_raw.txt", "output/hosts.txt")),
+    "url": (
+        URL_DIR,
+        (
+            "passive/output/urls.txt",
+            "output/endpoints.txt",
+            "output/javascript.txt",
+            "output/hosts.txt",
+        ),
+    ),
+    "asn": (ASN_DIR, ("output/scope/discovered.txt",)),
+    "cloud": (CLOUD_DIR, ("passive/output/candidates.txt",)),
+}
+
+#: Stages a grown frontier can genuinely change the answer for.  ``url`` is
+#: absent on purpose: all four of its sources are per-domain archives, so a
+#: second pass asks the same question of the same archive (measured at 94–393 s).
+#: ``names`` repeats only ``active,permutation`` — ``passive``'s sources are
+#: subtree queries, so one call already returns every depth.
+REPEAT_STAGES: dict[str, str] = {"names": "active,permutation"}
+
+#: Which frontier kinds make each repeat job worth its requests, mirrored from the
+#: manifests' ``repeat_on`` (the convergence tests pin the two together).  A round
+#: that added only URLs, say, owes the ports stage no packets at all.
+REPEAT_ON: dict[str, tuple[str, ...]] = {
+    "names": ("host",),
+    "ports": ("ip",),
+    "asn": ("ip",),
+    "cloud": ("host", "url"),
+}
+
 CLOUD_ARTIFACTS: tuple[str, ...] = (
     "passive/output/candidates.jsonl",
     "passive/output/candidates.txt",
@@ -162,7 +218,39 @@ def _mtimes(directory: Path) -> dict[str, float]:
     return snapshot
 
 
-def _run_streamed(command: list[str], log_path: Path) -> int:
+def _console_write(line: str) -> None:
+    """Write *line* to stdout, losing a glyph rather than the engagement.
+
+    A child that emits bytes in its own locale encoding (every Python child of this
+    script defaults to the ANSI code page on Windows, not UTF-8) decodes here into
+    U+FFFD, and a cp1252 console cannot encode that character at all: the write
+    raises ``UnicodeEncodeError`` and took down a live converged run mid-probe.  The
+    log file — the record that matters — is written separately as UTF-8; the console
+    is only a window, and a window may drop a character.
+    """
+    try:
+        sys.stdout.write(line)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        sys.stdout.write(line.encode(encoding, "replace").decode(encoding, "replace"))
+
+
+def _child_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    """The child's environment, with UTF-8 pinned for its own stdout.
+
+    Fixing the *parent* side of the pipe alone would still be guessing: telling the
+    child to speak UTF-8 is what makes the round trip lossless, so a stage that
+    prints a non-ASCII hostname or a box-drawing character arrives intact.
+    """
+    merged = dict(os.environ if env is None else env)
+    merged.setdefault("PYTHONIOENCODING", "utf-8")
+    merged.setdefault("PYTHONUTF8", "1")
+    return merged
+
+
+def _run_streamed(
+    command: list[str], log_path: Path, env: dict[str, str] | None = None
+) -> int:
     """Run *command*, teeing stdout+stderr to the console and *log_path*.
 
     The child is invoked with ``-u`` (unbuffered).  Without it Python block-buffers
@@ -171,7 +259,9 @@ def _run_streamed(command: list[str], log_path: Path) -> int:
     run killed after 10 minutes had written nothing to the subdomain log even
     though that stage had been running the whole time.
     """
-    print(f"[run_recon] $ {' '.join(command)}", flush=True)
+    _console_write(f"[run_recon] $ {' '.join(command)}\n")
+    sys.stdout.flush()
+    env = _child_env(env)
     started = time.monotonic()
     with log_path.open("w", encoding="utf-8", newline="\n") as log:
         process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
@@ -182,11 +272,12 @@ def _run_streamed(command: list[str], log_path: Path) -> int:
             encoding="utf-8",
             errors="replace",
             cwd=ROOT,
+            env=env,
         )
         assert process.stdout is not None
         for line in process.stdout:
             log.write(line)
-            sys.stdout.write(line)
+            _console_write(line)
             sys.stdout.flush()
         code = process.wait()
     log_path.write_text(
@@ -397,10 +488,230 @@ def _summary_section(sdw_report: dict, psh_report: dict, url_report: dict,
     return "\n".join(out) + "\n"
 
 
+def _frontier_paths() -> list[Path]:
+    """Every declared frontier artifact, as an absolute path."""
+    return [
+        directory / relative
+        for directory, relatives in FRONTIER_ARTIFACTS.values()
+        for relative in relatives
+    ]
+
+
+def _blocked_state() -> tuple[bool, str]:
+    """Has the stealth layer quarantined us?  Best-effort, never raises.
+
+    Every active stage keeps its own quarantine store under its ``output/``
+    directory unless ``STEALTH_QUARANTINE_FILE`` points them all at one file, so
+    all of them are consulted — checking only the shared setting would report
+    "never blocked" on the default configuration.
+    """
+    try:
+        sys.path.insert(0, str(ROOT))
+        from service.recon_pipeline.platform.stealth import settings as stealth_settings
+        from service.recon_pipeline.platform.stealth.quarantine import blocked_state
+    except Exception:  # the loop must survive a missing stealth layer
+        return False, ""
+    paths: list[Path] = []
+    if stealth_settings.QUARANTINE_FILE:
+        paths.append(Path(stealth_settings.QUARANTINE_FILE))
+    for directory in (SDW_DIR, PSH_DIR, URL_DIR):
+        paths.extend(sorted(directory.glob("**/output/quarantine.json")))
+    return blocked_state(paths)
+
+
+def _repeat_jobs(
+    apex: str,
+    known: set[str],
+    kinds: set[str],
+    stamp: str,
+    index: int,
+    verbose: bool,
+) -> tuple[list[tuple[str, list[str], Path]], list[str]]:
+    """Rounds 2+: only what a grown frontier can change the answer for.
+
+    Returns the jobs to run and the labels skipped for want of a relevant new
+    asset — the second list is what makes a quiet round *visible* instead of
+    looking like a loop that decided to do nothing.
+    """
+    jobs: list[tuple[str, list[str], Path]] = []
+    # Sorted, not set order: Python randomises string hashing per process, so an
+    # unsorted set walk makes the same round report a different skip list in every
+    # run (the same defect the scope engine's "first containing network" had).
+    skipped: list[str] = sorted(
+        label
+        for label in known
+        if label in REPEAT_ON and not kinds.intersection(REPEAT_ON[label])
+    )
+    if "names" in known and "names" not in skipped:
+        command = [sys.executable, "-u", "-m", SDW_MODULE, "-t", apex,
+                   "--stages", REPEAT_STAGES["names"]]
+        jobs.append(("names", command, ROOT / f"recon_{apex}_names_r{index}_{stamp}.log"))
+    if "ports" in known and "ports" not in skipped:
+        jobs.append((
+            "ports",
+            [sys.executable, "-u", "-m", PSH_MODULE, "-t", apex],
+            ROOT / f"recon_{apex}_ports_r{index}_{stamp}.log",
+        ))
+    if "asn" in known and "asn" not in skipped:
+        jobs.append((
+            "asn",
+            [sys.executable, "-u", "-m", ASN_MODULE, "-t", apex],
+            ROOT / f"recon_{apex}_asn_r{index}_{stamp}.log",
+        ))
+    if "cloud" in known and "cloud" not in skipped:
+        jobs.append((
+            "cloud",
+            [sys.executable, "-u", "-m", CLOUD_MODULE, "-t", apex],
+            ROOT / f"recon_{apex}_cloud_r{index}_{stamp}.log",
+        ))
+    if verbose:
+        for _label, command, _log in jobs:
+            command.append("-v")
+    return jobs, skipped
+
+
+def _run_converged(
+    apex: str,
+    first_round_jobs: list[tuple[str, list[str], Path]],
+    *,
+    stamp: str,
+    verbose: bool,
+    policy,
+) -> tuple[dict, list[int]]:
+    """Loop rounds until the frontier stops growing, or a limit says stop."""
+    sys.path.insert(0, str(ROOT))
+    from service.recon_pipeline.platform.convergence import (
+        ConvergenceDriver,
+        Ledger,
+        Round,
+        token_kind,
+    )
+
+    exit_codes: list[int] = []
+    known = {label for label, _command, _log in first_round_jobs}
+    report_path = ROOT / f"recon_{apex}_convergence_{stamp}.json"
+    ledger_path = ROOT / f"recon_{apex}_ledger_{stamp}.jsonl"
+    # The scan receipt for *this* run.  Pointed at the run's own file so a fresh
+    # engagement cannot inherit the last one's scan history and skip work it never
+    # did — while the rounds inside the run share it, which is the point.
+    receipt_path = ROOT / f"recon_{apex}_attempts_{stamp}.jsonl"
+    child_env = {**os.environ, "PSH_ATTEMPT_RECEIPT": str(receipt_path)}
+
+    def round_fn(index: int, found: frozenset[str]) -> Round:
+        labels: list[str]
+        skipped: list[str] = []
+        if index == 1:
+            jobs = first_round_jobs
+        else:
+            kinds = {token_kind(token) for token in found}
+            jobs, skipped = _repeat_jobs(apex, known, kinds, stamp, index, verbose)
+        started = time.monotonic()
+        failed = 0
+        for _label, command, log_path in jobs:
+            code = _run_streamed(command, log_path, child_env)
+            exit_codes.append(code)
+            if code != 0:
+                failed += 1
+        blocked, why = _blocked_state()
+        labels = [label for label, _command, _log in jobs]
+        notes = [why] if why else []
+        if skipped:
+            found_kinds = sorted({token_kind(token) for token in found})
+            notes.append(
+                f"skipped {'/'.join(skipped)}: nothing new of kind "
+                f"{'/'.join(found_kinds) if found_kinds else 'any'} to spend on"
+            )
+        return Round(
+            index=index,
+            seconds=time.monotonic() - started,
+            stages_run=len(jobs),
+            stages_failed=failed,
+            blocked=blocked,
+            gated=bool(skipped),
+            stages=labels,
+            notes=notes,
+        )
+
+    driver = ConvergenceDriver(
+        policy=policy,
+        ledger=Ledger(ledger_path),
+        frontier_paths=_frontier_paths(),
+        log_round=lambda message: print(f"[run_recon] {message}", flush=True),
+    )
+    payload = driver.run(round_fn, target=apex).to_dict()
+    payload["report"] = report_path.as_posix()
+    payload["receipt"] = receipt_path.as_posix()
+    report_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8", newline="\n"
+    )
+    print(f"[run_recon] convergence: {payload['verdict']['reason']} "
+          f"({payload['verdict']['detail']})", flush=True)
+    return payload, exit_codes
+
+
+def _convergence_section(payload: dict | None) -> str:
+    """The report's account of the loop: how many rounds, and why it stopped."""
+    if not payload:
+        return ""
+    verdict = payload.get("verdict") or {}
+    out: list[str] = ["## Convergence — how the loop stopped", ""]
+    out.append(f"**Verdict:** `{verdict.get('reason')}` — {verdict.get('detail')}")
+    out.append("")
+    if payload.get("exhausted"):
+        out.append(
+            "The frontier stopped growing: every declared discovery artifact was "
+            "re-read after the last round and nothing new appeared in any of them. "
+            "This is the only verdict that claims the surface ran out."
+        )
+    else:
+        out.append(
+            "**This run did not reach exhaustion.** It stopped on a limit, not "
+            "because the surface ran out — read the round numbers below as \"how "
+            "far this budget got\", not as \"all there is\"."
+        )
+    out.append("")
+    out.append("| Round | New assets | Known | Pipelines | Failed | Seconds |")
+    out.append("|---|---|---|---|---|---|")
+    for entry in payload.get("rounds") or []:
+        out.append(
+            f"| {entry.get('round')} | {entry.get('new_assets')} | "
+            f"{entry.get('frontier_assets')} | "
+            f"{', '.join(entry.get('stages') or []) or '-'} | "
+            f"{entry.get('stages_failed')} | {entry.get('seconds')} |"
+        )
+    out.append("")
+    ledger = payload.get("ledger") or {}
+    out.append(
+        f"Ledger: `{ledger.get('path')}` — {ledger.get('assets_seen', 0)} asset(s) "
+        "seen this engagement. A token seen in any round is never counted as new "
+        "again, which is what makes an oscillating frontier stop instead of spin."
+    )
+    out.append("")
+    if payload.get("receipt"):
+        out.append(
+            f"Scan receipt: `{payload['receipt']}` — every address the port stage "
+            "actually attempted, with the outcome. An address in it is not scanned "
+            "again in this engagement, which is why the rounds after the first get "
+            "cheaper; a *failed* attempt is deliberately not a skip."
+        )
+        out.append("")
+    rounds_with_notes = [
+        (entry.get("round"), entry.get("notes")) 
+        for entry in payload.get("rounds") or []
+        if entry.get("notes")
+    ]
+    if rounds_with_notes:
+        for number, notes in rounds_with_notes:
+            out.append(f"- round {number}: {'; '.join(notes)}")
+        out.append("")
+    return "\n".join(out) + "\n"
+
+
 def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
              ran_asn: bool, ran_cloud: bool,
              sub_log: Path, port_log: Path, url_log: Path, asn_log: Path,
              cloud_log: Path,
+             convergence: dict | None = None,
              sdw_before: dict[str, float] | None = None,
              psh_before: dict[str, float] | None = None,
              url_before: dict[str, float] | None = None,
@@ -476,7 +787,8 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
         )
 
     parts: list[str] = [
-        _summary_section(sdw_report, psh_report, url_report, asn_report, cloud_report, apex, warnings)
+        _summary_section(sdw_report, psh_report, url_report, asn_report, cloud_report, apex, warnings),
+        _convergence_section(convergence),
     ]
 
     if ran_subdomain:
@@ -569,7 +881,27 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
     return report_path
 
 
+def _configure_console() -> None:
+    """Make this process's own stdout UTF-8, so redirected logs are too.
+
+    A tool that prints an em dash is decoded correctly as UTF-8 and then re-encoded
+    for the console; on Windows the locale code page decides that re-encoding, which
+    left the engagement log a cp1252 file that every tool downstream treats as
+    binary (``grep`` calls it out, and a reader on another machine gets mojibake).
+    Anything the console genuinely cannot show is still degraded rather than fatal.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue  # a test double or a closed pipe, not a text stream
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _configure_console()
     parser = argparse.ArgumentParser(
         prog="run_recon.py",
         description="Run every recon pipeline and write a combined report to the project root.",
@@ -582,6 +914,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-url", action="store_true", help="skip pipeline 3")
     parser.add_argument("--skip-asn", action="store_true", help="skip pipeline 4 (ASN/CIDR discovery)")
     parser.add_argument("--skip-cloud", action="store_true", help="skip pipeline 5 (cloud buckets)")
+    parser.add_argument(
+        "--until-converged", action="store_true",
+        help=(
+            "keep running rounds until the discovery frontier stops growing (or a "
+            "budget says stop); later rounds re-run only the stages a new asset can "
+            "change the answer for"
+        ),
+    )
+    parser.add_argument("--max-rounds", type=int, default=None,
+                        help="round ceiling for --until-converged (default 4)")
+    parser.add_argument("--time-budget", type=float, default=None,
+                        help="seconds allowed for the whole converged run "
+                             "(default 2700; 0 = no limit)")
+    parser.add_argument("--max-active-actions", type=int, default=None,
+                        help="cumulative active actions across all rounds (0 = unlimited)")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging in every stage")
     args = parser.parse_args(argv)
 
@@ -619,42 +966,62 @@ def main(argv: list[str] | None = None) -> int:
     asn_before = _mtimes(ASN_DIR) if ran_asn else None
     cloud_before = _mtimes(CLOUD_DIR) if ran_cloud else None
 
+    # Round 1's jobs, in the order the docstring argues for: names, then ports
+    # (its address source), then URLs, then ASN/CIDR (seeded *by* the ports stage),
+    # then buckets (seeded by the names and URL artifacts).
+    first_round_jobs: list[tuple[str, list[str], Path]] = []
     if ran_subdomain:
         command = [sys.executable, "-u", "-m", SDW_MODULE, "-t", apex,
                    "--stages", args.stages]
         if args.verbose:
             command.append("-v")
-        exit_codes.append(_run_streamed(command, sub_log))
+        first_round_jobs.append(("names", command, sub_log))
     if ran_ports:
         command = [sys.executable, "-u", "-m", PSH_MODULE, "-t", apex]
         if args.verbose:
             command.append("-v")
-        exit_codes.append(_run_streamed(command, port_log))
+        first_round_jobs.append(("ports", command, port_log))
     if ran_url:
         command = [sys.executable, "-u", "-m", URL_MODULE, "-t", apex]
         if args.verbose:
             command.append("-v")
-        exit_codes.append(_run_streamed(command, url_log))
+        first_round_jobs.append(("url", command, url_log))
     if ran_asn:
-        # After pipeline 2 deliberately: sibling addresses are this pipeline's
-        # seeds and annotation input.
         command = [sys.executable, "-u", "-m", ASN_MODULE, "-t", apex]
         if args.verbose:
             command.append("-v")
-        exit_codes.append(_run_streamed(command, asn_log))
+        first_round_jobs.append(("asn", command, asn_log))
     if ran_cloud:
-        # Last deliberately: the URL and names artifacts are this pipeline's
-        # seed material (CNAMEs, JS hosts, brand tokens).
         command = [sys.executable, "-u", "-m", CLOUD_MODULE, "-t", apex]
         if args.verbose:
             command.append("-v")
-        exit_codes.append(_run_streamed(command, cloud_log))
+        first_round_jobs.append(("cloud", command, cloud_log))
+
+    convergence: dict = {}
+    if args.until_converged:
+        from service.recon_pipeline.platform.convergence import StopPolicy
+
+        policy = StopPolicy()
+        if args.max_rounds is not None:
+            policy.max_rounds = max(1, args.max_rounds)
+        if args.time_budget is not None:
+            policy.time_budget_seconds = max(0.0, args.time_budget)
+        if args.max_active_actions is not None:
+            policy.max_active_actions = max(0, args.max_active_actions)
+        convergence, round_codes = _run_converged(
+            apex, first_round_jobs, stamp=stamp, verbose=args.verbose, policy=policy
+        )
+        exit_codes.extend(round_codes)
+    else:
+        for _label, command, log_path in first_round_jobs:
+            exit_codes.append(_run_streamed(command, log_path))
 
     report_path = assemble(
         apex, ran_subdomain=ran_subdomain, ran_ports=ran_ports, ran_url=ran_url,
         ran_asn=ran_asn, ran_cloud=ran_cloud,
         sub_log=sub_log, port_log=port_log, url_log=url_log, asn_log=asn_log,
         cloud_log=cloud_log,
+        convergence=convergence,
         sdw_before=sdw_before, psh_before=psh_before, url_before=url_before,
         asn_before=asn_before, cloud_before=cloud_before,
     )

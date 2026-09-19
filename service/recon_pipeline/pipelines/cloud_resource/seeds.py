@@ -121,8 +121,15 @@ def _add(
     evidence: str,
     *,
     distinctive: bool = True,
+    claimant: str = "",
 ) -> None:
-    """Fold one claim into *rows*, or record a refusal with its reason."""
+    """Fold one claim into *rows*, or record a refusal with its reason.
+
+    ``claimant`` is the target hostname whose own artifact carried the claim —
+    for a CNAME claim, the host whose DNS record names this resource.  It is what
+    lets the graph later write a ``cname_points_to`` edge with both ends; a claim
+    without its claimant can only ever be a node.
+    """
     canonical = canonicalize_name(name)
     if not canonical:
         return
@@ -136,6 +143,7 @@ def _add(
         origins={origin},
         sources={source},
         evidence=[evidence],
+        claimants=[claimant] if claimant else [],
         distinctive=distinctive,
     )
     existing = rows.get(candidate.key)
@@ -279,11 +287,21 @@ def harvest(
         records_path = names_root / RECORDS_REL
         if _note_state(states, counts, "records", records_path, read_jsonl):
             for row in read_jsonl(records_path):
+                claimant = str(row.get("host", "")).strip()
                 for value in row.get("cname") or ():
                     if isinstance(value, str):
                         for provider, name in providers.match_provider(value):
                             counts["cname_claims"] += 1
-                            _add(rows, refusals, name, provider, ORIGIN_CNAME, "records.jsonl", value)
+                            _add(
+                                rows,
+                                refusals,
+                                name,
+                                provider,
+                                ORIGIN_CNAME,
+                                "records.jsonl",
+                                value,
+                                claimant=claimant,
+                            )
 
         # ------------------------------------------------------------------ #
         # 2. URL claims — the URL pipeline's union (jsonl preferred, txt fallback)

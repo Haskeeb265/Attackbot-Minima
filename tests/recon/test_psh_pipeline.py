@@ -603,3 +603,124 @@ def test_the_report_records_every_ladder_decision(tmp_path: Path) -> None:
 def test_an_invalid_target_is_rejected() -> None:
     with pytest.raises(ValueError, match="not a valid domain"):
         pipeline.run_port_service_host_stage("not a domain")
+
+
+# --------------------------------------------------------------------------- #
+# The attempt receipt — the scan receipt a second pass must not pay twice for
+# --------------------------------------------------------------------------- #
+
+
+def test_a_scan_records_every_address_it_attempted(tmp_path: Path) -> None:
+    """The gap this closes: "scanned, nothing open" left no trace in any artifact."""
+    records = write_records(tmp_path / "records.jsonl", {"www.example.com": ["8.8.8.8"]})
+    scanner = FakePortScanner()  # answers, with no open ports
+
+    report = run_stage(tmp_path, records_file=records, port_scanner=scanner)
+
+    assert scanner.calls and scanner.calls[0]["ips"] == ["8.8.8.8"]
+    rows = read_jsonl(tmp_path / "attempted.jsonl")
+    attempted = {row["asset"]: row["outcome"] for row in rows}
+    assert attempted["ip:8.8.8.8"] == "none"
+    assert all(row["operation"] == "port_scan" for row in rows)
+    assert report.outputs["attempt_receipt"].endswith("attempted.jsonl")
+
+
+def test_a_found_port_is_recorded_as_a_found_attempt(tmp_path: Path) -> None:
+    records = write_records(tmp_path / "records.jsonl", {"www.example.com": ["8.8.8.8"]})
+    report = run_stage(
+        tmp_path, records_file=records, port_scanner=FakePortScanner({"8.8.8.8": [80]})
+    )
+
+    outcomes = {row["asset"]: row["outcome"] for row in read_jsonl(tmp_path / "attempted.jsonl")}
+    assert outcomes["ip:8.8.8.8"] == "found"
+    assert report.counts["open_ports"] >= 1
+
+
+def test_an_address_already_scanned_is_never_handed_to_the_scanner_again(
+    tmp_path: Path,
+) -> None:
+    """The point of the receipt: a second pass spends nothing on a paid address."""
+    records = write_records(tmp_path / "records.jsonl", {"www.example.com": ["8.8.8.8"]})
+    (tmp_path / "attempted.jsonl").write_text(
+        json.dumps({"asset": "ip:8.8.8.8", "operation": "port_scan", "outcome": "none"}) + "\n",
+        encoding="utf-8",
+    )
+    scanner = FakePortScanner()
+
+    report = run_stage(tmp_path, records_file=records, port_scanner=scanner)
+
+    assert scanner.calls == []
+    assert report.counts["skipped_attempted"] == 1
+    assert report.counts["planned"] == 0
+    # The address is still a seed, and still counted as one — the skip is a
+    # decision about requests, not a claim that the address does not exist.
+    assert report.counts["addresses"] == 1
+
+
+def test_a_partly_scanned_set_scans_only_the_rest(tmp_path: Path) -> None:
+    records = write_records(
+        tmp_path / "records.jsonl",
+        {"www.example.com": ["8.8.8.8"], "mail.example.com": ["1.1.1.1"]},
+    )
+    (tmp_path / "attempted.jsonl").write_text(
+        json.dumps({"asset": "ip:8.8.8.8", "operation": "port_scan", "outcome": "none"}) + "\n",
+        encoding="utf-8",
+    )
+    scanner = FakePortScanner()
+
+    report = run_stage(tmp_path, records_file=records, port_scanner=scanner)
+
+    assert scanner.calls and scanner.calls[0]["ips"] == ["1.1.1.1"]
+    assert report.counts["skipped_attempted"] == 1
+    assert report.counts["addresses"] == 2
+
+
+def test_a_failed_scan_does_not_earn_a_skip(tmp_path: Path) -> None:
+    """An outage is not knowledge: the next pass must be free to try again."""
+    records = write_records(tmp_path / "records.jsonl", {"www.example.com": ["8.8.8.8"]})
+
+    first = run_stage(tmp_path, records_file=records, port_scanner=FakePortScanner(ok=False))
+    outcomes = {row["asset"]: row["outcome"] for row in read_jsonl(tmp_path / "attempted.jsonl")}
+    assert outcomes["ip:8.8.8.8"] == "failed"
+    assert first.counts["skipped_attempted"] == 0
+
+    scanner = FakePortScanner()
+    second = run_stage(tmp_path, records_file=records, port_scanner=scanner)
+
+    assert scanner.calls and scanner.calls[0]["ips"] == ["8.8.8.8"]
+    assert second.counts["skipped_attempted"] == 0
+    # ...and the second pass upgrades the record, so a third would skip it.
+    outcomes = {row["asset"]: row["outcome"] for row in read_jsonl(tmp_path / "attempted.jsonl")}
+    assert outcomes["ip:8.8.8.8"] == "none"
+
+
+def test_a_policy_refused_address_is_not_recorded_as_attempted(tmp_path: Path) -> None:
+    """Nothing was sent, so nothing was tried — the ladder's L0/L1 rungs cost no receipt row."""
+    records = write_records(tmp_path / "records.jsonl", {"www.example.com": ["8.8.8.8"]})
+
+    report = run_stage(
+        tmp_path, records_file=records, port_scanner=FakePortScanner(), scan_level="passive"
+    )
+
+    assert not (tmp_path / "attempted.jsonl").exists()
+    assert report.counts["skipped_attempted"] == 0
+
+
+def test_the_receipt_follows_an_explicit_path_when_the_loop_sets_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A converged run points the receipt at the run directory, so an engagement
+    starts clean rather than inheriting the last one's scan history."""
+    receipts = tmp_path / "run-dir"
+    receipts.mkdir()
+    # The stage resolves the path at call time (settings function, env override),
+    # which is what lets the loop point one run at its own receipt.
+    monkeypatch.setattr(
+        pipeline, "attempt_receipt_path", lambda output_dir=None: receipts / "attempts.jsonl"
+    )
+
+    records = write_records(tmp_path / "records.jsonl", {"www.example.com": ["8.8.8.8"]})
+    run_stage(tmp_path, records_file=records, port_scanner=FakePortScanner())
+
+    assert (receipts / "attempts.jsonl").is_file()
+    assert not (tmp_path / "attempted.jsonl").exists()

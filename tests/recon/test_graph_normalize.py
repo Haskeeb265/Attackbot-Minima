@@ -169,11 +169,20 @@ def _networks_dir(root: Path) -> Path:
 
 
 def _all_dirs(root: Path) -> dict[str, Path]:
+    # An *empty* cloud dir, not the real one: without this every test that pins
+    # the model's shape would silently absorb whatever the last live run left
+    # in the cloud pipeline's output.  The artifact files exist but are empty —
+    # "asked and found nothing", the state the report distinguishes from absent.
+    cloud = root / "cloud-empty"
+    (cloud / "output").mkdir(parents=True, exist_ok=True)
+    (cloud / "output" / "buckets.jsonl").touch()
+    (cloud / "output" / "dangling.jsonl").touch()
     return {
         "names_dir": _names_dir(root),
         "ports_dir": _ports_dir(root),
         "urls_dir": _urls_dir(root),
         "networks_dir": _networks_dir(root),
+        "cloud_dir": cloud,
     }
 
 
@@ -222,7 +231,7 @@ def test_the_mapping_document_states_that_nothing_was_written() -> None:
     document = vocab.mapping_document()
 
     assert document["graph_written"] is False
-    assert "not final" in str(document["note"])
+    assert "settled" in str(document["note"]) and "no database writer" in str(document["note"])
     relationships = document["relationships"]
     assert isinstance(relationships, dict)
     assert relationships[vocab.ANNOUNCED_BY]["direction"] == "network -> asn"
@@ -501,7 +510,7 @@ def test_ports_artifacts_become_services_asns_and_networks(tmp_path: Path) -> No
     assert service["props"]["discovered_by"] == ["internetdb", "naabu"]
 
     # A third party's hostname on our address is an attribution, not a PTR.
-    attributed = [edge for edge in edges if edge["type"] == vocab.ATTRIBUTED_TO]
+    attributed = [edge for edge in edges if edge["type"] == vocab.RESOLVES_TO]
     assert attributed[0]["from"] == f"domain:legacy.{APEX}"
     assert attributed[0]["trust"] == vocab.DISCOVERED
 
@@ -563,19 +572,20 @@ def test_an_allocation_with_no_asn_still_becomes_an_allocation_edge(tmp_path: Pa
         ports_dir=directories["ports_dir"],
         urls_dir=directories["urls_dir"],
         networks_dir=directory,
+        cloud_dir=tmp_path / "cloud-empty",
     )
 
     allocated = [
         edge
         for edge in _edges(output)
-        if edge["type"] == vocab.ALLOCATED_TO and edge["sources"] == [NETWORKS]
+        if edge["type"] == vocab.OWNED_BY and edge["sources"] == [NETWORKS]
     ]
     assert len(allocated) == 1
     assert allocated[0]["from"] == "network:104.16.0.0/12"
     assert allocated[0]["to"] == "organization:cloudflare, inc."
     # And the claim it carries is scored as ownership, not as an announcement.
     assert _nodes(output)["network:104.16.0.0/12"]["score"] == engine.W_ASN_CIDR_OWNERSHIP
-    assert report.counts["sources_read"] == 4
+    assert report.counts["sources_read"] == 4  # cloud dir empty: no rows to read
 
 
 def test_network_artifacts_become_announcement_and_allocation_claims(tmp_path: Path) -> None:
@@ -592,9 +602,20 @@ def test_network_artifacts_become_announcement_and_allocation_claims(tmp_path: P
 
     # Both allocations are stated, each in its own artifact's words: the ports
     # stage's RDAP record and the network stage's claim. Differing org strings
-    # stay separate nodes rather than being silently reconciled.
-    allocated = {edge["to"] for edge in edges if edge["type"] == vocab.ALLOCATED_TO}
+    # stay separate nodes rather than being silently reconciled.  Registrations
+    # share the ``owned_by`` type — the claim property separates them.
+    allocated = {
+        edge["to"]
+        for edge in edges
+        if edge["type"] == vocab.OWNED_BY and edge["props"].get("claim") == "allocation"
+    }
     assert allocated == {"organization:acme", "organization:acme hosting ltd"}
+    registered = {
+        edge["to"]
+        for edge in edges
+        if edge["type"] == vocab.OWNED_BY and edge["props"].get("claim") == "registration"
+    }
+    assert registered
 
 
 def test_wildcard_coverage_is_stated_and_bounded(tmp_path: Path) -> None:
@@ -714,7 +735,7 @@ def test_a_routing_claim_does_not_earn_the_ownership_weight() -> None:
     # an ownership claim.  The node's ``classes`` aggregate every stream, so it
     # cannot answer the question by itself.
     model.add_edge(
-        vocab.ALLOCATED_TO,
+        vocab.OWNED_BY,
         allocated.id,
         holder.id,
         source=NETWORKS,
@@ -743,7 +764,7 @@ def test_a_prefix_one_stream_announces_and_another_allocates_is_scored_by_edge()
     network = _claim(model, vocab.NETWORK, "198.51.100.0/24", [NETWORKS, ownership])
     holder = _claim(model, vocab.ORGANIZATION, "acme hosting ltd", [ownership])
     model.add_edge(
-        vocab.ALLOCATED_TO, network.id, holder.id, source=ownership, trust=vocab.DISCOVERED
+        vocab.OWNED_BY, network.id, holder.id, source=ownership, trust=vocab.DISCOVERED
     )
 
     score_mod.score_model(model)
@@ -863,7 +884,10 @@ def test_run_writes_the_model_and_says_it_wrote_no_graph(tmp_path: Path) -> None
 
     assert report.ok is True
     assert report.counts["sources_read"] == 4
-    assert report.counts["sources_missing"] == 0
+    # The cloud source is present but its empty artifacts carry no rows, so the
+    # rows-based counter reports it missing — "asked, found nothing", which the
+    # report deliberately does not distinguish from "absent" at this level.
+    assert report.counts["sources_missing"] == 1
     assert report.counts["malformed_lines"] == 0
     assert report.counts["nodes"] > 0 and report.counts["edges"] > 0
     assert report.counts["graph_written"] == 0
@@ -905,7 +929,7 @@ def test_run_writes_the_model_and_says_it_wrote_no_graph(tmp_path: Path) -> None
 
     on_disk = json.loads((output / emit.REPORT_FILE).read_text(encoding="utf-8"))
     assert on_disk["graph_written"] is False
-    assert "not final" in on_disk["schema_note"]
+    assert "settled" in on_disk["schema_note"]
     assert on_disk["nodes_by_kind"]["domain"] >= 3
     assert on_disk["nodes_by_trust"]["declared"] == 1
 
@@ -1049,11 +1073,12 @@ def test_a_run_with_no_readable_artifacts_fails_loudly(tmp_path: Path) -> None:
         ports_dir=tmp_path / "nope",
         urls_dir=tmp_path / "nope",
         networks_dir=tmp_path / "nope",
+        cloud_dir=tmp_path / "nope",
     )
 
     assert report.ok is False
     assert any("no sibling artifacts" in note for note in report.notes)
-    assert report.counts["sources_missing"] == 4
+    assert report.counts["sources_missing"] == 5
     # The model still carries the one fact we own: the operator's target.
     assert _nodes(output) == {f"domain:{APEX}": _nodes(output)[f"domain:{APEX}"]}
 
@@ -1071,6 +1096,7 @@ def test_missing_artifacts_are_named_in_the_notes(tmp_path: Path) -> None:
         ports_dir=dirs["ports_dir"],
         urls_dir=dirs["urls_dir"],
         networks_dir=dirs["networks_dir"],
+        cloud_dir=dirs["cloud_dir"],
     )
 
     assert any(
@@ -1127,7 +1153,7 @@ def test_the_graph_state_is_one_self_describing_consistent_document(tmp_path: Pa
         engine.W_ACTIVE_DNS_RESOLUTION
     )
     assert document["status"]["graph_written"] is False
-    assert "not final" in document["status"]["note"]
+    assert "settled" in document["status"]["note"]
 
     nodes, edges = document["nodes"], document["edges"]
     integrity = document["integrity"]
@@ -1254,7 +1280,7 @@ def test_the_manifest_declares_the_siblings_it_consumes() -> None:
 
     assert MANIFEST.name == "graph_normalize"
     assert MANIFEST.passive_only is True
-    assert MANIFEST.stage_names() == ("collect", "merge", "emit")
+    assert MANIFEST.stage_names() == ("collect", "merge", "emit", "publish")
     assert set(MANIFEST.consumes) == {
         "subdomain_domain_wildcards",
         "port_service_host",
@@ -1323,4 +1349,230 @@ def test_settings_point_at_the_sibling_pipeline_folders() -> None:
     assert settings.PORTS_DIR.name == "port_service_host"
     assert settings.URLS_DIR.name == "url_endpoint"
     assert settings.NETWORKS_DIR.name == "asn_cidr"
+    assert settings.CLOUD_DIR.name == "cloud_resource"
     assert settings.OUTPUT_DIR.name == "output"
+
+
+# --------------------------------------------------------------------------- #
+# the settled schema — cloud nodes, folded claims, monotonic time
+# --------------------------------------------------------------------------- #
+
+
+def _cloud_dir(root: Path, buckets: list[dict], dangling: list[dict] | None = None) -> Path:
+    """A cloud pipeline root carrying the given rows."""
+    directory = root / "cloud"
+    _jsonl(directory / "output" / "buckets.jsonl", buckets)
+    _jsonl(directory / "output" / "dangling.jsonl", dangling or [])
+    return directory
+
+
+def test_cloud_artifacts_become_cloud_nodes_with_cname_edges(tmp_path: Path) -> None:
+    """The settled schema's headline: a bucket is a ``cloud`` node identified
+    by ``provider:name``, and the dangling CNAME finding — the run's most
+    actionable output — is one traversable edge carrying its outcome."""
+    cloud = _cloud_dir(
+        tmp_path,
+        buckets=[
+            {
+                "name": "acme-docs",
+                "provider": "s3",
+                "state": "dangling",
+                "code": "NoSuchBucket",
+                "http_status": 404,
+                "probe_url": "https://acme-docs.s3.amazonaws.com/",
+                "evidence_class": "cname-claimed",
+                "origins": ["cname"],
+                "sources": ["records.jsonl"],
+                "claimants": [f"legacy.{APEX}"],
+                "probed_at": "2026-09-19T05:53:03+00:00",
+            },
+            {
+                "name": "acme-docs",
+                "provider": "gcs",
+                "state": "auth_required",
+                "code": "accessdenied",
+                "http_status": 403,
+                "probe_url": "https://acme-docs.storage.googleapis.com/",
+                "evidence_class": "derived-generic",
+                "origins": ["derived"],
+                "sources": ["brand-shapes"],
+                "probed_at": "2026-09-19T05:53:04+00:00",
+            },
+        ],
+    )
+    output = tmp_path / "out"
+    main.run_pipeline(
+        APEX,
+        output_dir=output,
+        names_dir=tmp_path / "nope",
+        ports_dir=tmp_path / "nope",
+        urls_dir=tmp_path / "nope",
+        networks_dir=tmp_path / "nope",
+        cloud_dir=cloud,
+    )
+
+    nodes = _nodes(output)
+    edges = _edges(output)
+
+    # One node per (provider, name) — regional endpoint spellings are properties,
+    # never identity.
+    s3_bucket = nodes["cloud:s3:acme-docs"]
+    assert s3_bucket["props"]["outcome"] == "dangling"
+    assert s3_bucket["props"]["probe_code"] == "NoSuchBucket"
+    assert s3_bucket["trust"] == vocab.OBSERVED  # the target's own CNAME vouched
+    gcs_bucket = nodes["cloud:gcs:acme-docs"]
+    assert gcs_bucket["props"]["outcome"] == "auth_required"
+    assert gcs_bucket["trust"] == vocab.DISCOVERED  # a brand-derived guess
+
+    # The finding, as one edge with both ends.
+    finding = [e for e in edges if e["type"] == vocab.CNAME_POINTS_TO]
+    assert len(finding) == 1
+    assert finding[0]["from"] == f"domain:legacy.{APEX}"
+    assert finding[0]["to"] == "cloud:s3:acme-docs"
+    assert finding[0]["props"]["outcome"] == "dangling"
+
+
+def test_a_cloud_node_seen_at_two_endpoints_is_still_one_node(tmp_path: Path) -> None:
+    """Two probe rows spelling the bucket through different endpoints merge into
+    one node; the outcome stays the latest probe's and the sources accumulate."""
+    cloud = _cloud_dir(
+        tmp_path,
+        buckets=[
+            {
+                "name": "acme-docs",
+                "provider": "s3",
+                "state": "auth_required",
+                "code": "accessdenied",
+                "probe_url": "https://acme-docs.s3.amazonaws.com/",
+                "evidence_class": "derived-generic",
+                "origins": ["derived"],
+                "sources": ["brand"],
+                "probed_at": "2026-09-19T05:53:03+00:00",
+            },
+            {
+                "name": "acme-docs",
+                "provider": "s3",
+                "state": "open",
+                "code": "listable",
+                "probe_url": "https://acme-docs.s3.eu-west-1.amazonaws.com/",
+                "evidence_class": "derived-generic",
+                "origins": ["derived"],
+                "sources": ["harvest"],
+                "probed_at": "2026-09-19T05:53:09+00:00",
+            },
+        ],
+    )
+    output = tmp_path / "out"
+    main.run_pipeline(
+        APEX,
+        output_dir=output,
+        names_dir=tmp_path / "nope",
+        ports_dir=tmp_path / "nope",
+        urls_dir=tmp_path / "nope",
+        networks_dir=tmp_path / "nope",
+        cloud_dir=cloud,
+    )
+
+    bucket = _nodes(output)["cloud:s3:acme-docs"]
+    assert bucket["props"]["outcome"] == "open"
+    assert sorted(bucket["sources"]) == ["cloud_resource:probe"]
+
+
+def test_resolution_edges_keep_their_claim_kind_distinct(tmp_path: Path) -> None:
+    """``ptr_maps_to`` and ``attributed_to`` folded into ``resolves_to`` with a
+    ``method`` property; the claim each edge carries must survive the fold."""
+    ports = root = tmp_path / "ports"
+    (ports / "output").mkdir(parents=True)
+    _jsonl(
+        ports / "output" / "ptr.jsonl",
+        [{"ip": "104.16.1.10", "ptr": [f"legacy.{APEX}"]}],
+    )
+    _jsonl(
+        ports / "output" / "passive_intel.jsonl",
+        [{"ip": "104.16.1.10", "hostnames": [f"shodan.{APEX}"]}],
+    )
+    output = tmp_path / "out"
+    main.run_pipeline(
+        APEX,
+        output_dir=output,
+        names_dir=tmp_path / "nope",
+        ports_dir=ports,
+        urls_dir=tmp_path / "nope",
+        networks_dir=tmp_path / "nope",
+    )
+
+    edges = _edges(output)
+    ptr = [e for e in edges if e["props"].get("method") == "ptr"]
+    shodan = [e for e in edges if e["props"].get("method") == "shodan"]
+    assert ptr and ptr[0]["type"] == vocab.RESOLVES_TO
+    assert ptr[0]["from"] == "ip:104.16.1.10"  # reverse: address -> name
+    assert shodan and shodan[0]["type"] == vocab.RESOLVES_TO
+    assert shodan[0]["from"] == f"domain:shodan.{APEX}"  # forward, third party
+    # The fold's rule: one type, and who claimed it is on the edge.
+    assert "port_service_host:ptr" in ptr[0]["sources"]
+    assert "port_service_host:internetdb" in shodan[0]["sources"]
+
+
+def test_first_seen_is_write_once_and_last_seen_is_monotonic(tmp_path: Path) -> None:
+    """The monotonic time rule: an earlier later-row moves first_seen, never the
+    reverse; re-confirmation bumps last_seen; an empty stamp changes nothing."""
+    model = norm.Model()
+    model.add_node(
+        vocab.DOMAIN,
+        "a.test",
+        source="one",
+        trust=vocab.OBSERVED,
+        at="2026-09-19T05:00:00+00:00",
+    )
+    model.add_node(
+        vocab.DOMAIN,
+        "a.test",
+        source="two",
+        trust=vocab.OBSERVED,
+        at="2026-09-01T05:00:00+00:00",
+    )
+    model.add_node(vocab.DOMAIN, "a.test", source="three", trust=vocab.OBSERVED, at="")
+    node = model.nodes["domain:a.test"]
+    assert node.first_seen == "2026-09-01T05:00:00+00:00"
+    assert node.last_seen == "2026-09-19T05:00:00+00:00"
+
+    # And on an edge, the same rule.
+    model.add_edge(
+        vocab.RESOLVES_TO,
+        "domain:a.test",
+        "ip:1.2.3.4",
+        source="one",
+        trust=vocab.OBSERVED,
+        at="2026-09-10T00:00:00+00:00",
+    )
+    model.add_edge(
+        vocab.RESOLVES_TO,
+        "domain:a.test",
+        "ip:1.2.3.4",
+        source="two",
+        trust=vocab.OBSERVED,
+        at="2026-09-02T00:00:00+00:00",
+    )
+    edge = model.edges[("resolves_to", "domain:a.test", "ip:1.2.3.4")]
+    assert edge.first_seen == "2026-09-02T00:00:00+00:00"
+    assert edge.last_seen == "2026-09-10T00:00:00+00:00"
+
+
+def test_a_third_party_resolution_never_registers_a_scope_address(tmp_path: Path) -> None:
+    """The fold's sharpest edge: Shodan's claim and our resolution are one type
+    now, but scope registration reads the edge's *sources* — a third party's
+    word must never pull an address into scope."""
+    scope = ScopeEngine.from_domain(APEX)
+    model = norm.Model()
+    model.add_node(vocab.DOMAIN, f"shodan.{APEX}", source="x", trust=vocab.DISCOVERED)
+    model.add_node(vocab.IP, "203.0.113.9", source="x", trust=vocab.DISCOVERED)
+    model.add_edge(
+        vocab.RESOLVES_TO,
+        f"domain:shodan.{APEX}",
+        "ip:203.0.113.9",
+        source=merge.SOURCE_LABEL["passive_intel"],
+        trust=vocab.DISCOVERED,
+        props={"method": "shodan"},
+    )
+    registered = merge._register_dns_scope(merge.MergeResult(model=model), scope)
+    assert registered == 0

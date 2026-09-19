@@ -28,8 +28,9 @@ Everything else is *consumed from the platform*, never re-implemented:
 host canonicalization and IO helpers from :mod:`platform.common`, scope
 decisions from :mod:`platform.scope`, asset scoring from
 :mod:`platform.scoring`, active-traffic shaping from
-:mod:`platform.stealth`, hot caching from :mod:`platform.cache`, persistence
-from :mod:`platform.graph`.  A pipeline receives these through the
+:mod:`platform.stealth`, hot caching from :mod:`platform.cache`, and the
+graph write seam from :mod:`platform.graph` (journaled until a schema is
+designed from observed runs).  A pipeline receives these through the
 :class:`RunContext` handed to :meth:`Pipeline.run` — it does not import
 services directly, which is what keeps a pipeline folder self-contained and
 the platform swappable.
@@ -37,6 +38,7 @@ the platform swappable.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -64,7 +66,7 @@ class Manifest:
 
     ``name`` is the folder name (validated against it at discovery time);
     ``asset_types`` are the ``recon.md`` §3 rows this pipeline collects;
-    ``provides`` names the graph labels it can populate; ``consumes`` names
+    ``provides`` names the graph kinds it can populate; ``consumes`` names
     the artifact paths of *other* pipelines it reads (declared, so the runner
     can order pipelines and the report can show the data flow); ``stages``
     are the independently-runnable stages in run order.
@@ -81,9 +83,48 @@ class Manifest:
     #: collection).  The dispatcher may still gate it; the flag is what the
     #: report and the safety checks read.
     passive_only: bool = False
+    #: Artifact paths (relative to the pipeline folder) whose *contents* are this
+    #: pipeline's contribution to the **discovery frontier**.  The convergence
+    #: driver (:mod:`.convergence`) reads them after every round and canonicalises
+    #: each line into an asset token (``host:``/``ip:``/``url:``/``net:``) to
+    #: answer one question: did this round put anything new on the table?
+    #: Empty means the pipeline contributes no frontier — it is one-shot or a pure
+    #: model reader.
+    frontier_artifacts: tuple[str, ...] = ()
+    #: Stages worth re-running when the frontier has grown (rounds 2+).  Empty
+    #: means the pipeline runs **once** per engagement: re-running it would ask a
+    #: question whose answer cannot have changed (an apex-wide archive query, a
+    #: seed-keyed registry lookup).  Declaring this is the difference between
+    #: "iterate until exhausted" and "re-ask the same question five times".
+    repeat_stages: tuple[str, ...] = ()
+    #: Which frontier **kinds** make repeating this pipeline worth a request
+    #: (``host`` / ``ip`` / ``url`` / ``net`` — the prefix of a canonical token).
+    #: A round in which nothing new of these kinds appeared skips the pipeline
+    #: entirely, which is how "only spend requests on genuinely new assets" is
+    #: enforced in one place instead of re-derived per stage.  Empty means "any
+    #: new asset" — the conservative default, since a pipeline that declares no
+    #: repeat stages is never gated and one that does usually knows what it wants.
+    repeat_on: tuple[str, ...] = ()
 
     def stage_names(self) -> tuple[str, ...]:
         return tuple(stage.name for stage in self.stages)
+
+    @property
+    def repeatable(self) -> bool:
+        """True when this pipeline has stages worth re-running on new assets."""
+        return bool(self.repeat_stages)
+
+    def wanted_by(self, kinds: Iterable[str]) -> bool:
+        """Would a round with new assets of *kinds* be worth repeating this pipeline?
+
+        Allowed-by-default: with no ``repeat_on`` declaration any new asset is
+        reason enough, so declaring nothing never silently disables a pipeline.
+        """
+        if not self.repeatable:
+            return False
+        if not self.repeat_on:
+            return True
+        return any(kind in self.repeat_on for kind in kinds)
 
 
 @dataclass
@@ -91,9 +132,12 @@ class RunContext:
     """Everything a pipeline run may consume from the platform.
 
     Handed to :meth:`Pipeline.run`; a pipeline takes what it needs and ignores
-    the rest.  Services degrade gracefully: a missing Redis or Neo4j yields a
-    cache/graph object that reports ``available=False`` with a reason instead
-    of raising, and the run report carries the degradation forward.
+    the rest.  Services degrade gracefully: a missing Redis yields a cache
+    object that reports ``available=False`` with a reason instead of raising,
+    and the run report carries the degradation forward. The graph sink does
+    the same — and until a schema is designed from observed data (2026-09-19
+    removed the pre-run guess), every write is journaled and ``available`` is
+    False with that reason.
     """
 
     #: The apex domain this run targets.
@@ -160,3 +204,17 @@ class BasePipeline:
         import shared.colorlog as colorlog
 
         return colorlog.log
+
+    def reset(self) -> None:
+        """Drop per-pass cached state; called before each convergence round.
+
+        Most pipelines are stateless between calls — they read artifacts and
+        write artifacts.  A few cache the first stage's intermediate work so the
+        second and third stages of *the same pass* do not redo it (\
+        ``graph_normalize``'s collected facts, ``asn_cidr``'s already-produced
+        artifacts).  Without a reset those caches would hand round 2 the results
+        of round 1, and the loop would look convergent precisely because it was
+        stale.  The default is a no-op, so a pipeline that does not override it
+        is safe either way.
+        """
+        return None

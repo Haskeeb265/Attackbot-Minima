@@ -23,12 +23,14 @@ single **node + edge model** with three properties that make it worth having:
 * **A shape a graph can take.**  Nodes and edges are emitted as JSONL with
   stable ids and a separate mapping file for labels and relationship types.
 
-**This pipeline deliberately does not touch the graph database.**  The Neo4j
-schema is not final, and writing into it now would bake in a vocabulary that is
-about to change.  ``emit`` writes files; the platform's ``GraphSink`` is
-available to a future pipeline (or a future stage here) once the schema is
-settled, and the only file that has to change then is
-:mod:`~.vocabulary` — the mapping from neutral kinds to concrete labels.
+**This pipeline deliberately does not touch the graph database.**  The
+pre-run schema guess was removed on 2026-09-19 (it predated any observed
+recon output); the replacement schema is to be designed *from* this
+pipeline's artifacts — ``graph_state.json`` is the observed-reality anchor
+that discussion starts from.  ``emit`` writes files; once the schema
+exists, the platform's ``GraphSink`` is the seam it writes through, and the
+only file that has to change then is :mod:`~.vocabulary` — the mapping from
+neutral kinds to whatever the new schema labels things.
 """
 
 from __future__ import annotations

@@ -45,22 +45,25 @@ Primary store for scraped program data. `postgres:16-alpine`, container
 
 ## Neo4j
 
-The recon graph of record. `neo4j:latest` (Community), container `neo4j_db`,
-Bolt on `7687`, browser on `7474`; credentials and database from `NEO4J_*`.
+**Planned again — by choice this time.** The container (`neo4j:latest`
+Community, `neo4j_db`, Bolt on `7687`, browser on `7474`, credentials from
+`NEO4J_*`) and the driver dependency remain, but the pre-run schema was
+**removed on 2026-09-19**: its 20+ labels and CRUD repository were designed
+from the plan *before* the first recon run existed, so every shape in it was a
+guess. The first converged run then produced `graph_state.json` (6 476 assets
+of observed reality), and the replacement schema will be designed *from* that
+document in a dedicated discussion before any code is written.
 
-- **Client:** `service/recon_pipeline/platform/graph/client.py` (`Neo4jClient`,
-  driver + `verify()`).
-- **Schema:** `schema.py` — `:Asset` base label plus typed labels, relationship
-  types, uniqueness constraint on `(asset_type, canonical_value)` for assets,
-  and indexes.
-- **CRUD:** `repository.py` — `run_query`, `merge_node`, `get_node`,
-  `merge_relation`, `get_relation`; labels must be passed as a list.
-- **Verification:** `tests/recon/test_repository.py` exercises all five methods
-  (plus constraint enforcement) against a live instance and cleans up after
-  itself. It is a script, not part of the pytest suite:
-  `docker compose up -d neo4j && python tests/recon/test_repository.py`.
-- **Gap:** no production code writes to the graph yet — the recon asset pipeline
-  writes files (`IMPLEMENTATION_PLAN` stages S4/S7 are unbuilt).
+What exists today in `service/recon_pipeline/platform/graph/`:
+
+- **`ingest.py`** — `GraphSink`, the only graph object a pipeline sees. With no
+  schema it journals every offered write (canonical identity + payload, written
+  schema-agnostically so the future migration can replay them) and reports
+  `available=False` with that reason. `replay_journal()` refuses to pretend:
+  it reports the debt and returns 0.
+- **Nothing else.** `client.py`/`repository.py`/`schema.py` and the live-Neo4j
+  `tests/recon/test_repository.py` were removed with the guess. Connection
+  details (`NEO4J_*`) are still in `config.py` for the rebuild.
 
 ## Redis
 

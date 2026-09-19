@@ -1,6 +1,6 @@
 # Recon Pipeline — Progress
 
-**Compiled:** 2026-09-18 · **Source docs:** `docs/recon_docs/IMPLEMENTATION_PLAN.md` (S0–S14 status table, checked 2026-09-16), `docs/recon_docs/IMPLEMENTATION_PLAN_V2.md` (S15–S26 status table, checked 2026-09-16), `docs/recon_docs/port_service_host.md` (marked *IMPLEMENTED, with deltas*), `docs/codebase/CONCERNS.md` (the honest gaps list), `docs/README.md`.
+**Compiled:** 2026-09-19 · **Source docs:** `docs/recon_docs/IMPLEMENTATION_PLAN.md` (S0–S14 status table, checked 2026-09-16), `docs/recon_docs/IMPLEMENTATION_PLAN_V2.md` (S15–S26 status table, checked 2026-09-16), `docs/recon_docs/port_service_host.md` (marked *IMPLEMENTED, with deltas*), `docs/codebase/CONCERNS.md` (the honest gaps list), `docs/README.md`.
 
 Per the docs' own rule: **specs and plans are intent, not inventory; the code is the source of truth.** Everything below reflects the docs' status sections; items from today's session (not yet reflected in any doc) are listed separately at the end.
 
@@ -25,15 +25,151 @@ S14 ████████░░░░ built   Run registry + metrics + DLQ su
 ────────────────────────────────────────────────────────────────────
 S15 ██████████ built   Scope Engine (declared/discovered/needs_review)
 S16 ██████░░░░░ built*  DNS-brute/permutation techniques (built elsewhere)
-S17–S26 ░░░░░░░ none    All other v2 sources (CT APIs, ASN, WHOIS, fingerprints,
-                        code-host dorking, buckets, mobile, JS, takeover, content disc)
+S22 ███████░░░ built*  Cloud buckets (cloud_resource: S3/Azure/GCS harvest +
+                        provider probes; graph_normalize reads it — cloud kind)
+S17–S26 (rest) partial Most other v2 sources unbuilt (CT APIs, WHOIS, mobile,
+                        content disc); S24 JS crawl + S25 takeover detector are
+                        now built (see session entry below)
 ────────────────────────────────────────────────────────────────────
 XX  ████████░░░ built   port_service_host — exists OUTSIDE both plans' numbering
                         (own R&D doc; P1–P3 built, P4–P5 deferred)
-XX  ████████░░░ built   url_endpoint — URLs / endpoints / parameters, OUTSIDE both
-                        plans' numbering (passive + extract built; crawl + graph
-                        writes deferred)
+XX  █████████ built   url_endpoint — URLs / endpoints / parameters, OUTSIDE both
+                        plans' numbering (passive + extract + S24 JS crawl built)
 ```
+
+## Session 2026-09-20 — the graph gets a reader: storage-agnostic tool layer for the vuln engine
+
+**The problem:** the converged graph is ~400k lines / ~900k tokens minified — feeding it to an
+LLM would burn the credit budget on one call, and degraded reasoning on top. The fix is a
+division of labor: *code navigates, the model reasons.*
+
+**Built (platform/graph/):**
+- `reader.py` — `GraphBackend` protocol (six read methods, the whole seam) + `JsonFileBackend`
+  (lazy indexes: id→node, adjacency, search blob) + `View`/`_within_budget` (every serialized
+  slice counts bytes at 4 B/token, trims lowest-priority rows first, reports truncation honestly)
+  + `compact_node` (priority fields kept, scaffolding dropped)
+- `tools.py` — five LLM tools, each with one spec feeding both the JSON schema and the dispatcher:
+  `graph_stats`, `graph_top_assets`, `graph_get_node`, `graph_neighbors`, `graph_search`.
+  `dispatch(backend, name, args)` is the entire agent-loop wiring; errors are small JSON with hints.
+
+**Measured on the real 6 816-node graph:** top-5 view = 370 tokens; 2-hop neighborhood of a hub
+= ~2.4k tokens; budget test (100 rows through a 2k window) trimmed to 20 rows and reported it.
+Full-graph compact dump remains ~900k tokens — the thing the tool layer exists to prevent.
+
+**Tests:** 20 new in `test_graph_reader.py` (seam, traversal dedup, direction/edge filters,
+budget trim + raise paths, schema/dispatcher agreement). Suite: 1 417 passed, 1 skipped.
+One failure outside this change: `test_url_pipeline.py::test_full_pipeline_writes_every_artifact`
+needs the Docker daemon for the httpx validate stage — environment, not regression (passed
+earlier today while Docker was up).
+
+**Neo4j backend (same session, continued):** `platform/graph/neo4j_backend.py` — the migration
+the seam was waiting for. `Neo4jBackend` implements `GraphBackend` in Cypher (nodes merge on
+canonical `id` = identity-not-insertion; `first_seen` write-once via `coalesce`, `last_seen`
+ratchets via a `CASE` max; relationship types are whitelist-validated against
+`GRAPH_RELATIONSHIPS` — an unknown type raises, never invents). `ensure_constraints()` = 2
+constraints + 2 property indexes, idempotent. `load_snapshot(db, doc)` is *the migration*:
+batched `UNWIND` upserts from `graph_state.json`, header onto a `GraphMeta` node. Re-loading a
+snapshot is an upsert, so run-over-run accumulation works — the graph becomes historical.
+The tool layer now catches `Neo4jUnavailable` into a small JSON error, so a down store costs
+the model nothing. 16 hermetic tests (fake driver pins the Cypher shapes) + 1 env-gated live
+roundtrip (skips until `NEO4J_*` points at a running store). Migration CLI:
+`python -m service.recon_pipeline.platform.graph.neo4j_backend` after `docker compose up -d neo4j`.
+
+**Live smoke (2026-09-20, daemon up):** Docker started, `neo4j_db` healthy, migration run —
+**6 816 nodes / 7 132 edges loaded for qbsco.net; a second load left counts identical**
+(idempotency proven live: upsert-by-identity, not insertion). The parity harness — the same six
+tool calls against the file backend and the Neo4j backend — returned **MATCH on all of them**
+(stats/top-5/node/neighbors by type/search), and a store-side depth-2 traversal cost 1 571
+tokens. Two real bugs existed only live and are now hermetically pinned: (1) the batched EDGE
+upsert still used `$src`-style params after the node query moved to `row.*` — ParameterMissing
+— and the fake driver now validates that every `$name` is bound; (2) `neighbors` composed TWO
+juxtaposed Cypher patterns (SyntaxError) — the helper now returns only the bracket hop and the
+test asserts one `(a:Asset` declaration. Suite with the store up: 1 436 passed, 1 skipped —
+the env-gated roundtrip runs against the live store and the Docker-gated url_pipeline test is
+healthy again. `CNAME_POINTS_TO` is absent from the DB because this target produced zero such
+edges — the store agrees with the file model, which is why parity held on that call too.
+
+**Next:** wire `dispatch` into the vuln engine's agent loop; the Neo4j backend implements the
+same six methods when the graphdb migration lands.
+
+## Session 2026-09-19 (part 2) — schema fed forward: emitter, S25, S24
+
+With the settled schema in place, the three pieces that consume it landed the
+same day:
+
+1. **`context.graph` emitter (graph_normalize `publish` stage).** A fourth
+   manifest stage walks the merged model and offers every node and edge to the
+   platform's `GraphSink` — 13 362 journaled writes from the committed qbsco.net
+   artifacts. The sink degrades gracefully (journal-only when no DB is
+   configured), so a run can never fail because storage is absent. This is the
+   piece that turns six file-writing pipelines into something a consumer can
+   read without knowing the file layout: the journal replays into whatever
+   storage the graphdb migration picks.
+
+2. **S25 — takeover detector (`cloud_resource/takeover.py`).** The first true
+   consumer of recon output. Only CNAME claims matching a provider fingerprint
+   are probed (one GET each); the marker decides, the status corroborates; a
+   transport failure is `inconclusive`, never a guess; the policy gate decides
+   whether a vulnerable finding scores or stays informational. Twelve tests pin
+   the rules.
+
+3. **S24 — JS bundle crawl (`url_endpoint/jscrawl.py`).** The one remaining
+   recall lever after convergence measured that rounds 2+ mostly re-verify. The
+   harvest's `javascript.txt` lists where the JS *is*; this stage fetches
+   in-scope bundles through the same stealth session the validate stage uses (no
+   second request path) and extracts `fetch`/`axios` calls, path literals,
+   query params and template parameters — mining `sourcesContent` from source
+   maps too, within the same budget. Scope gate runs before any request; counts
+   are `js_`-namespaced so the pipeline summary can't confuse them with the
+   extract stage's numbers.
+
+**Live verification (qbsco.net, converged run, round 1 / time budget):**
+
+- Run: 6 475 assets in ~45 min, stopped honestly on `time_budget_exhausted` (default
+  2 700 s). 65 verified vs 621 dead URLs — the web surface is mostly gone.
+- **Emitter:** `publish` journaled **13 540 writes** (6 615 nodes / 6 925 edges,
+  built in 2.95 s). All 10 kinds present; `cloud` 42/42 and `ip` 19/19 fully
+  time-stamped; urls/validated-edges stamped exactly where artifacts carry
+  `validated_at` — network/ASN rows unstamped because upstream rows carry no
+  time, which is honest (the future graphdb writer stamps ingestion time).
+- **S25:** the run's single CNAME claim (`autodiscover` -> Microsoft) matched no
+  fingerprint — the note said so, zero wasted requests, gate visible. Gap found
+  and closed: GCS/Azure-blob/azureedge fingerprints added (`2026-09-19.2`),
+  tests still green. Also learned: `dangling.jsonl` is empty this run because
+  round 1's DNS never enumerates CNAME chains — S25's feed depends on the
+  convergence loop reaching the rounds that collect them.
+**Converged re-run (raised budget 9 000 s) — the round-depth question answered:**
+
+- `frontier_exhausted` reached properly: round 1 = 6 475 assets (1 770 s) →
+  round 2 = 12 new (1 393 s) → round 3 = 0 new (112 s, receipts making it nearly
+  free — "13 of 19 addresses already scanned in this engagement, not queued
+  again"). The loop's decisive stopping is real, not theoretical.
+- Round 2's yield: 12 new assets, all DNS-rotational IPs (Microsoft
+  autodiscover + Cloudflare ranges) — no new names or URLs. Convergence here
+  means *rotation*, not undiscovered surface.
+- **The CNAME-chain hypothesis was wrong, and the run says so honestly:** even
+  fully converged, this target produces exactly 1 CNAME row
+  (`autodiscover` → Microsoft mail chain), `claims: 5, fingerprint_matched: 0`,
+  zero takeover requests. qbsco.net has no cloud-storage CNAMEs — S25's empty
+  output is a fact about this target, not about round depth or missing rounds.
+- New fingerprints (v2) live-validated against the providers themselves:
+  nonexistent GCS bucket answers 404 + `NoSuchBucket`; Azure blob
+  `BlobNotFound`/`AccountNotFound`; azureedge content-missing. S25 is armed for
+  any target whose DNS *does* point at storage.
+- The earlier run's `legacy.qbsco.net → gcs` dangling claim is absent from
+  today's DNS: the CNAME itself is gone. That is what dangling *means* — the
+  finding survives in the committed artifacts and the graph with its
+  first_seen/last_seen, exactly the case the time model was built for.
+
+- **S24:** 137 bundles found, 137 budgeted, 1 fetched (Cloudflare email-decode),
+  1 endpoint extracted. The 136 failures mirror the 621 dead URLs — measured
+  reality, not a transport bug.
+
+Suite: **1 397 passed, 1 skipped** (24 new). mypy clean on every touched file
+(pre-existing errors in platform/stealth, colorlog, and url_endpoint/main.py:409
+remain the only ones).
+
+---
 
 `*` = built as a standalone file-writing asset pipeline, **not** wired into the graph/scoring architecture the plans describe.
 
@@ -53,7 +189,7 @@ against the code, not the docs:
 | URL, Endpoint | built | `url_endpoint/` — Wayback + Common Crawl + urlscan + gau → endpoints, parameters, JS |
 | Certificate | none | CNAME chains are collected; no cert clustering (S20) |
 | Secret | none | no extractor (S21/S23) |
-| CloudResource | none | no bucket enumeration (S22) |
+| CloudResource | **built** | `cloud_resource/` — bucket harvest + provider probes (S3 / Azure / GCS); `dangling.jsonl` is the S25 takeover raw material. `graph_normalize` reads it (the `cloud` kind + `cname_points_to`) and its `publish` stage feeds the model through the `GraphSink` journal |
 | **Asset model (nodes + edges)** | **built (file-only)** | `graph_normalize/` fuses all four collectors' artifacts into one scored node/edge model — provenance, trust classes, scope verdicts, an S2 score + band on every claimed node — and emits **`graph_state.json`**, the self-describing handoff document for the vulnerability finder. No database writes: the schema is not final |
 | Repository (Source Code) | none | no code-host dorking (S21) |
 | MobileApp (#7–#11) | none | no mobile teardown (S23) |
@@ -63,9 +199,9 @@ against the code, not the docs:
 | AI Model (#15) | none | no label in `schema.py` (falls back to `:Other`) |
 | ASN (#17) | **built** | `asn_cidr/` — the S18 pivot's collection half (RIPEstat/RDAP, keyless, never scans); graph writes still open |
 
-**Counts:** 5 types fully covered (Domain, Wildcard, URL/Endpoint, CIDR-discovery,
-ASN), 1 partial (IP — file-only scan side), and **11 with no collection logic at
-all**. The schema also defines labels that nothing
+**Counts:** 6 types fully covered (Domain, Wildcard, URL/Endpoint, CIDR-discovery,
+ASN, CloudResource), 1 partial (IP — file-only scan side), and **10 with no
+collection logic at all**. The schema also defines labels that nothing
 populates (`URL`, `Endpoint`, `Certificate`, `Secret`, `Technology`,
 `CloudResource`, `ASN`), and the v2 plan adds node types the schema lacks —
 `ThirdPartyService` and `FingerprintCluster` (`recon_v2.md` Appendix A), plus the
@@ -96,8 +232,9 @@ populates (`URL`, `Endpoint`, `Certificate`, `Secret`, `Technology`,
 
 ### The asset model (outside both plans' numbering — built, file-only)
 - Location: `service/recon_pipeline/pipelines/graph_normalize/`; own contract in
-  `README.md`. It consumes all four collectors (declared in its manifest, so the
-  registry orders it last) and emits `nodes.jsonl` / `edges.jsonl` /
+  `README.md`. It consumes the four collector pipelines its manifest declares (the registry
+  orders it last; the newer `cloud_resource` pipeline is deliberately not read
+  yet — the model's vocabulary has no kind for it, P2) and emits `nodes.jsonl` / `edges.jsonl` /
   `vocabulary.json` / `report.json` — a node + edge model where every element
   carries its sources, its trust class (`declared`/`observed`/`discovered`/
   `inferred`) and, with a scope engine, its scope verdict.
@@ -135,7 +272,9 @@ populates (`URL`, `Endpoint`, `Certificate`, `Secret`, `Technology`,
 - **S17** alt CT/aggregator APIs · **S18** ASN/BGP pivot (partly delivered by
   `asn_cidr`, as a pipeline rather than a graph pivot) · **S19** reverse WHOIS ·
   **S20** favicon/JARM/cert clustering · **S21** code-host dorking (carries the
-  Secret Handling Contract) · **S22** cloud bucket enumeration · **S23** mobile
+  Secret Handling Contract) · **S22** cloud bucket enumeration (**now built** as
+  `cloud_resource`, 2026-09-19 — harvest + provider probes; dangling refs are
+  S25's raw material) · **S23** mobile
   teardown · **S24** JS bundle crawl · **S25** SaaS footprint + takeover detector ·
   **S26** content discovery.
 - Note on S25: the asset pipeline already *collects* CNAME chains
@@ -336,10 +475,12 @@ These need folding into `IMPLEMENTATION_PLAN*.md` status tables, `docs/recon_doc
   the other four have to do with each other*. It reads their artifacts (files
   only; no sibling code, no re-runs) and normalises every row into one model of
   typed nodes and edges: `domain`, `wildcard`, `ip`, `service`, `url`,
-  `parameter`, `asn`, `network`, `organization`, joined by eleven edge types
-  (`resolves_to`, `has_url`, `exposes_service`, `belongs_to_asn`, `announced_by`,
-  `allocated_to`, `in_network`, `ptr_maps_to`, `wildcard_covers`, `hosted_by`,
-  `attributed_to`).
+  `parameter`, `asn`, `network`, `organization`, `cloud` (the settled schema of
+  2026-09-19 — see the session entry at the end), joined by twelve claim-typed
+  edge types (`resolves_to` with `method`, `cname_points_to`, `has_url`,
+  `observed_parameter`, `redirects_to`, `wildcard_covers`, `exposes_service`,
+  `in_network`, `belongs_to_asn`, `announced_by`, `owned_by` with `claim`,
+  `hosted_by`).
 - **Context, not just values.** Every node and edge carries its **sources**
   (which artifact, which source string), its **trust class** — `declared` /
   `observed` / `discovered` / `inferred`, merged strongest-wins per claim, so an
@@ -511,9 +652,9 @@ this run) and the per-host setting is a **floor under an equal share** of the
 budget, with a second pass spending leftovers: the same run selects 200, with 83
 API endpoints in the top 200 where the old rule had 0.
 
-Test count 1 236 → **1 296** (+60: `test_escalation_policy.py` 44 cases, plus the
-URL-validation, provenance and graph suites), 1 skipped. New modules are
-mypy-clean. Docs reconciled: both pipeline READMEs, `ARCHITECTURE.md` §2f, this
+Test count rose across these suites (`test_escalation_policy.py` 44 cases, plus
+the URL-validation, provenance and graph suites — the per-file counts are in
+`TESTING.md`), 1 skipped. New modules are mypy-clean. Docs reconciled: both pipeline READMEs, `ARCHITECTURE.md` §2f, this
 file. **Still open, and now measurable:** there is no scan *receipt* (an address
 scanned with nothing open is indistinguishable from one never scanned, so the
 policy will re-scan one such address), nothing consumes `active_candidates.jsonl`,
@@ -535,9 +676,65 @@ and the escalation plan is only as good as `cdn_classified.jsonl`'s freshness.
 5. **Declare dependencies + wire CI** — cheapest reliability wins from CONCERNS.md
    (the suite is 1 123 tests in ~26 s and still runs nowhere automatically).
 6. **Queue workers (S9 remainder)** — the topology, spool and DLQ exist; a
-   consumer pool is what would make the spine event-driven.
+   consumer pool is what would make the spine event-driven. The convergence loop
+   (2026-09-19, below) is the *synchronous* version of that shape — rounds over a
+   measured frontier, stopping on a fixed point or a named cap — so the pool is
+   now an upgrade of a working loop rather than the only way to close it.
 7. **Correlation** (cert/favicon/JARM clustering, reverse-WHOIS, takeover) — the
    "18th asset type", and what the platform's asset model is for.
+8. **Teach `graph_normalize` the cloud kind** — add a `cloudresource` kind +
+   edges to `vocabulary.py`, declare `cloud_resource` in its `consumes`, and let
+   the model carry buckets and their dangling references. The takeover detector
+   can read `dangling.jsonl` either way; the model is what makes the buckets
+   first-class assets.
+
+## Added 2026-09-19 — the `cloud_resource` pipeline (S22) and the doc fold-in
+
+- **New asset pipeline, `cloud_resource`** — storage-bucket discovery on AWS S3,
+  Azure Blob and GCS (the v2 plan's **S22**; the schema's
+  `LABEL_CLOUD_RESOURCE` is the node it would feed). Passive: candidate names
+  harvested from the siblings' artifacts — CNAME claims in `records.jsonl`
+  (the strongest origin: the target's own DNS claimed the name), provider hosts
+  inside URLs / JS bundles / endpoints, and brand tokens × a name-shape
+  vocabulary (capped, `CLOUD_MAX_DERIVED`) — with provider-rule validation that
+  **refuses, never sanitizes** invalid names. Active: one GET per candidate
+  against the **provider** endpoint (never the target), classified by a
+  body-aware response matrix — Azure's absent *account* answers **409**, not
+  404, and the S3 301/400-with-region classes are recorded as "exists elsewhere"
+  rather than chased. Keyless, Docker-free, `passive_only=True` on the same
+  reading `asn_cidr` makes for RIPEstat/RDAP.
+- **The honesty rule carries over from the URL stage:** "no such bucket" and
+  "no answer" stay apart — a provider 404 is a fact (`dangling` when a CNAME
+  claimed it, else `absent`), while a refused connection or 5xx is
+  `unavailable` and fails the run. Two live-run lessons are pinned by tests: an
+  Azure NXDOMAIN becomes an **absence fact** (`nxdomain_absent`) only when a
+  sibling probe answered that same run (the network is provably up), and
+  generic-token buckets (`mail-app`) are marked `derived-generic` — a 200 on
+  such a name may be someone else's bucket.
+- **Wired as pipeline 5 in `run_recon.py`** (`--skip-cloud`), last on purpose —
+  the names/URL artifacts are its seed material; the combined report gained a
+  Pipeline 5 section and the mtime stale guard covers the new artifacts.
+- **Live run (`qbsco.net`, 2026-09-18, 225 s, 268 probes):** 41 buckets exist
+  (2 open, 39 `auth_required` — the "exists, denies anonymous reads" verdict the
+  design warns against misreading as "not found"), **215 dangling** (a name a
+  CNAME claimed, the provider says absent — S25's raw material), 11 Azure
+  NXDOMAIN absence facts, 1 unavailable (`ok: false`, honest). Zero claims came
+  from the siblings on this target (0 CNAME hits, 0 URL/JS/endpoint hits) —
+  every candidate was a derived brand shape, which bounds this run's recall and
+  is the headline: the seed loop's value shows on targets whose artifacts name
+  buckets, not on this one. `dangling.jsonl` is empty here for the same reason
+  (qbsco's CNAMEs point at outlook.com, not a bucket provider) — the artifact
+  is in place for the next target.
+- Coverage table: **6 built / 1 partial / 10 with no collection logic**.
+- Test count +49 (`test_cloud_resource.py`) on top of the escalation-era
+  suites; the recon suite then measured **1 296 passing** (verified 2026-09-19;
+  ~51 s), and the pipeline is mypy-clean. `graph_normalize` deliberately does
+  **not** consume it yet — its vocabulary has no cloud kind (a forward-looking
+  test pins exactly what changes at P2), so next move #8 above is the wiring.
+- **Docs reconciled to the code (this session):** this file (TL;DR, the
+  coverage table, the v2-open list, next moves), root `README.md`,
+  `docs/README.md`, `ARCHITECTURE.md` §2h, `STRUCTURE.md`, `TESTING.md`,
+  `CONCERNS.md` #4, and the `service/recon_pipeline/README.md` tree.
 
 ## 2026-09-19 — Task 2 of the recon-phase close-out: where the value lives
 
@@ -575,3 +772,365 @@ the handoff surface (nuclei-on-validated-URLs, takeover-verify `dangling.jsonl`,
 secret-scan the JS already collected); (3) then the platform items that remain
 true regardless of this re-scoping — organisation reconciliation, S4 seed
 ingestion, CI, queue workers, correlation.
+
+## 2026-09-19 — the convergence loop: rounds, the frontier, and decisive stopping
+
+**The question this answers.** Execution was one synchronous pass: assets were
+discovered, one generation of derivation happened (permutation over the known
+names, bounded internal recursion), and the run ended. Newly discovered names
+were never fed back in, and nothing measured whether another pass would have
+found anything.
+
+**Why "loop every pipeline until exhausted" was rejected** — three findings from
+the code, not preferences:
+
+1. **Three of the six collectors are apex-complete or seed-keyed.** The passive
+   names sources are *subtree* queries — crt.sh is asked for `%.<apex>` and
+   Wayback with `matchType=domain`, so one call already returns every depth
+   (`tests/recon/test_passive_sources.py` pins that contract, and
+   `test_every_source_takes_exactly_one_seed_domain` pins the apex-only
+   signature). `asn_cidr` answers about the addresses and orgs it is asked about.
+   `url_endpoint`'s four sources are all per-domain archives. Repeating them
+   re-asks a question whose answer cannot change — and the passive stage is the
+   most expensive thing to repeat (seven third parties).
+2. **The spec already rejected the naive version.** `recon.md` §4: a purely
+   maximalist recursion "maximizes theoretical coverage but fails in practice"
+   (WAF blackholing starves the loop of data, CDN tarpits explode the graph,
+   data avalanche). The v1 answer was the §5.2 Scoped Recursion Gate plus
+   scoring — iterations must be *earned per asset*, not granted to every
+   artifact.
+3. **"Exhausted" was undecidable.** Nothing recorded what an engagement had
+   already seen or attempted, so "found nothing new" and "already asked" were the
+   same state.
+
+**What was built instead** — a frontier-based loop (`platform/convergence.py`):
+
+- **The frontier is measured.** After each round the driver canonicalises every
+  line of each pipeline's newly declared `frontier_artifacts` into a
+  kind-prefixed asset token (`host:` / `ip:` / `url:` / `net:`), so two
+  spellings of one prefix are one asset and a bucket name cannot merge into a
+  hostname; every token ever seen goes into an append-only `Ledger`. A round's
+  **new assets** are the tokens the frontier has never held — that number is
+  what exhaustion means.
+- **Only generative stages repeat** (`repeat_stages` in the manifest, per
+  pipeline): names `active,permutation` (the one true generator), ports `scan`
+  (new addresses), ASN `lookup` (seed-keyed, so new addresses pay), cloud
+  `harvest,probe` (frontier-driven by construction), `graph_normalize` all three
+  stages (0.5–0.8 s, and the handoff must describe the final surface).
+  `url_endpoint` declares **none**, with the reason written down: S24 (the JS
+  crawl) is its real second-pass generator and does not exist yet.
+- **Stopping is a pure decision** (`decide()`), with a verdict that always names
+  its condition: `frontier_exhausted` (the only one that claims the surface ran
+  out), `frontier_exhausted_while_degraded` (a source was down: exhausted as far
+  as we could see, *not* proven complete), and the caps — `max_rounds_reached`,
+  `time_budget_exhausted`, `active_action_budget_exhausted`, `blocked_by_target`,
+  `round_failed`, `no_pipeline_declares_repeatable_stages`,
+  `no_frontier_artifacts_declared`. **Caps outrank the happy ending on purpose:**
+  a run that ran out of time with a quiet frontier reports the budget and says so,
+  rather than overstating "exhausted".
+- **`blocked_by_target` is read, not guessed.** A quarantine store is the one
+  place a block outlives the stage that suffered it, so the loop reads every
+  store a round's pipelines keep (`blocked_state()` in `platform/stealth/
+  quarantine.py`) and stops the moment one says stop — continuing at a target that
+  just blocked us is the least efficient thing available.
+- **Wired both ways:** `python -m service.recon_pipeline run --until-converged`
+  (`--max-rounds`, `--time-budget`, `--max-active-actions`) writes
+  `convergence.json` + `frontier_ledger.jsonl` into the run directory and puts
+  stage reports under `stages/round-<n>/`; `run_recon.py --until-converged`
+  drives the same policy over its five subprocesses and puts a Convergence
+  section in `RECON_<target>_OUTPUT.md`. A run without a policy is exactly one
+  round, unchanged.
+
+**Three real defects the work exposed, all fixed:**
+
+1. **`cloud_resource`'s probe stage never ran on the platform path.** The
+   contract adapter cached the first stage's report and returned it for the
+   second, so `run probe` was a no-op that reported success — and, once rounds
+   existed, a later round would have reported the previous round's artifacts.
+   Each declared stage is now invoked for real.
+2. **Per-round state would have made the loop look convergent because it was
+   stale.** `asn_cidr` and `graph_normalize` cache the first stage's intermediate
+   work for later stages; a new `BasePipeline.reset()` (called at each round
+   boundary) clears it, so round 2 re-queries and re-collects.
+3. **An empty `Ledger` is falsy.** `ledger or Ledger()` silently replaced the
+   file-backed ledger with an in-memory one, losing the entire cross-round
+   memory. Caught by the runner integration test.
+
+**Follow-up in the same session — a round now pays only for what is new.** The
+first cut still re-ran every repeat pipeline in every round, so a round that added
+nothing but a URL still re-scanned the address set and re-queried RIPEstat.
+Manifests now declare `repeat_on` — the frontier *kinds* that make a repeat worth
+its requests — and the runner gates on them:
+
+| Pipeline | `repeat_on` | Why that kind and no other |
+|---|---|---|
+| names (`active`,`permutation`) | `host` | permutation generates from newly-known names; a round that added only addresses or URLs would re-resolve the same names |
+| ports (`scan`) | `ip` | packets are spent for addresses |
+| ASN/CIDR (`lookup`) | `ip` | seed-keyed: only a new address makes a repeat pay |
+| cloud (`harvest`,`probe`) | `host`, `url` | candidates come from names and from provider hosts inside URLs/JS, and each probe is a request |
+| `graph_normalize` | `host`,`ip`,`url`,`net` | the handoff must reflect the final surface; with nothing new, the last document already does |
+
+Consequences, all tested: a round with no new address runs **no** port scan and
+makes **no** registry query; a round with nothing relevant for anybody reports
+`frontier_exhausted` (a converged loop) rather than
+`no_pipeline_declares_repeatable_stages` (a loop that never existed) — a new
+`Round.gated` flag is what separates the two; and every skip is *named* in the
+round's notes (`skipped asn/ports: nothing new of kind url to spend on`) instead
+of the round looking mysteriously idle. Declaring nothing means "any new asset",
+so the gate cannot silently disable a pipeline that never asked for one.
+
+Also fixed while wiring it: the skip list was built by walking a `set`, so the
+same round would have reported its skips in a different order in every process —
+the same defect class as the scope engine's "first containing network" bug; and
+the `run_recon.py` mirrors are now pinned to the manifests by test (frontier
+paths, repeat stages **and** `repeat_on`).
+
+**Then per asset: the attempt receipt (`platform/receipt.py`).** The gate above
+saves whole pipelines, but a pipeline that *does* repeat still walked its whole
+known set — the ports stage re-scanned every address when one new address
+appeared — because an address scanned with nothing open leaves no trace in any
+artifact, so "already scanned" and "never scanned" were the same state. That is
+the scan *receipt* CONCERNS had been carrying as an open gap, and it is now built:
+
+- **Keyed by `(asset, operation)`** on the vocabulary `platform/escalation.py`
+already asks about (`port_scan`, `url_validation`, …), because a receipt is only
+meaningful next to the question it answers.
+- **Only a conclusive attempt earns a skip.** `none` ("we looked, nothing there")
+and `found` are conclusive; `failed` and an unstated outcome are not — an outage
+is not knowledge, and recording it as an attempt would turn a transient failure
+into a permanent blind spot. A later conclusive attempt *upgrades* an inconclusive
+one; a later failure never overwrites an answer.
+- **First consumer: the port scan.** `port_service_host` builds its ladder over
+`receipt.pending(addresses, "port_scan")` and records every address it actually
+sends packets at (`scan_rung` — where the scan really ran, not where it was
+planned), with the outcome per address. `counts.skipped_attempted` and
+`counts.planned` report the saving instead of hiding it, and the receipt's path
+lands in `report.outputs`.
+- **Scope of the receipt:** per engagement. `run_recon.py --until-converged`
+points every round's children at `recon_<apex>_attempts_<stamp>.jsonl`
+(`PSH_ATTEMPT_RECEIPT`), so a fresh engagement cannot inherit the last one's scan
+history and skip work it never did — while the rounds *inside* a run share it,
+which is the whole point. Left unset (an ad-hoc single run), the receipt lives in
+the stage's `output/attempted.jsonl` and persists across runs, which is what the
+escalation policy's idempotency rule has always assumed.
+
+**Still open:** `url_endpoint`'s validate stage keeps its own private TTL instead
+of asking the receipt (the next natural consumer), the service-inspection pass
+does not consult it, and the escalation policy's `operations` argument is still
+answered by each caller from what it happens to know rather than from the receipt.
+
+Also: the frontier declarations are pinned against the curated artifact lists in
+`run_recon.py` (a test), which immediately caught `url_endpoint` declaring
+`output/urls.txt` when the canonical union lives in `passive/output/`. 70 new
+hermetic tests across the three parts of this work (`test_convergence.py` 44,
+`test_receipt.py` 19, `test_psh_pipeline.py` +7); the suite is **1 366 passing,
+1 skipped** (verified 2026-09-19); every new module and edited file is mypy-clean
+(the remaining errors in `quarantine.py`, `normalize.py` and `shared/` pre-date
+this work).
+
+**The loop's first live run — and the second bug it caught.** The 2026-09-19
+converged run on `qbsco.net` died at the cloud probe stage with a
+`UnicodeEncodeError` out of `run_recon.py`'s streamed writer: the child piped
+bytes in its own locale encoding (Python defaults a child's stdout to the ANSI
+code page on Windows, not UTF-8), the parent's UTF-8 decode turned them into
+U+FFFD, and the cp1252 console refused to encode that character at all — an
+engagement killed by one console glyph, three-quarters of the way through round
+1. Two fixes, both tested: children are told to speak UTF-8 (`PYTHONIOENCODING`/
+`PYTHONUTF8` in `_child_env()`, an operator's explicit setting wins), and the
+console write degrades a glyph instead of raising (`_console_write()` — the log
+file, the record that matters, is UTF-8 regardless; the console is only a
+window). The parent's own stdout is then reconfigured to UTF-8 so the redirected
+engagement log stays a UTF-8 file instead of a cp1252 file every tool downstream
+called binary. The re-run completed all three rounds.The loop closes the "nothing consumes the discovery surface" complaint for the
+*within-engagement* case the 2026-09-19 boundary allows.  What it does **not** do,
+and should not: run across engagements (no monitoring), or become an unbounded
+poller — every stop is either a measured fixed point or a named cap.  The queue
+workers (S9) remain the event-driven version of the same loop; today's is
+synchronous by design.
+
+## 2026-09-19 — the settled schema: the graph the runs earned
+
+The schema discussion this clean slate was made for, held in short bursts and
+argued from the observed data (`graph_state.json`, 6 476 assets), then
+implemented the same day.
+
+**The decisions, and what argued for them**
+
+- **Nodes: ten asset kinds** — the pipeline manifests' `asset_types` reconciled
+  with HackerOne's structured-scope taxonomy. `Wildcard` is a scopeable H1
+  asset, so it stays a node (overruling the earlier "property" lean);
+  `JavaScript`/`Host` are roles, not assets; H1's APK/Hardware family stays out
+  until a collector can produce one. The gap the exercise exposed: the cloud
+  pipeline declared `CloudResource` but the model had no cloud kind — buckets
+  wore a `domain` costume.
+- **`cloud` identity = `provider:name`** (`cloud:aws:acme-docs`). Argued against
+  hostname identity: S3 answers at several endpoints at once (B fragments one
+  bucket into three nodes), and the *dangling* case — the highest-value finding
+  — has no region to bake into an id. Intrinsic facts in the identity,
+  observations in the properties; the same rule the model already applies to
+  `domain:qbsco.net` vs the IP it resolves to.
+- **Edges: twelve claim-typed types, 14→12** — the type names the claim; who
+  claimed it moves to properties. `ptr_maps_to` + `attributed_to` folded into
+  `resolves_to` with `method` (`a`/`ptr`/`shodan`); `allocated_to` +
+  `registered_to` folded into `owned_by` with `claim`. `announced_by` and
+  `hosted_by` stay separate on purpose: routing ≠ ownership, inference ≠
+  observation. New: `cname_points_to` — the dangling finding is one traversable
+  edge carrying its outcome.
+- **Time: `first_seen` write-once, `last_seen` monotonic max** on every node and
+  edge, merged from the artifact rows' own stamps (`timestamp`, `validated_at`,
+  `probed_at`); artifacts without stamps change nothing. Full bitemporal was
+  rejected: the artifacts *are* the observation log, and each `evidence` entry
+  names one.
+
+**The implementation** (`vocabulary.py` rewritten; `normalize`, `merge`,
+`score`, `sources`, `measurement`, cloud's `seeds`/`verify`/`emit`/`main`)
+
+- Cloud ingestion end to end: the CNAME *claimant* now travels from the names
+  stage's `records.jsonl` through cloud's seeds → verdict → artifacts, and
+  `graph_normalize` reads the cloud pipeline (`GN_INCLUDE_CLOUD`, `GN_CLOUD_DIR`)
+  to write `cloud` nodes and `cname_points_to` edges. One bucket, many probe
+  rows → one node, latest-probe outcome wins, claimants union.
+- `method`/`claim` are **set-once** properties: the first hand to assert a claim
+  keeps its kind. (First version guarded by edge property; final rule is that
+  *whose* evidence an edge holds is read from its `sources` list — see the scope
+  fix below.)
+- Scoring: `cloud_resource:probe`/`dangling` map to the live-confirmation weight
+  (`cloud-verified-live`); a dangling bucket gets the engine's dead-host penalty
+  and `verified_dead` evidence state — a measured absence, not a missing check.
+- `cloud_probe` joins the derived-operations vocabulary, so the escalation
+  policy can refuse to re-probe an answered bucket.
+- The live Neo4j-free suite is the only suite: nothing in this change needed a
+  database, and none of it pretended otherwise.
+
+**Two real bugs the tests caught mid-implementation** (both would have shipped
+silently)
+
+1. **A third party could pull an address into scope.** Folding
+   `attributed_to` into `resolves_to` made Shodan's claims the same *type* as
+   our own DNS answers, and `_register_dns_scope` registered every such edge —
+   `legacy.acme.test` (a Shodan attribution) replaced `www.acme.test` as the
+   address's registering name. The rule is now: an edge counts as *our*
+   resolution only if the records stream is among its sources.
+2. **My first scope guard ate the original loop.** The edit left both loops in
+   the function; the second (unguarded) one ran after the first and registered
+   everything. Caught by the same test that caught bug 1, for the same reason,
+   after the "fix" — which is why the test exists.
+
+**Verified:** 1 373 passed / 1 skipped (5 new schema tests; 59 in
+`test_graph_normalize.py`); mypy clean on every changed file (the one remaining
+error is pre-existing `shared/colorlog.py`); live rebuild of the model from the
+committed qbsco.net artifacts produces 42 `cloud` nodes with probe outcomes and
+`owned_by` edges carrying `claim` — the vocabularies the artifacts predate are
+reconstructed on read, exactly what the file contract promised.
+
+## 2026-09-19 — the pre-run graph schema removed: a clean slate for the schema discussion
+
+**The decision.** The Neo4j layer (`schema.py`, `repository.py`, `client.py`,
+and the typed `GraphSink` writers with seed ingestion) was written **before the
+first recon run existed** — every one of its 20+ labels and seven relationship
+types was a guess about shapes the collectors had never produced. The first
+converged run then produced `graph_state.json`: **6 476 assets of observed
+reality** (4 live hosts, 13 addresses, 3 423 networks, 2 577 endpoints, 137 JS
+bundles, 41 buckets with their probe verdicts). Designing the real schema from
+that document beats arguing with a guess, so the guess was removed rather than
+migrated.
+
+**Removed:** `platform/graph/{schema,repository,client}.py`,
+`tests/recon/test_repository.py` (the live-Neo4j script — its removal also ends
+the one suite exclusion: `tests/recon` is now 1 368/1 368 hermetic green), the
+`GraphSink`'s typed writers (`write_asset`/`write_edge`/`write_resolution`/
+`ingest_program`) and its `TYPE_TO_LABELS` map, the runner's `connect_repository()`
+call, and the CLI's replay-into-Neo4j behaviour.
+
+**Kept — because live runs proved them, not the plan:**
+
+1. **The degrade contract.** `GraphSink` survives, schema-free: `write()`
+   journals every offered write as `(asset_type, canonical_value, payload,
+   source, at)` — deliberately schema-agnostic, so whatever the discussion
+   settles on can replay these records — and reports `available=False` with the
+   reason. A run still cannot fail because storage is absent.
+2. **`replay` refuses to pretend.** It reports how many journal rows await the
+   future schema and returns non-zero, instead of claiming a flush that cannot
+   happen. Verified live: `python -m service.recon_pipeline replay` →
+   "no graph schema is defined yet — 0 write(s) replayed".
+3. **The MERGE-on-identity requirement**, recorded in the module docstring and
+   in CONCERNS #9 as a *requirement* for the next design: one canonical
+   identity per asset, stable across writes. The mechanism (multi-label MERGE)
+   was the guess; the requirement is the lesson.
+
+**What the schema discussion now starts from** (all measured on `qbsco.net`):
+the kind distribution in `graph_state.json` (`network` 3 431 and `url` 2 898
+dominate; `service` 60, `ip` 19, `domain` 17, `organization` 13, `asn` 3,
+`parameter` 3 — the tail is where the old schema's 20+ labels had nothing to
+say), the trust classes (`discovered` 6 415 / `observed` 28 / `declared` 1),
+the edge families `graph_normalize` actually emits, and the two open design
+questions the old schema answered by guessing: how organisations reconcile
+(one real org is several `organization` nodes today), and whether the cloud
+kind exists (the file model still has no kind for buckets — the old schema had
+a `:CloudResource` label no file ever matched).
+
+**Docs reconciled** (every current-state claim): `README.md` (Built section,
+CLI description, layout table), `INTEGRATIONS.md` (the Neo4j section rewritten
+around the removal), `STACK.md` (driver kept for the rebuild, container
+reserved), `PLATFORM.md` (graph row, degrade example, not-built, evidence),
+`ARCHITECTURE.md` (diagram, §2d/§2f wording, §3 rewritten, planned list),
+`STRUCTURE.md` (tree + entry table), `TESTING.md` (the exclusion note),
+`CONCERNS.md` (#4 rewritten, #8 rewritten, #9 kept as a requirement),
+`RECON_GUIDE.md` (seam wording in the diagram, degrade list, handoff gap),
+`service/recon_pipeline/README.md` (degrade prose, example call, degrade
+table, replay command), `graph_normalize/{__init__,emit}.py` docstrings and
+README, and `graph_crud_contract.md` marked SUPERSEDED. The `recon_docs/` spec
+family is left as history — it describes what was planned, and the plans are
+allowed to disagree with the code by the docs' own rule.
+
+**Verified:** `tests/recon -q` → 1 368 passed (the exclusion gone), full suite
+1 368 passed / 1 skipped (the scraper sample-capture skip, by design), mypy
+clean on every touched file, `replay` smoke-tested, no broken doc links.
+
+## 2026-09-19 — the loop, live: convergence proven on a real target
+
+**The run.** `python run_recon.py -t qbsco.net --until-converged --max-rounds 4
+--time-budget 10800`. **Verdict: `frontier_exhausted` in 3 rounds / 3 105 s** —
+the only verdict that claims the surface ran out, and the first time a stop on
+this codebase is measured rather than assumed. (`convergence.json`,
+`frontier_ledger.jsonl`, the receipt, and a Convergence section in the combined
+report are all written; 1 368 passing after the encoding fixes.)
+
+| Round | New assets | Known | Pipelines run | Seconds | What happened |
+|---|---|---|---|---|---|
+| 1 | 6 472 | 6 472 | names, ports, url, asn, cloud | 1 696.8 | the full pass: everything is new |
+| 2 | **4** | 6 468 | names, ports, asn, cloud | 1 344.0 | one generation later; the 4 were M365 addresses round 2's permutation seed set derived |
+| 3 | **0** | 6 468 | ports, asn | **63.9** | gated: `skipped cloud/names: nothing new of kind ip to spend on` → STOP |
+
+- **The stop is decisive and cheap.** Round 3 ran 2 pipelines in 64 s — under
+  4 % of round 1's cost — and stopped with a named reason, not a timeout. The
+  time budget (3 h) was never touched.
+- **The receipt is where the money is.** Round 2's ladder was built over
+  `receipt.pending()` — **5 of 13 addresses skipped, 8 planned** — and round 2
+  wrote 4 new attempts, **zero re-attempts** (17 distinct assets in the receipt,
+  one attempt each). Two addresses with the same open-port answer as round 1
+  were simply not touched again; the other five M365/`auth_required` addresses
+  were skipped outright. The ladder also held `hosted` addresses at top-N (8
+  classified, `escalation_refused_hosted` on the two that would once have eaten a
+  13-minute L3 range scan).
+- **What convergence found that one pass did not: 4 new assets.** All four are
+  `ip:` tokens from round 2's re-resolution — i.e. the second generation
+  *did* produce a fact the first pass did not hold. The honest reading: on this
+  small M365-hosted target, convergence added ~0.06 % new surface; the value of
+  the loop is structural (a proof of exhaustion, a cheaper any-retry), not a
+  recall explosion here. The loop's recall case is S24's JS crawl — the missing
+  second-pass generator — not more rounds of what already ran.
+- **The loop is honest about degradation.** Common Crawl was unreachable again
+  (3 ConnectTimeouts on `collinfo.json`); `SourceUnavailable` fired, the source
+  was recorded failed with its reason, and the verdict notes nothing was
+  degraded because the *frontier* was still measured from the sources that did
+  answer. The earlier run's Azure-probe NXDOMAIN storm resolved itself here:
+  0 `unavailable`, 2 open / 40 `auth_required` / 215 dangling across 268 probes
+  in 222 s — same shape as the baseline single loop.
+- **Round 1 ≈ the old single pass, costed.** names 1 162.1 s / 4 live hosts
+  (baseline: 1 123.6 s / 4), ports 105 s, urls 94 s, asn 39–94 s, cloud 222 s.
+  Convergence is *not* free — it costs one extra names pass (round 2's
+  permutation is ~15 min, the designed stealth pacing) — which is exactly why
+  the gate and the receipt exist: round 3 cost 64 s, not another 22 minutes.
+
+

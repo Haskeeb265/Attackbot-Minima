@@ -1,32 +1,3 @@
-"""The vocabulary: one neutral asset model, and one provisional graph mapping.
-
-Two things live here, and they are deliberately separate.
-
-**The model** — node kinds, edge types and trust classes.  This is *our*
-vocabulary: it is what the pipelines' facts were normalised *into*, and it does
-not depend on any storage decision.  ``domain`` is a hostname, ``ip`` is an
-address, ``service`` is an address:port speaking a protocol, and so on.
-
-**The mapping** — :data:`GRAPH_LABELS` and :data:`GRAPH_RELATIONSHIPS` translate
-those neutral names into the label and relationship names a graph database would
-use.  **The schema is not final**, so this mapping is explicitly provisional: it
-is a single dict each, it is emitted alongside every run (``vocabulary.json``) so
-artifacts record which mapping produced them, and it is the *only* thing that has
-to change when the schema settles.  No other module in this package names a
-label.
-
-Trust classes say how the claim was obtained, which is the difference between a
-fact and a rumour:
-
-============================ ==================================================
-``declared``                 the operator stated it (the apex/scope they gave us)
-``observed``                 we measured it (a DNS answer, a scan, a probe)
-``discovered``               a third party claims it (CT logs, registries, archives)
-``inferred``                 we derived it by arithmetic (a classification, a
-                             containment, an attribution)
-============================ ==================================================
-"""
-
 from __future__ import annotations
 
 # --------------------------------------------------------------------------- #
@@ -42,19 +13,37 @@ PARAMETER = "parameter"
 ASN = "asn"
 NETWORK = "network"
 ORGANIZATION = "organization"
+#: A cloud resource a provider hosts, named by the provider's own namespace.
+#: The identity is ``provider:name`` (see :func:`.normalize.cloud_identity`) —
+#: the two facts about a bucket that will never change.  Everything observed
+#: (region, endpoint spellings, last probe outcome) is a property, because a
+#: bucket reached at three regional endpoints is one asset, and a *dangling*
+#: reference has no region at all.
+CLOUD = "cloud"
 
-NODE_KINDS = (DOMAIN, WILDCARD, IP, SERVICE, URL, PARAMETER, ASN, NETWORK, ORGANIZATION)
+NODE_KINDS = (DOMAIN, WILDCARD, IP, SERVICE, URL, PARAMETER, ASN, NETWORK, ORGANIZATION, CLOUD)
 
 # --------------------------------------------------------------------------- #
 # Edge types
+#
+# The type names the *claim*, not the data shape: claims that differ in who
+# made them or in kind of assertion get different types; claims that differ
+# only in detail carry the detail as properties (``method``, ``claim``).
 # --------------------------------------------------------------------------- #
 
-#: A hostname resolves to an address (forward DNS we performed).
+#: One name's answer about where another asset lives.  Carries ``method``:
+#: ``a`` (our forward DNS), ``ptr`` (the operator's reverse-DNS label), or
+#: ``shodan`` (a third party's per-address hostname list).  A PTR label and a
+#: third party's observation are different claims from different hands — the
+#: type is shared because the *question* is one question (what does this name
+#: point at?); the method is on the edge so a scope decision can weigh them
+#: differently.
 RESOLVES_TO = "resolves_to"
-#: An address's PTR name (reverse DNS).  The mirror of ``resolves_to`` is *not*
-#: the same claim: a PTR record is the network operator's label for an address,
-#: which is exactly why the pair lives as two edge types.
-PTR_MAPS_TO = "ptr_maps_to"
+#: A hostname's CNAME names a cloud resource.  Carries the probe outcome as
+#: properties (``outcome``, ``code``, ``probe_url``): the dangling reference —
+#: a name that claims a bucket the provider says is absent — is *one edge with
+#: an outcome property*, which is exactly the finding a vuln engine traverses.
+CNAME_POINTS_TO = "cname_points_to"
 #: A hostname appears in the URL pipeline's harvest.
 HAS_URL = "has_url"
 #: A URL exposes a named query parameter, *as observed on that URL*.
@@ -75,24 +64,25 @@ IN_NETWORK = "in_network"
 #: An address's origin AS, per registry/RDAP data.
 BELONGS_TO_ASN = "belongs_to_asn"
 #: A network is announced by an AS (a routing claim, not an ownership claim).
+#: Deliberately separate from ``owned_by``: an AS transits prefixes it does not
+#: own, and "does this org actually control this network?" is a question the
+#: engine must be able to ask — collapsing the two would answer it in advance.
 ANNOUNCED_BY = "announced_by"
-#: A registry allocates a network to an organisation.
-ALLOCATED_TO = "allocated_to"
-#: An AS is operated by / registered to an organisation.
-REGISTERED_TO = "registered_to"
+#: A registry's ownership claim over a network or an AS.  Carries ``claim``:
+#: ``allocation`` (a network was allocated to an organisation) or
+#: ``registration`` (an AS is registered to one).  One type because the question
+#: is one question — who holds this? — and the claim kind is the detail.
+OWNED_BY = "owned_by"
 #: An address is hosted by a provider, per a classification verdict.  Inferred,
 #: never observed: "this looks like a CDN edge" is a judgement (the ports stage's
-#: ``cdn_classified.jsonl`` carries the evidence list it was made from).
+#: ``cdn_classified.jsonl`` carries the evidence list it was made from).  Also
+#: deliberately separate from ``owned_by``: "hosted by Cloudflare" mislabeled as
+#: ownership would actively mislead a scope judgment.
 HOSTED_BY = "hosted_by"
-#: A third-party index says a hostname sits on an address (Shodan InternetDB's
-#: per-address hostname list).  Deliberately *not* collapsed into ``ptr_maps_to``
-#: or ``resolves_to``: a PTR label and a third party's observation are different
-#: claims from different hands, and ASM cares which one it is holding.
-ATTRIBUTED_TO = "attributed_to"
 
 EDGE_TYPES = (
     RESOLVES_TO,
-    PTR_MAPS_TO,
+    CNAME_POINTS_TO,
     HAS_URL,
     OBSERVED_PARAMETER,
     REDIRECTS_TO,
@@ -101,10 +91,8 @@ EDGE_TYPES = (
     IN_NETWORK,
     BELONGS_TO_ASN,
     ANNOUNCED_BY,
-    ALLOCATED_TO,
-    REGISTERED_TO,
+    OWNED_BY,
     HOSTED_BY,
-    ATTRIBUTED_TO,
 )
 
 # --------------------------------------------------------------------------- #
@@ -150,13 +138,16 @@ def node_id(kind: str, identity: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# The provisional graph mapping — the one file to edit when the schema settles
+# The graph mapping — settled by the schema discussion of 2026-09-19
+#
+# Nodes are the ten asset kinds.  Edge types name claims; who claimed a thing
+# travels as edge properties (``trust``, ``sources``, ``evidence``, ``method``,
+# ``claim``), because the vuln engine reasons about the relation and cites the
+# provenance.  ``GRAPH_WRITTEN`` is still ``False``: no database writer exists
+# yet, and the field says so rather than promising one.
 # --------------------------------------------------------------------------- #
 
-#: Neutral node kind → the labels a graph write would use.  Provisional: taken
-#: from the vocabulary the design documents already use, so a future writer has a
-#: starting point rather than a blank page.  Values are tuples because a node may
-#: carry several labels (a hostname is both an asset and a domain).
+#: Neutral node kind → the labels a graph write would use.
 GRAPH_LABELS: dict[str, tuple[str, ...]] = {
     DOMAIN: ("Asset", "Domain"),
     WILDCARD: ("Asset", "Wildcard"),
@@ -167,14 +158,17 @@ GRAPH_LABELS: dict[str, tuple[str, ...]] = {
     ASN: ("Asset", "ASN"),
     NETWORK: ("Asset", "CIDR"),
     ORGANIZATION: ("Asset", "Organization"),
+    CLOUD: ("Asset", "CloudResource"),
 }
 
-#: Neutral edge type → the relationship a graph write would use, plus its
-#: direction, written as ``"from -> to"`` so a reader can check it against the
-#: neutral description in :data:`EDGE_TYPES` comments above.
+#: Neutral edge type → the relationship a graph write would use, plus the
+#: endpoint kinds it may join, written as ``"from -> to"`` so a reader can check
+#: it against the neutral descriptions above.  ``resolves_to`` joins names to
+#: addresses in *both* directions (forward and reverse claims), which is why its
+#: direction names both.
 GRAPH_RELATIONSHIPS: dict[str, tuple[str, str]] = {
-    RESOLVES_TO: ("RESOLVES_TO", "domain -> ip"),
-    PTR_MAPS_TO: ("PTR_MAPS_TO", "ip -> domain"),
+    RESOLVES_TO: ("RESOLVES_TO", "domain -> ip | ip -> domain (ptr/shodan carry method)"),
+    CNAME_POINTS_TO: ("CNAME_POINTS_TO", "domain -> cloud"),
     HAS_URL: ("HAS_URL", "domain -> url"),
     OBSERVED_PARAMETER: ("OBSERVED_PARAMETER", "url -> parameter"),
     REDIRECTS_TO: ("REDIRECTS_TO", "url -> url"),
@@ -183,17 +177,16 @@ GRAPH_RELATIONSHIPS: dict[str, tuple[str, str]] = {
     IN_NETWORK: ("IN_NETWORK", "ip -> network"),
     BELONGS_TO_ASN: ("BELONGS_TO_ASN", "ip -> asn"),
     ANNOUNCED_BY: ("ANNOUNCED_BY", "network -> asn"),
-    ALLOCATED_TO: ("ALLOCATED_TO", "network -> organization"),
-    REGISTERED_TO: ("REGISTERED_TO", "asn -> organization"),
+    OWNED_BY: ("OWNED_BY", "network -> organization | asn -> organization"),
     HOSTED_BY: ("HOSTED_BY", "ip -> organization"),
-    ATTRIBUTED_TO: ("ATTRIBUTED_TO", "domain -> ip"),
 }
 
 #: The one-sentence caveat that travels with every artifact of this pipeline.
 SCHEMA_NOTE = (
-    "label/relationship names are provisional: this pipeline emits a file-only "
-    "model and does not write to the graph database, because the schema is not "
-    "final. Edit vocabulary.py's GRAPH_LABELS / GRAPH_RELATIONSHIPS to settle it."
+    "the schema is settled (2026-09-19): ten asset kinds, twelve claim-typed "
+    "edges; the mapping below is normative. This pipeline still emits a "
+    "file-only model — no database writer exists yet, so nothing was written "
+    "to a graph (graph_written: false)."
 )
 
 #: The field the model writes to say a mapping exists but was not used.

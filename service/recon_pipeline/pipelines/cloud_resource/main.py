@@ -40,7 +40,7 @@ from .seeds import harvest
 
 log = logging.getLogger("cloud_resource.main")
 
-ALL_STAGES: tuple[str, ...] = ("harvest", "probe")
+ALL_STAGES: tuple[str, ...] = ("harvest", "probe", "takeover")
 
 CANDIDATES_JSONL = "candidates.jsonl"
 
@@ -150,7 +150,7 @@ def run_pipeline(
                 max_derived=max_derived,
             )
             report.counts.update(harvest_counts)
-        else:  # probe
+        elif stage == "probe":
             if not candidates and candidates_path.is_file():
                 candidates = _read_candidates(candidates_path)
                 notes.append("probe re-used the existing candidate artifact (harvest not in this run)")
@@ -189,6 +189,25 @@ def run_pipeline(
                     f"probe cap reached ({max_probes or settings.MAX_PROBES}); "
                     f"{probe_counts['truncated']} candidate(s) not probed"
                 )
+
+        else:  # takeover (S25): detector, one GET per fingerprint-matched claim
+            from . import takeover as takeover_mod
+
+            records_rows = _read_records(names_dir)
+            findings, takeover_counts = takeover_mod.run_takeover(
+                records_rows,
+                fetcher=fetcher or takeover_mod.http_get,
+                output_dir=output_dir,
+            )
+            report.counts.update(takeover_counts)
+            report.outputs["takeover"] = (output_dir / "takeover.jsonl").as_posix()
+            if takeover_counts.get("claims") and not takeover_counts.get("fingerprint_matched"):
+                notes.append("takeover: claims existed but none matched a fingerprint")
+            notes.append(
+                f"takeover: policy gate set to '{settings.TAKEOVER_POLICY}' — "
+                f"{takeover_counts.get('scored', 0)} scored, "
+                f"{takeover_counts.get('informational', 0)} informational"
+            )
 
     # The harvest artifacts are outputs too, whenever the stage ran in-process.
     if candidates:
@@ -232,10 +251,27 @@ def _read_candidates(path: Path) -> list[Candidate]:
                     origins=set(row.get("origins") or ()),
                     sources=set(row.get("sources") or ()),
                     evidence=[str(item) for item in row.get("evidence") or ()],
+                    claimants=[str(item) for item in row.get("claimants") or ()],
                     distinctive=bool(row.get("distinctive", True)),
                 )
             )
     return rows
+
+
+def _read_records(names_dir: Path | str | None) -> list[dict]:
+    """The names stage's records stream — the takeover detector's raw material.
+
+    Same sibling-discipline as the harvest: the artifact is read, not the
+    sibling's code, and absence is a state the report shows (an empty records
+    list means no claims were ever seen, which the counts make visible).
+    """
+    from service.recon_pipeline.platform.common.io import read_jsonl
+
+    root = Path(names_dir) if names_dir else settings.NAMES_DIR
+    records_path = root / "active" / "output" / "records.jsonl"
+    if not records_path.is_file():
+        return []
+    return read_jsonl(records_path)
 
 
 def _log_summary(report: CloudReport) -> None:

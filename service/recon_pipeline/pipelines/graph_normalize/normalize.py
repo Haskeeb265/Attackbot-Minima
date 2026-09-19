@@ -41,6 +41,7 @@ UNION_PROPS = frozenset(
     {
         "handles",
         "names",
+        "claimants",
         "intel_tags",
         "intel_vulns",
         "intel_cpes",
@@ -62,10 +63,27 @@ UNION_PROPS = frozenset(
 #: How many distinct property collisions are kept in the report.
 _MERGE_NOTE_LIMIT = 20
 
+#: Properties that record *what kind of claim an edge carries* and are
+#: therefore set-once: the first hand to assert the claim keeps its kind.  A
+#: later merge may add sources and evidence, but must not relabel an allocation
+#: as a registration or a forward answer as a reverse one — the claim kind is
+#: not a union-able detail.  (Whose evidence an edge holds is *not* this; that
+#: is the edge's ``sources`` list, which unions.)
+SET_ONCE_PROPS = frozenset({"method", "claim"})
+
 
 @dataclass
 class Node:
-    """One asset in the model."""
+    """One asset in the model.
+
+    Time lives on every node as two monotonic fields: ``first_seen`` is the
+    earliest artifact timestamp for this asset and is **write-once** — a re-run
+    can never move it — and ``last_seen`` is the most recent, raised by a
+    re-confirmation and untouched by silence.  Neither ever resets on merge:
+    "is this stale?" must be answerable by looking, not by trusting whoever
+    wrote last.  The deep history stays in the artifacts each ``evidence`` entry
+    names; the graph is a map, the archive is the log.
+    """
 
     kind: str
     identity: str
@@ -73,6 +91,8 @@ class Node:
     trust: str = vocab.TRUST_UNKNOWN
     sources: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
+    first_seen: str = ""
+    last_seen: str = ""
     #: Set by the scoring pass (S2), not by the merge: ``None`` means "not
     #: scored" — either scoring was switched off for the run or the pass refused
     #: to guess (see :mod:`~.score`).
@@ -100,6 +120,8 @@ class Node:
             "identity": self.identity,
             "trust": self.trust,
             "sources": sorted(set(self.sources)),
+            **({"first_seen": self.first_seen} if self.first_seen else {}),
+            **({"last_seen": self.last_seen} if self.last_seen else {}),
             **({"score": self.score, "band": self.band} if self.score is not None else {}),
             **({"evidence_state": self.evidence_state} if self.evidence_state else {}),
             **({"score_audit": self.score_audit} if self.score_audit else {}),
@@ -110,7 +132,12 @@ class Node:
 
 @dataclass
 class Edge:
-    """One relationship in the model, always with the claim behind it."""
+    """One relationship in the model, always with the claim behind it.
+
+    The same monotonic time rule as the node's: ``first_seen`` write-once,
+    ``last_seen`` monotonic max.  On a ``has_url`` edge these are the difference
+    between current surface and a 2013 archive mention.
+    """
 
     type: str
     source_id: str
@@ -119,6 +146,8 @@ class Edge:
     trust: str = vocab.TRUST_UNKNOWN
     sources: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
+    first_seen: str = ""
+    last_seen: str = ""
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -131,6 +160,8 @@ class Edge:
             "to": self.target_id,
             "trust": self.trust,
             "sources": sorted(set(self.sources)),
+            **({"first_seen": self.first_seen} if self.first_seen else {}),
+            **({"last_seen": self.last_seen} if self.last_seen else {}),
             "props": self.props,
             **({"evidence": self.evidence} if self.evidence else {}),
         }
@@ -180,8 +211,16 @@ class Model:
         evidence: str = "",
         max_nodes: int | None = None,
         max_evidence: int = 8,
+        at: str = "",
     ) -> Node | None:
-        """Add or merge one node; ``None`` when the node cap refused it."""
+        """Add or merge one node; ``None`` when the node cap refused it.
+
+        ``at`` is the observation timestamp of the row being merged — an
+        ISO-8601 stamp from the artifact, or empty when the artifact carries
+        none.  It feeds the monotonic ``first_seen``/``last_seen`` rule; an
+        empty stamp changes nothing, because an artifact without a timestamp
+        says nothing about time.
+        """
         if not identity:
             return None
         if kind not in vocab.NODE_KINDS:
@@ -195,8 +234,25 @@ class Model:
             existing = Node(kind=kind, identity=identity, trust=trust)
             self.nodes[key] = existing
         existing.trust = vocab.strongest_trust([existing.trust, trust])
+        existing.first_seen, existing.last_seen = self._merge_time(existing.first_seen, existing.last_seen, at)
         _merge_into(existing, source, evidence, props, self, max_evidence)
         return existing
+
+    @staticmethod
+    def _merge_time(existing_first: str, existing_last: str, at: str) -> tuple[str, str]:
+        """The monotonic time rule: write-once first-seen, max last-seen.
+
+        Comparisons are on the *raw strings*, not parsed datetimes, on purpose:
+        every producer writes ISO-8601 UTC with the same shape, so lexicographic
+        order is chronological order, and a parse failure cannot silently turn
+        "earliest" into "latest".  An empty incoming stamp changes nothing —
+        an artifact that carries no timestamp says nothing about time.
+        """
+        if not at:
+            return existing_first, existing_last
+        first = at if not existing_first or at < existing_first else existing_first
+        last = at if not existing_last or at > existing_last else existing_last
+        return first, last
 
     def add_edge(
         self,
@@ -210,8 +266,14 @@ class Model:
         evidence: str = "",
         max_edges: int | None = None,
         max_evidence: int = 8,
+        at: str = "",
     ) -> Edge | None:
-        """Add or merge one edge; ``None`` when the edge cap refused it."""
+        """Add or merge one edge; ``None`` when the edge cap refused it.
+
+        ``at`` is the observation timestamp of the row being merged, feeding the
+        same monotonic rule as the node's.  On a ``has_url`` edge it is the
+        difference between current surface and a 2013 archive mention.
+        """
         if edge_type not in vocab.EDGE_TYPES:
             raise ValueError(f"unknown edge type {edge_type!r}")
         if not source_id or not target_id or source_id == target_id:
@@ -234,6 +296,7 @@ class Model:
                 if endpoint not in self.nodes:
                     self.endpoint_only.append(endpoint)
         existing.trust = vocab.strongest_trust([existing.trust, trust])
+        existing.first_seen, existing.last_seen = self._merge_time(existing.first_seen, existing.last_seen, at)
         _merge_edge(existing, source, evidence, props, max_evidence)
         return existing
 
@@ -326,6 +389,9 @@ def _merge_into(
         current = node.props.get(key)
         if current in (None, "", [], {}):
             node.props[key] = value
+        elif key in SET_ONCE_PROPS:
+            # Who claimed this was settled by the first writer.
+            pass
         elif key in UNION_PROPS:
             node.props[key] = _union(current, value)
         elif current != value:
@@ -357,6 +423,12 @@ def _merge_edge(
         current = edge.props.get(key)
         if current in (None, "", [], {}):
             edge.props[key] = value
+        elif key in SET_ONCE_PROPS:
+            # The first hand to claim this edge owns its attribution: a Shodan
+            # row arriving after our own records must not relabel the edge as
+            # the third party's claim, and an allocation must not be relabelled
+            # a registration.
+            pass
         elif key in UNION_PROPS:
             edge.props[key] = _union(current, value)
 
@@ -429,6 +501,20 @@ def wildcard_identity(suffix: str) -> str:
     """Identity for a wildcard answer: the ``*.`` form, lowercased."""
     token = suffix.strip().rstrip(".").lower()
     return token if token.startswith("*.") else f"*.{token}"
+
+
+def cloud_identity(provider: str, name: str) -> str:
+    """Identity for a cloud resource: ``provider:name``.
+
+    The two facts about a bucket that will never change.  The provider prefix is
+    what makes the identity unique — bucket names are unique *per provider*, not
+    globally — and the endpoint spellings (``s3.eu-west-1.amazonaws.com``,
+    access points, website endpoints) are observations, not identity, so a bucket
+    seen at three endpoints is one node, and a *dangling* reference — no bucket,
+    no region — is still a well-formed node: the identity names the claim, the
+    properties record the outcome.
+    """
+    return f"{provider.strip().lower()}:{name.strip().lower()}"
 
 
 def organization_identity(name: str) -> str:

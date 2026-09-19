@@ -61,7 +61,15 @@ import shared.colorlog as colorlog
 from service.recon_pipeline.platform.common.config import TARGET
 
 from ...platform.stealth.session import StealthConfig, StealthSession
+from service.recon_pipeline.platform import escalation
 from service.recon_pipeline.platform.common.normalize import canonicalize_host
+from service.recon_pipeline.platform.receipt import (
+    OUTCOME_FAILED,
+    OUTCOME_FOUND,
+    OUTCOME_NONE,
+    Receipt,
+    asset_token,
+)
 from . import seed_builder
 from .active import ladder, naabu, nmap, tools, webprobe
 from .classify import cdn
@@ -76,6 +84,7 @@ from .normalize import (
 from .passive import internetdb, rdap
 from .passive import ptr as ptr_mod
 from .settings import (
+    attempt_receipt_path,
     CDN_PROBE,
     DEFAULT_SOURCE_TIMEOUT,
     ESCALATE,
@@ -411,9 +420,33 @@ def run_port_service_host_stage(
             output_dir / CDN_FILE, (verdict.to_dict() for verdict in classified)
         ).as_posix()
 
+    # ---- 5b. The attempt receipt ---------------------------------------------
+    # An address scanned with nothing open leaves no trace in any artifact, so a
+    # second pass over the same address is indistinguishable from the first —
+    # which is the whole reason this stage used to pay for it twice.  The receipt
+    # is the trace: ``port_scan`` on an address that answered, or errored, or had
+    # nothing open.  Failed scans are deliberately *not* a skip (see
+    # ``platform.receipt``): an outage is not knowledge.
+    receipt = Receipt(attempt_receipt_path(output_dir))
+    already_attempted = receipt.attempted_assets(escalation.OPERATION_PORT_SCAN)
+    planned_addresses = [
+        address
+        for address in seeds.addresses
+        if (asset_token(address, "ip") or address) not in already_attempted
+    ]
+    skipped_attempted = len(seeds.addresses) - len(planned_addresses)
+    if skipped_attempted:
+        log.info(
+            "attempt receipt: %d of %d address(es) already scanned in this "
+            "engagement, not queued again (%s)",
+            skipped_attempted,
+            len(seeds.addresses),
+            attempt_receipt_path(output_dir),
+        )
+
     # ---- 6. The ladder -------------------------------------------------------
     rungs = ladder.plan(
-        seeds.addresses,
+        planned_addresses,
         verdicts=verdicts,
         intel=intel_records,
         in_scope=in_scope,
@@ -463,6 +496,22 @@ def run_port_service_host_stage(
         if not outcome.ok:
             report.ok = False
         merged.extend(outcome.observations)
+        # Record the attempt *here*, where packets actually left, rather than from
+        # the ladder: a rung is a plan, and this is the only place that knows the
+        # scan really ran.  The outcome decides whether a later pass may skip it —
+        # and a failed scan is recorded as such precisely so it never becomes a
+        # permanent gap (see ``platform.receipt``).
+        answered = {observation.ip for observation in outcome.observations}
+        for address in ips:
+            if not outcome.ok:
+                result = OUTCOME_FAILED
+            else:
+                result = OUTCOME_FOUND if address in answered else OUTCOME_NONE
+            receipt.record(
+                asset_token(address, "ip"),
+                escalation.OPERATION_PORT_SCAN,
+                outcome=result,
+            )
 
     scan_rung(ladder.RUNG_TOP, ladder.ips_for(rungs, ladder.RUNG_TOP), top=top_ports)
     scan_rung(
@@ -596,7 +645,10 @@ def run_port_service_host_stage(
     }
     report.outputs.update({key: Path(path).as_posix() for key, path in outputs.items()})
 
-    report.counts = _counts(report, seeds, rungs, port_rows, service_observations)
+    report.counts = _counts(
+        report, seeds, rungs, port_rows, service_observations, skipped_attempted
+    )
+    report.outputs["attempt_receipt"] = attempt_receipt_path(output_dir).as_posix()
     return finish()
 
 
@@ -606,6 +658,7 @@ def _counts(
     rungs: Sequence[ladder.Rung],
     ports: Sequence[PortObservation],
     services: Sequence[ServiceObservation],
+    skipped_attempted: int = 0,
 ) -> dict[str, int]:
     """Assemble the report's count block."""
     levels = ladder.by_level(rungs) if rungs else {}
@@ -613,6 +666,11 @@ def _counts(
     escalated = report.ladder.get("escalated") or []
     return {
         "addresses": len(seeds.addresses),
+        # Addresses the receipt had already paid for, and which therefore cost
+        # nothing this pass.  Reported rather than hidden: a scan set that shrank
+        # for a reason is a different fact from a scan set that was always small.
+        "skipped_attempted": skipped_attempted,
+        "planned": len(rungs),
         "scope_declared": len(seeds.scope_declared),
         "in_scope": sum(1 for address in seeds.addresses if seeds.names_by_ip.get(address)),
         "refused": len(seeds.refused),

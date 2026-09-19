@@ -109,10 +109,12 @@ def collect(
     ports_dir: Path | str = settings.PORTS_DIR,
     urls_dir: Path | str = settings.URLS_DIR,
     networks_dir: Path | str = settings.NETWORKS_DIR,
+    cloud_dir: Path | str = settings.CLOUD_DIR,
     include_names: bool = settings.INCLUDE_NAMES,
     include_ports: bool = settings.INCLUDE_PORTS,
     include_urls: bool = settings.INCLUDE_URLS,
     include_networks: bool = settings.INCLUDE_NETWORKS,
+    include_cloud: bool = settings.INCLUDE_CLOUD,
 ) -> list[sources.SourceFacts]:
     """Read every configured sibling artifact.  No network, no siblings run."""
     return sources.read_all(
@@ -120,10 +122,12 @@ def collect(
         ports_root=Path(ports_dir),
         urls_root=Path(urls_dir),
         networks_root=Path(networks_dir),
+        cloud_root=Path(cloud_dir),
         include_names=include_names,
         include_ports=include_ports,
         include_urls=include_urls,
         include_networks=include_networks,
+        include_cloud=include_cloud,
     )
 
 
@@ -234,10 +238,12 @@ def run_pipeline(
     ports_dir: Path | str = settings.PORTS_DIR,
     urls_dir: Path | str = settings.URLS_DIR,
     networks_dir: Path | str = settings.NETWORKS_DIR,
+    cloud_dir: Path | str = settings.CLOUD_DIR,
     include_names: bool = settings.INCLUDE_NAMES,
     include_ports: bool = settings.INCLUDE_PORTS,
     include_urls: bool = settings.INCLUDE_URLS,
     include_networks: bool = settings.INCLUDE_NETWORKS,
+    include_cloud: bool = settings.INCLUDE_CLOUD,
     scope=None,
     max_nodes: int | None = settings.MAX_NODES,
     max_edges: int | None = settings.MAX_EDGES,
@@ -258,10 +264,12 @@ def run_pipeline(
         ports_dir=ports_dir,
         urls_dir=urls_dir,
         networks_dir=networks_dir,
+        cloud_dir=cloud_dir,
         include_names=include_names,
         include_ports=include_ports,
         include_urls=include_urls,
         include_networks=include_networks,
+        include_cloud=include_cloud,
     )
     result = merge_mod.build_model(
         facts,

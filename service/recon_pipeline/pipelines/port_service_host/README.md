@@ -18,7 +18,7 @@ python -m service.recon_pipeline.pipelines.port_service_host.pipeline
 That runs: build seeds → passive intel → ownership → reverse DNS → classify →
 ladder → scan → service identification → write `port_service_host/output/`.
 
-Design and research: [`DESIGN.md`](DESIGN.md). Raw per-tool commands:
+Design and research: [`port_service_host.md`](../../../../docs/recon_docs/port_service_host.md). Raw per-tool commands:
 [`commands.txt`](commands.txt).
 
 ---
@@ -358,6 +358,7 @@ re-running):
 | `openports.jsonl` | one line per socket, with `scan_mode` (`syn`/`connect`/`http`) and `source` |
 | `services.jsonl` | service, banner, CPEs, and TLS issuer/SAN/validity when present |
 | `hosts.txt` | addresses that produced something (v4 then v6, sorted) |
+| `attempted.jsonl` | **the scan receipt**: every address this engagement actually sent packets at, with the outcome (`none` / `found` / `failed`) — see below |
 | `report.json` | counts, every ladder decision, scan outcomes, aborts, stealth state |
 | `naabu.jsonl`, `httpx.jsonl`, `ptr.jsonl`, `nmap-*.xml` | raw tool output, for when something looks wrong |
 
@@ -368,6 +369,29 @@ sorted v4-before-v6; ports are ints in 1–65535; every JSONL row carries a
 - **A port can be claimed by more than one mode.** A SYN result is a hypothesis; a
   completed HTTP connection is proof. `scan_mode` is `syn+http` when both saw it,
   and `counts.confirmed_ports` reports how many sockets are corroborated.
+### The scan receipt (`attempted.jsonl`)
+
+An address scanned with **nothing open** used to leave no trace anywhere: no port
+row, no service, no `hosts.txt` entry — so a later pass could neither report it nor
+skip it, and paying for it again was the only option. `attempted.jsonl` is that
+trace, and it is what makes a second pass cheap:
+
+- the scan set is the ladder's input **minus** every address the receipt already
+  answered, so a repeat scans only what is new (or was never successfully tried);
+- `counts.skipped_attempted` and `counts.planned` say how much that saved, and
+  `outputs.attempt_receipt` names the file;
+- **a failed scan is not an attempt.** A timeout or a dead scanner records
+  `failed`, which earns no skip — an outage must not become a permanent gap;
+- the path is `PSH_ATTEMPT_RECEIPT` if set, else `output/attempted.jsonl`. A
+  converged run (`run_recon.py --until-converged`) points every round at one file
+  per *run*, so a fresh engagement starts clean while the rounds inside it share
+  the receipt.
+
+The mechanism lives in the platform (`platform/receipt.py`, keyed by
+`(asset, operation)`) rather than here, so the URL-validation and
+service-inspection passes can adopt the same `pending()` call without a second
+definition of "already tried".
+
 - **naabu's output repeats itself.** It re-verifies what it found and prints each
   port twice — measured on `45.33.32.156`, four open ports produced eight output
   lines. Socket counts therefore come from the *merged* set, and when the raw line
@@ -484,7 +508,7 @@ Honest caveats:
 ## Stealth & resilience (spec §5.1)
 
 The stage runs under the shared stealth layer
-([`service/recon_pipeline/platform/stealth/`](../../../stealth/README.md)):
+([`service/recon_pipeline/platform/stealth/`](../../platform/stealth/README.md)):
 
 * **CDN probes carry one coherent identity** — `-random-agent=false` plus a stable
   header set and `-tlsi` ClientHello. Measured elsewhere in this repo: the CLI's
@@ -566,8 +590,8 @@ Both exit non-zero on any failed check, so they are usable as a pre-release gate
 
 ## Related
 
-- [`DESIGN.md`](DESIGN.md) — the R&D: sources, tool comparisons, efficiency maths, phased plan.
+- [`port_service_host.md`](../../../../docs/recon_docs/port_service_host.md) — the R&D: sources, tool comparisons, efficiency maths, phased plan.
 - [`commands.txt`](commands.txt) — raw per-tool commands, with the scope warning.
 - `../subdomain_domain_wildcards/README.md` — the upstream stage that supplies the addresses.
-- [`../../../stealth/README.md`](../../../stealth/README.md) — the shared shaping layer.
-- [`../../../docs/recon_docs/port_service_host.md`](../../../docs/recon_docs/port_service_host.md) — the R&D doc that is this stage's authority (marked *implemented, with deltas*). It maps to **no numbered plan stage**: plan-v2's S22–S24 are cloud buckets, mobile teardown and JS crawl, not port/service enumeration.
+- [`platform/stealth/README.md`](../../platform/stealth/README.md) — the shared shaping layer.
+- [`docs/recon_docs/port_service_host.md`](../../../../docs/recon_docs/port_service_host.md) — the R&D doc that is this stage's authority (marked *implemented, with deltas*). It maps to **no numbered plan stage**: plan-v2's S22–S24 are cloud buckets, mobile teardown and JS crawl, not port/service enumeration.

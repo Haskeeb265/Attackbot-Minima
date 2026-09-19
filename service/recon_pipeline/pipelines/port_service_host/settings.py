@@ -46,6 +46,9 @@ Environment overrides
 ``PSH_MAX_IPS``                            head-count cap on the scan set (0 = all)
 ``PSH_CDN_RANGES_FILE``                    override the bundled CDN range data
 ``PSH_SCOPE_FILE``                         declared CIDR/IP scope (repeatable)
+PSH_ATTEMPT_RECEIPT                        where the scan receipt lives (default: the run's
+                                           ``output/attempted.jsonl``; a fresh path means a
+                                           fresh engagement)
 ``PSH_STEALTH``                            ``0`` disables the stealth layer (1)
 ``PSH_HTTP_RATE_LIMIT``                    HTTP probes/second for the CDN pass
 ``PSH_HTTP_THREADS``                       concurrency for the CDN pass
@@ -253,6 +256,30 @@ HTTP_THREADS = env_int("PSH_HTTP_THREADS", 5)
 #: Where quarantine state persists, shared with the other stages so a cooldown
 #: triggered anywhere is respected everywhere.
 QUARANTINE_FILE = stealth_settings.QUARANTINE_FILE or (OUTPUT_DIR / "quarantine.json")
+
+#: The attempt receipt's artifact name inside the run's output directory: which
+#: addresses this engagement has already scanned, and what came of it.  An address
+#: scanned with nothing open leaves no trace in any other artifact, which is why
+#: this file exists at all — without it a second pass re-scans it from scratch.
+ATTEMPT_RECEIPT_NAME = "attempted.jsonl"
+
+#: Override for that path.  The convergence loop points it at the run directory so
+#: a fresh engagement starts with an empty receipt; left unset, the receipt lives
+#: in the stage's own ``output/`` and survives across runs, which is the behaviour
+#: the escalation policy's idempotency rule has always assumed.
+ATTEMPT_RECEIPT_FILE = os.getenv("PSH_ATTEMPT_RECEIPT", "").strip()
+
+
+def attempt_receipt_path(output_dir: Path | str | None = None) -> Path:
+    """Where this run's scan receipt is.
+
+    The explicit override wins; otherwise it sits beside the run's other
+    artifacts, so a test (or an engagement) pointed at a fresh directory gets a
+    fresh receipt and nothing is skipped on someone else's evidence.
+    """
+    if ATTEMPT_RECEIPT_FILE:
+        return Path(ATTEMPT_RECEIPT_FILE).expanduser()
+    return Path(output_dir or OUTPUT_DIR) / ATTEMPT_RECEIPT_NAME
 
 #: Hard operator override (shared with the stealth layer).
 PASSIVE_ONLY = stealth_settings.PASSIVE_ONLY

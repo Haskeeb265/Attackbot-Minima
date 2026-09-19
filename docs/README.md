@@ -9,13 +9,16 @@ below is the intended design — file an update to whichever is wrong.
 | You want to… | Read |
 |---|---|
 | run the project | [`../README.md`](../README.md) |
+| learn the recon module end to end | [`codebase/RECON_GUIDE.md`](codebase/RECON_GUIDE.md) — a diagram-led walkthrough from the declared scope to the handoff: one ordinary run, each collector, the platform services, the convergence loop, the attempt receipt, and a glossary; every claim points at the file that decides it |
 | add a new asset pipeline (the plugin contract) | [`../service/recon_pipeline/README.md`](../service/recon_pipeline/README.md) — a pipeline is a folder exposing `MANIFEST` + `PIPELINE`; that is the whole registration step |
 | understand the platform layer (scoring, scope, queues, dispatch, graph sink) | [`codebase/PLATFORM.md`](codebase/PLATFORM.md) |
 | run or extend the subdomain/domain/wildcard pipeline | [`../service/recon_pipeline/pipelines/subdomain_domain_wildcards/README.md`](../service/recon_pipeline/pipelines/subdomain_domain_wildcards/README.md) |
 | run the ports/services/hosts pipeline | [`../service/recon_pipeline/pipelines/port_service_host/README.md`](../service/recon_pipeline/pipelines/port_service_host/README.md) |
 | run the historical-URL/endpoints pipeline | [`../service/recon_pipeline/pipelines/url_endpoint/README.md`](../service/recon_pipeline/pipelines/url_endpoint/README.md) |
 | run the ASN/CIDR network-ownership pipeline | [`../service/recon_pipeline/pipelines/asn_cidr/README.md`](../service/recon_pipeline/pipelines/asn_cidr/README.md) |
-| understand the asset model (from all four pipelines) | [`../service/recon_pipeline/pipelines/graph_normalize/README.md`](../service/recon_pipeline/pipelines/graph_normalize/README.md) — the vocabulary, the trust classes, the score on every node, `graph_state.json` (the handoff document for the vulnerability finder), the provisional graph mapping, and why it writes no database rows yet |
+| run the storage-bucket discovery pipeline (S3 / Azure / GCS) | [`../service/recon_pipeline/pipelines/cloud_resource/README.md`](../service/recon_pipeline/pipelines/cloud_resource/README.md) |
+| understand the convergence loop (rounds, the frontier, why it stops) | [`../service/recon_pipeline/README.md`](../service/recon_pipeline/README.md) § *Converging* — which pipelines may repeat and the evidence for each, the stop verdicts, and why caps outrank "exhausted" |
+| understand the asset model (from the collector pipelines) | [`../service/recon_pipeline/pipelines/graph_normalize/README.md`](../service/recon_pipeline/pipelines/graph_normalize/README.md) — the vocabulary, the trust classes, the score on every node, `graph_state.json` (the handoff document for the vulnerability finder), the provisional graph mapping, and why it writes no database rows yet |
 | understand how active traffic is shaped, and why (stealth, spec §5.1) | [`../service/recon_pipeline/platform/stealth/README.md`](../service/recon_pipeline/platform/stealth/README.md) — what detectors measure, live-capture evidence, design, knobs, measured cost, and the not-built list |
 | understand what the whole system is meant to become | [`recon_docs/recon.md`](recon_docs/recon.md) + [`recon_docs/recon_v2.md`](recon_docs/recon_v2.md) |
 | know what is built versus planned | the status section in [`recon_docs/IMPLEMENTATION_PLAN.md`](recon_docs/IMPLEMENTATION_PLAN.md) and [`recon_docs/IMPLEMENTATION_PLAN_V2.md`](recon_docs/IMPLEMENTATION_PLAN_V2.md) |
@@ -28,8 +31,10 @@ below is the intended design — file an update to whichever is wrong.
 
 A snapshot of the repository as it is: stack, structure, architecture,
 conventions, integrations, testing, and current concerns — plus
-[`PLATFORM.md`](codebase/PLATFORM.md), the platform layer's own map. Written to
-be read in that order; each file ends with the evidence it was written from.
+[`PLATFORM.md`](codebase/PLATFORM.md), the platform layer's own map, and
+[`RECON_GUIDE.md`](codebase/RECON_GUIDE.md), the learn-it-A-to-Z walkthrough with
+the module's diagrams. The orientation files are written to be read in the order
+above; each file ends with the evidence it was written from.
 
 **These are checked against the code, not against the plans.** Where they describe
 a subsystem as not built, that is the plan's state, not a bug in the doc:
@@ -69,14 +74,14 @@ v1 pair first.
 - Per-pipeline READMEs under `service/recon_pipeline/pipelines/` — the
   operator-facing documentation for the built pipelines
   (`subdomain_domain_wildcards/`, `port_service_host/`, `url_endpoint/`,
-  `asn_cidr/`, `graph_normalize/`): flags, outputs, settings, measured yields
-  and live caveats.
+  `asn_cidr/`, `cloud_resource/`, `graph_normalize/`): flags, outputs, settings,
+  measured yields and live caveats.
   These are the most current docs in the repo.
 - [`stealth/README.md`](../service/recon_pipeline/platform/stealth/README.md) — the stealth
   layer's own doc: what modern detectors measure (JA4 + inter-request signals,
   DNS volume thresholds), the measurements taken on this repo's own toolchain,
   every knob, the measured cost of shaping, and what is deliberately not built.
-- [`port_service_host/DESIGN.md`](../service/recon_pipeline/pipelines/port_service_host/DESIGN.md)
+- [`port_service_host.md`](recon_docs/port_service_host.md)
   — that pipeline's research doc: passive-first IP intelligence, the L0–L3 scan
   ladder, tool choices with verified vendor claims, efficiency math, and the
   phased plan. Its header records the deltas between this plan and the shipped

@@ -33,7 +33,9 @@ Attackbot-Minimal/
 │       ├── platform/                  # the ASM platform (no asset logic lives here)
 │       │   ├── contract.py            # Manifest / Stage / RunContext / Pipeline protocol / BasePipeline
 │       │   ├── registry.py            # discovers pipelines/ folders exposing MANIFEST + PIPELINE
-│       │   ├── runner.py              # one run path: context → stages → reports; knows only the contract
+│       │   ├── runner.py              # one run path: context → stages → rounds → reports; knows only the contract
+│       │   ├── convergence.py          # the round loop: frontier tokens, the seen-ledger, the stop decision
+│       │   ├── receipt.py              # the attempt receipt: what was already tried, per (asset, operation)
 │       │   ├── scoring.py             # S2 evidence scoring (pure, auditable)
 │       │   ├── scope.py               # S15 scope engine: in_scope / needs_review / out_of_scope
 │       │   ├── dispatch.py            # S10 policy gate: ALLOW / DEFER / DENY + budgets + decision log
@@ -50,11 +52,8 @@ Attackbot-Minimal/
 │       │   │   ├── docker_tool.py     # the one Docker runner every stage uses
 │       │   │   ├── httpjson.py        # HTTP + JSON helper with retry/backoff
 │       │   │   └── redis_url.py       # REDIS_URL parsing for cache + queueing
-│       │   ├── graph/                 # Neo4j layer (built)
-│       │   │   ├── client.py          # Neo4jClient — driver + verify()
-│       │   │   ├── schema.py          # labels, relationship types, constraints, indexes
-│       │   │   ├── repository.py      # Neo4jRepository — run_query / merge_node / get_node / merge_relation / get_relation
-│       │   │   └── ingest.py          # GraphSink — S4/S7 writers + replayable journal when Neo4j is down
+│       │   ├── graph/                 # the graph write seam (schema pending)
+│       │   │   └── ingest.py          # GraphSink — journals offered writes (identity + payload) until a schema is designed from graph_state.json
 │       │   └── stealth/               # spec §5.1 stealth layer (built, direct mode)
 │       │       ├── identity.py        # coherent browser identities, one stable per host
 │       │       ├── pacing.py          # per-host token buckets, jitter, backoff (injectable clock)
@@ -103,7 +102,20 @@ Attackbot-Minimal/
 │           │   ├── emit.py            # networks.jsonl, asns.jsonl, ports-stage scope files
 │           │   ├── DESIGN.md          # claim-kind research + live-run lessons + phased plan
 │           │   └── output/            # (gitignored) discovered networks + scope files + report
-│           └── graph_normalize/       # built pipeline 5: the asset model — four artifacts → nodes + edges
+│           ├── cloud_resource/        # built pipeline 5: storage buckets on S3 / Azure / GCS
+│           │   ├── contract.py        # MANIFEST + PIPELINE (consumes names + URLs; passive_only)
+│           │   ├── main.py            # orchestrator: harvest → probe, reuses candidates
+│           │   ├── seeds.py           # sibling-artifact harvest + brand×shape derivation (capped)
+│           │   ├── normalize.py       # candidate identity + provider-rule validation (refuses, never sanitizes)
+│           │   ├── providers.py       # S3 / Azure / GCS host patterns, probe templates, name rules
+│           │   ├── verify.py          # the response matrices + one GET per candidate (injectable fetcher)
+│           │   ├── passive/           # the harvest stage's output/ (candidates.{jsonl,txt} + report.json)
+│           │   ├── emit.py            # verdicts.jsonl, buckets.jsonl, dangling.jsonl, report.json
+│           │   ├── settings.py        # CLOUD_* environment knobs
+│           │   ├── commands.txt       # raw per-provider curl reproduction notes
+│           │   ├── DESIGN.md          # response matrices + claim model + phased plan
+│           │   └── output/            # (gitignored) candidates + verdicts/buckets/dangling + reports
+│           └── graph_normalize/       # built pipeline 6: the asset model — collector artifacts → nodes + edges
 │               ├── contract.py        # MANIFEST + PIPELINE (consumes the other four; runs last)
 │               ├── vocabulary.py      # node kinds, edge types, trust classes + the PROVISIONAL graph mapping
 │               ├── normalize.py       # the model: identities, merge rules, dedupe, union props, orphans
@@ -130,7 +142,7 @@ Attackbot-Minimal/
 │
 ├── tests/
 │   ├── conftest.py             # makes the repo root importable for pytest
-│   ├── recon/                  # hermetic suite (1128 tests) — no Docker, DNS or network
+│   ├── recon/                  # hermetic suite (1 373 tests) — no Docker, DNS or network
 │   └── scraper/                # live-PostgreSQL scripts; one real pytest test (skips without its fixture)
 │
 ├── docs/                       # see docs/README.md for the map
@@ -153,9 +165,10 @@ Attackbot-Minimal/
 | `.../port_service_host/pipeline.py` | Ports/services/hosts pipeline (all layers) | `python -m ...port_service_host.pipeline -t <target>` |
 | `.../url_endpoint/main.py` | URL/endpoint pipeline (all stages) | `python -m ...url_endpoint.main -t <target>` |
 | `.../asn_cidr/main.py` | ASN/CIDR network-ownership discovery (never scans) | `python -m ...asn_cidr.main -t <target>` |
+| `.../cloud_resource/main.py` | Storage-bucket discovery: sibling artifacts → candidates → provider probes (never the target) | `python -m ...cloud_resource.main -t <target>` |
 | `.../graph_normalize/main.py` | The asset model: four artifacts → scored nodes + edges, and `graph_state.json` for the vulnerability finder (no DB writes) | `python -m ...graph_normalize.main -t <target>` |
 | `run_recon.py` | Every pipeline + combined report | `python run_recon.py -t <target>` |
-| `tests/recon/test_repository.py` | Neo4j graph integration test (script, needs a live Neo4j) | `python tests/recon/test_repository.py` |
+| `tests/recon/test_repository.py` | *removed 2026-09-19 with the pre-run schema it tested* | — |
 
 Every recon CLI supports `--help`, and `--list` where there is something to list
 (sources, engines, tools, generators).
@@ -181,9 +194,11 @@ Every recon CLI supports `--help`, and `--list` where there is something to list
   logged reason.
 - `service/recon_pipeline/platform/runner.py` — the single code path every
   pipeline runs through (context → stages → per-stage report → run record).
+- `service/recon_pipeline/platform/graph/reader.py` + `tools.py` — read side: `GraphBackend` seam, indexed JSON-file backend, token-budgeted views; the vuln engine consumes the graph through these, a Neo4j backend can slot in without changing the interface
+- `service/recon_pipeline/platform/graph/neo4j_backend.py` — the first non-file backend: same protocol in Cypher, upsert-by-identity (`first_seen` write-once, `last_seen` ratchet), relationship types whitelist-validated against the settled vocabulary, `load_snapshot()` for the migration, `Neo4jUnavailable` degradation
 - `service/recon_pipeline/platform/graph/repository.py` — all graph I/O; labels are always
   a **list**, and writes go through `MERGE` on identity properties
-  (see `docs/recon_docs/graph_crud_contract.md`).
+  (see `docs/recon_docs/graph_crud_contract.md` — superseded 2026-09-19 with the pre-run schema; kept for reference).
 - `.../active/tools.py` — the tool registry: images, pure argument builders and
   the shared Docker runner. The only place that knows a tool's command line.
 - `.../passive/sources.py`, `.../active/wordlist.py`, `.../active/resolve.py`,

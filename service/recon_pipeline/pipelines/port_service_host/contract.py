@@ -24,6 +24,19 @@ MANIFEST = Manifest(
         Stage("scan", "seed, classify, ladder-scan and fingerprint services"),
     ),
     passive_only=False,
+    #: Addresses this stage reached — the frontier the network pipeline and the
+    #: next round's scan set both grow from.
+    frontier_artifacts=("output/ips_raw.txt", "output/hosts.txt"),
+    #: A second round exists to scan addresses round 1 did not know about.  Known
+    #: addresses are re-scanned on the way, because there is still no scan
+    #: *receipt* (an address scanned with nothing open stays indistinguishable
+    #: from one never scanned); the convergence ledger is the first half of that
+    #: receipt, and the stage does not consult it yet.
+    repeat_stages=("scan",),
+    #: Packets are spent for *addresses*.  A round that discovered only names (not
+    #: yet resolved) or URLs nothing is listening on owes this stage nothing, so a
+    #: converged run re-scans only when the address set actually grew.
+    repeat_on=("ip",),
 )
 
 

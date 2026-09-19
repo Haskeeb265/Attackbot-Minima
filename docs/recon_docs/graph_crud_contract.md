@@ -1,7 +1,14 @@
 # Graph CRUD Contract — Multi-Label Writes
 
-**Status:** Settled and built — `service/recon_pipeline/platform/graph/repository.py` (plan stage S1).
-**Applies to:** every graph writer — S4 (seeding), S7 (e2e pipeline), S13 (LLM enrichment) when they are built. **Read this before writing any of them.** No production code writes to the graph yet (see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md#implementation-status)), so today the contract is enforced by the repository layer and proven by the script below.
+> **SUPERSEDED 2026-09-19.** The schema and repository this contract described
+> were removed with the pre-run guess they encoded (they predated the first
+> recon run; the last revision is in git history). The requirement it got right
+> — writes merge on one canonical identity per asset — carries into the
+> replacement, which will be designed from `graph_state.json`. Kept for the
+> discussion's reference only.
+
+**Status:** Superseded — `repository.py` no longer exists.
+**Applies to:** every future graph writer, after the schema discussion settles.
 
 The graph is multi-label by design (schema.py): every asset carries the **base `:Asset` label** plus a **typed label** (`:Domain`, `:IP`, `:URL`, `:Other`, …). The CRUD layer in `repository.py` enforces this via a single rule — **you pass a *list* of labels, not a string.**
 

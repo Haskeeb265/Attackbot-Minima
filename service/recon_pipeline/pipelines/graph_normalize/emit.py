@@ -19,9 +19,11 @@ outputs are byte-identical (which is what makes the model diffable between runs)
 * ``report.json`` — counts, source status, orphans, conflicts, the score
   distribution and the explicit statement that nothing was written to a database.
 
-**No Cypher, no driver, no ``GraphSink``.**  The graph schema is not final, so
-this pipeline's output is a decision-ready model rather than a database write.
-The platform's sink is one call away when that changes — and the only thing that
+**No Cypher, no driver, no ``GraphSink``.**  The pre-run schema was removed on
+2026-09-19 (it was designed before any recon run existed to check it against);
+until a replacement is designed from this pipeline's observed output, this
+pipeline's job is a decision-ready model rather than a database write.  The
+platform's sink is one call away when that changes — and the only thing that
 needs editing then is :mod:`~.vocabulary`.
 """
 

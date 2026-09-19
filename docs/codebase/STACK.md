@@ -22,7 +22,7 @@ imports lazily or only from one subsystem.
 | `alembic` | `db/migrations/` | migrations; `env.py` uses `db.init.models.Base.metadata` |
 | `requests` | `shared/connectors/`, passive `crtsh`/`wayback`, stealth `transport.py` | HTTP; in the stealth layer it is the fallback transport that preserves header *order* but not the TLS fingerprint |
 | `dnspython` | passive `wildcard.py`, active `resolvers.py`/`axfr.py` | imported **lazily inside functions**, so it is optional at import time and required at run time for DNS work |
-| `neo4j` | `service/recon_pipeline/platform/graph/` | official driver; only the graph layer needs it |
+| `neo4j` | `service/recon_pipeline/platform/graph/` (once the schema exists) | official driver; installed and pinned for the graph rebuild, unused by code today |
 | `pytest` | `tests/recon/` | the hermetic suite |
 | `curl_cffi` *(optional)* | stealth `transport.py` | **not installed in this tree**; when present it is the strongest transport (browser ClientHello + HTTP/2 + header order). The layer falls back to `requests` and reports the downgrade |
 
@@ -35,7 +35,7 @@ LLM SDK. Neither is imported anywhere in the repo. `curl_cffi` is the one
 | Store | Version | Container | Used by |
 |---|---|---|---|
 | PostgreSQL | `postgres:16-alpine` | `attackbot_postgres` | scraper: `bounty_master`, `bounty_detail`, `bounty_weaknesses`, `bounty_exclusion` |
-| Neo4j | `neo4j:latest` (Community) | `neo4j_db` | `service/recon_pipeline/platform/graph/` — bolt on 7687, browser on 7474 |
+| Neo4j | `neo4j:latest` (Community) | `neo4j_db` | reserved for the graph rebuild — the schema was removed 2026-09-19 (pre-run guess); bolt on 7687, browser on 7474 |
 | Redis | — | *not in `docker-compose.yml`* | **nothing yet**: `config.py` defines `REDIS_URL`, but no code connects (plan stages S8/S9) |
 
 Both live services are defined in `docker-compose.yml` with healthchecks; Postgres

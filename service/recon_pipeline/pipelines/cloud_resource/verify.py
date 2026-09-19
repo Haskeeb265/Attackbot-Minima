@@ -259,6 +259,8 @@ class Verdict:
     evidence_class: str
     origins: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
+    #: The target hosts whose DNS claimed this resource (CNAME-origin only).
+    claimants: list[str] = field(default_factory=list)
     http_status: int | None = None
     probed_at: str = ""
 
@@ -273,6 +275,7 @@ class Verdict:
             "evidence_class": self.evidence_class,
             "origins": self.origins,
             "sources": self.sources,
+            **({"claimants": self.claimants} if self.claimants else {}),
             "probed_at": self.probed_at,
         }
 
@@ -371,6 +374,7 @@ def probe_candidates(
                 evidence_class=evidence_class_for(candidate),
                 origins=sorted(candidate.origins),
                 sources=sorted(candidate.sources),
+                claimants=sorted(candidate.claimants),
                 http_status=result.status,
                 probed_at=_utc_now(),
             )

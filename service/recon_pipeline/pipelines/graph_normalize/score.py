@@ -103,6 +103,11 @@ SOURCE_KEY = {
     "url_endpoint:parameter-observations": "gau",
     "asn_cidr:networks": "ripestat",
     "asn_cidr:asns": "ripestat",
+    # A live bucket probe is our own measurement of the asset itself, so it maps
+    # to the live-confirmation weight — the same reasoning as the URL validation,
+    # applied one asset kind over.
+    "cloud_resource:probe": "cloud-verified-live",
+    "cloud_resource:dangling": "cloud-verified-live",
 }
 
 #: A live validation is our own measurement of the URL itself, so it maps to the
@@ -144,6 +149,8 @@ SOURCE_CATEGORY: dict[str, str] = {
     "url_endpoint:validation": CATEGORY_ACTIVE,
     "asn_cidr:networks": CATEGORY_CONTEXT,
     "asn_cidr:asns": CATEGORY_CONTEXT,
+    "cloud_resource:probe": CATEGORY_ACTIVE,
+    "cloud_resource:dangling": CATEGORY_ACTIVE,
 }
 
 #: The artifact label the URL pipeline's validation stage writes.
@@ -152,9 +159,17 @@ VALIDATION_SOURCE = "url_endpoint:validation"
 #: Validation states that mean the URL was measured and did not answer.
 DEAD_VALIDATION_STATES = frozenset({"dead", "unreachable"})
 
+#: Bucket outcomes that mean the resource was measured and is *not there*: the
+#: provider itself said absent, the strongest negative a probe can produce.
+DEAD_BUCKET_OUTCOMES = frozenset({"dangling"})
+
 
 def _validated_dead(node: norm.Node) -> bool:
     return str(node.props.get("validation_state", "")) in DEAD_VALIDATION_STATES
+
+
+def _bucket_dangling(node: norm.Node) -> bool:
+    return str(node.props.get("outcome", "")) in DEAD_BUCKET_OUTCOMES
 
 #: Weight and wording for the keys the engine's table does not carry.  Both use
 #: the engine's own constants — no weight is invented here.
@@ -167,6 +182,10 @@ _EXTRA_SIGNALS: dict[str, tuple[int, str]] = {
     "url-validated-live": (
         engine.W_LIVE_CONFIRMATION,
         "source: live URL validation (this run)",
+    ),
+    "cloud-verified-live": (
+        engine.W_LIVE_CONFIRMATION,
+        "source: live bucket probe (this run)",
     ),
 }
 
@@ -254,7 +273,7 @@ def score_model(
     }
     allocated_by: dict[str, set[str]] = {}
     for edge in model.edges.values():
-        if edge.type == vocab.ALLOCATED_TO:
+        if edge.type == vocab.OWNED_BY:
             allocated_by.setdefault(edge.source_id, set()).update(edge.sources)
 
     unknown: set[str] = set()
@@ -346,6 +365,18 @@ def _evidence_state(node: norm.Node) -> str:
     """
     categories = {SOURCE_CATEGORY.get(source, CATEGORY_CONTEXT) for source in node.sources}
     verified = bool(node.props.get("alive")) and CATEGORY_ACTIVE in categories
+    if node.kind == vocab.CLOUD:
+        # A bucket's own probe is its aliveness: open/auth_required verified the
+        # resource exists, dangling measured it absent.  No ``alive`` prop here —
+        # the outcome *is* the measurement.
+        return engine.evidence_state(
+            verified_alive=CATEGORY_ACTIVE in categories and not _bucket_dangling(node),
+            verified_dead=_bucket_dangling(node),
+            needs_review=str(node.props.get("scope_state", "")) == "needs_review",
+            active=CATEGORY_ACTIVE in categories,
+            historical=CATEGORY_HISTORICAL in categories,
+            passive=CATEGORY_PASSIVE in categories,
+        )
     return engine.evidence_state(
         verified_alive=verified and not _validated_dead(node),
         verified_dead=_validated_dead(node),
@@ -364,6 +395,19 @@ def _penalties(
 ) -> list[engine.Signal]:
     """The engine's penalties, applied only where the model can prove them."""
     penalties: list[engine.Signal] = []
+    if node.kind == vocab.CLOUD and _bucket_dangling(node):
+        # The same reasoning as the dead URL: the provider itself said the
+        # resource is absent, which is a measurement, not an absence of evidence.
+        penalties.append(
+            engine.penalty_for_dead_host(
+                f"bucket probe measured it {node.props.get('outcome')}"
+                + (
+                    f" ({node.props.get('probe_code')})"
+                    if node.props.get("probe_code")
+                    else ""
+                )
+            )
+        )
     if node.kind == vocab.URL and _validated_dead(node):
         # The engine's dead-host penalty existed but was deliberately unused
         # while the model had no re-check to prove it; live URL validation is

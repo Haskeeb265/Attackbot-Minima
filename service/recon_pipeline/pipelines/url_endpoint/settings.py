@@ -157,4 +157,18 @@ VALIDATE_THREADS = env_int("URL_VALIDATE_THREADS", 10)
 #: rather than pulling a second one is deliberate (one httpx integration, one
 #: version of the tool); ``projectdiscovery/httpx`` works too, since the argument
 #: builder only uses flags both images accept.
+
+
+# --------------------------------------------------------------------------- #
+# S24 — JS bundle crawl (the stage's second active stage)
+# --------------------------------------------------------------------------- #
+
+#: Run the JS bundle crawl.  Off means no bundle is fetched and the stage writes
+#: an ``enabled: false`` report — passive behaviour, stated rather than silent.
+JSCRAWL_ENABLED = env_flag("URL_JSCRAWL", True)
+
+#: Cap on bundles fetched per run (source maps count against the same budget).
+#: This is the stage that turns the harvest's "where the JavaScript is" into
+#: "what the JavaScript says" — the one remaining recall lever after convergence.
+JSCRAWL_MAX_BUNDLES = env_int("URL_JSCRAWL_MAX_BUNDLES", 120)
 HTTPX_IMAGE = os.getenv("URL_HTTPX_IMAGE", "port_service_host_image").strip() or "port_service_host_image"

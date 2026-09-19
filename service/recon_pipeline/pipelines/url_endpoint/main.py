@@ -7,6 +7,7 @@ actually wants::
               -> canonical, in-scope, deduplicated URLs
     extract   URLs -> endpoints, parameters, JS bundles, source maps, findings
     validate  policy-gated live HTTP check -> url_validation.jsonl (URL enriched)
+    jscrawl   S24: fetch in-scope JS bundles, extract API surface -> js_endpoints.jsonl
 
 Each stage is independently runnable and owns its own ``output/`` directory; this
 module adds only what belongs to the *whole* pipeline:
@@ -45,13 +46,15 @@ from typing import Any
 import shared.colorlog as colorlog
 
 from service.recon_pipeline.platform.common.config import TARGET
-from service.recon_pipeline.platform.common.io import write_jsonl, write_lines
+from service.recon_pipeline.platform.common.io import read_lines, write_jsonl, write_lines
 from service.recon_pipeline.platform.common.normalize import canonicalize_host
 from .extract import extract
 from .passive import pipeline as passive_mod
 from .passive.pipeline import URLS_FILE, run_passive_stage
 from .settings import (
     DEFAULT_SOURCE_TIMEOUT,
+    JSCRAWL_ENABLED,
+    JSCRAWL_MAX_BUNDLES,
     OUTPUT_DIR,
     PASSIVE_OUTPUT_DIR,
     VALIDATE_ENABLED,
@@ -71,6 +74,11 @@ PARAMETERS_FILE = "parameters.txt"
 #: ``OBSERVED_PARAMETER`` edges from.
 PARAMETERS_JSONL_FILE = "parameters.jsonl"
 JAVASCRIPT_FILE = "javascript.txt"
+
+#: S24 JS-bundle-crawl artifacts (written by :func:`run_jscrawl_stage`).
+JSCRAWL_FILE = "js_endpoints.jsonl"
+JSCRAWL_ENDPOINTS_FILE = "js_endpoints.txt"
+JSCRAWL_REPORT_FILE = "jscrawl_report.json"
 SOURCE_MAPS_FILE = "source_maps.txt"
 INTERESTING_FILE = "interesting.txt"
 HOSTS_FILE = "hosts.txt"
@@ -78,7 +86,7 @@ URLS_JSONL_FILE = "urls.jsonl"
 REPORT_FILE = "report.json"
 SUMMARY_FILE = "summary.json"
 
-ALL_STAGES: tuple[str, ...] = ("passive", "extract", "validate")
+ALL_STAGES: tuple[str, ...] = ("passive", "extract", "jscrawl", "validate")
 
 
 @dataclass
@@ -154,6 +162,93 @@ def run_extract_stage(
     return dict(result.counts)
 
 
+def _default_js_fetcher(session=None):
+    """Production fetcher: one paced, quarantine-aware GET per bundle.
+
+    Wraps the stealth session's ``request`` so the crawl inherits the run's
+    identity, pacing and block detection by construction — the same plumbing the
+    validate stage travels through (D5v2: no second request path).
+    """
+    from service.recon_pipeline.platform.stealth.session import StealthSession
+
+    active = session or StealthSession()
+
+    def fetch(url: str) -> tuple[int | None, str]:
+        try:
+            attempt = active.request(url)
+        except Exception as exc:  # quarantine/passive-only/transport failure
+            log.debug("jscrawl: fetch failed for %s: %s: %s", url, type(exc).__name__, exc)
+            return None, ""
+        response = attempt.response
+        return response.status, response.body or ""
+
+    return fetch
+
+
+def run_jscrawl_stage(
+    *,
+    output_dir: Path | str = OUTPUT_DIR,
+    passive_output_dir: Path | str = PASSIVE_OUTPUT_DIR,
+    scope=None,
+    fetcher=None,
+    enabled: bool | None = None,
+    max_bundles: int | None = None,
+) -> dict[str, object]:
+    """Run S24 — the JS bundle crawl (see :mod:`.jscrawl` for the invariants).
+
+    Reads ``javascript.txt`` from the extract stage's artifacts, fetches each
+    in-scope bundle through the *injected* fetcher (production passes the
+    stealth transport's GET; tests pass a table), and writes the extracted
+    surface to ``js_endpoints.jsonl`` / ``js_endpoints.txt``.
+    """
+    from .jscrawl import MAX_BUNDLES as DEFAULT_MAX
+    from .jscrawl import crawl
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    enabled = JSCRAWL_ENABLED if enabled is None else enabled
+    budget = JSCRAWL_MAX_BUNDLES if max_bundles is None else max_bundles
+    started = time.monotonic()
+
+    bundle_urls = read_lines(output_dir / JAVASCRIPT_FILE)
+    if not enabled:
+        report: dict[str, object] = {
+            "stage": "jscrawl",
+            "ok": True,
+            "enabled": False,
+        }
+        _write_json(output_dir / JSCRAWL_REPORT_FILE, report)
+        return report
+
+    if fetcher is None:
+        fetcher = _default_js_fetcher()
+
+    findings, counts = crawl(
+        [line.strip() for line in bundle_urls if line.strip()],
+        fetcher=fetcher,
+        scope=scope,
+        max_bundles=budget,
+    )
+
+    records = [finding.to_dict() for finding in findings]
+    write_jsonl(output_dir / JSCRAWL_FILE, records)
+    write_lines(output_dir / JSCRAWL_ENDPOINTS_FILE, sorted({str(r["url"]) for r in records}))
+    report = {
+        "stage": "jscrawl",
+        "ok": True,
+        "enabled": True,
+        "seconds": round(time.monotonic() - started, 2),
+        "counts": counts,
+        "outputs": {
+            "js_endpoints": (output_dir / JSCRAWL_FILE).as_posix(),
+            "js_endpoints_txt": (output_dir / JSCRAWL_ENDPOINTS_FILE).as_posix(),
+            "jscrawl_report": (output_dir / JSCRAWL_REPORT_FILE).as_posix(),
+        },
+    }
+    _write_json(output_dir / JSCRAWL_REPORT_FILE, report)
+    return report
+
+
 def run_validation_stage(
     urls: Iterable[str],
     apex: str,
@@ -216,6 +311,9 @@ def run_pipeline(
     max_validate: int | None = None,
     max_validate_per_host: int | None = None,
     validate_ttl: float | None = None,
+    js_fetcher=None,
+    js_enabled: bool | None = None,
+    max_js_bundles: int | None = None,
     **stage_options: Any,
 ) -> UrlPipelineSummary:
     """Run the requested *stages* in order and write the combined artifacts.
@@ -319,6 +417,17 @@ def run_pipeline(
                     entry["truncated"] = True
                 union_path = Path(report.outputs.get(URLS_FILE, union_path))
                 if not report.ok:
+                    summary.ok = False
+            elif stage == "jscrawl":
+                js_report = run_jscrawl_stage(
+                    output_dir=output_dir,
+                    scope=scope,
+                    fetcher=js_fetcher,
+                    enabled=js_enabled,
+                    max_bundles=max_js_bundles,
+                )
+                entry = dict(js_report)
+                if not js_report.get("ok", False):
                     summary.ok = False
             else:
                 counts = run_extract_stage(_read_union(union_path), apex, output_dir=output_dir)

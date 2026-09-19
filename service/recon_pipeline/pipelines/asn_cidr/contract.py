@@ -22,6 +22,16 @@ MANIFEST = Manifest(
         Stage("emit", "merge claims, annotate, write scope files + report"),
     ),
     passive_only=True,
+    #: The networks discovered — the frontier the ports stage's scan set grows from.
+    frontier_artifacts=("output/scope/discovered.txt",),
+    #: Seed-keyed: RIPEstat/RDAP answer about the addresses and organisations they
+    #: are asked about, so a repeat pays exactly when the address set grew — which
+    #: is what a new round means.  The pipeline never scans, so repeating it costs
+    #: registry queries, not target traffic.
+    repeat_stages=("lookup",),
+    #: Seed-keyed, so the only thing that makes a repeat pay is a new address to
+    #: ask about.  Fired only when the frontier grew an ``ip`` token.
+    repeat_on=("ip",),
 )
 
 
@@ -35,6 +45,15 @@ class AsnCidrPipeline(BasePipeline):
 
     def __init__(self) -> None:
         self._last: dict[str, Any] | None = None
+
+    def reset(self) -> None:
+        """Forget the pass's artifacts so a convergence round really re-queries.
+
+        The cache below is a within-pass optimisation (``lookup`` and ``emit``
+        are one pass over the registries).  Across rounds it would be a lie: the
+        round's new addresses are exactly the reason to ask RIPEstat again.
+        """
+        self._last = None
 
     def run(self, stage: str, context: RunContext) -> dict[str, Any]:
         if self._last is not None:
