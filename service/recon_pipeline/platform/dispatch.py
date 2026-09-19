@@ -24,6 +24,14 @@ Design rules the code enforces:
 The dispatcher does not perform I/O: it decides.  Execution, retries and
 pacing stay in the callers (tools + stealth), which keeps this module pure
 enough to test on a fake clock.
+
+**One policy, not two.**  When a caller names the *operation* it is about to
+perform, the decision is delegated to :mod:`platform.escalation` — the explicit
+eligibility policy that knows about hosting classes, evidence states and which
+operations an asset has already had.  The dispatcher keeps only what is
+mechanical (cooldowns, budgets, the run's action count); the *reason* an asset
+deserves active work lives in one module instead of being re-derived at every
+call site.
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from . import escalation as escalation_mod
 from .scope import NEEDS_REVIEW, OUT_OF_SCOPE
 
 ALLOW = "ALLOW"
@@ -71,9 +80,20 @@ class DispatchPolicy:
 class Dispatcher:
     """The gate.  ``decide()`` is the only method a caller needs."""
 
-    def __init__(self, scope, scoring_enabled: bool = True, *, policy: DispatchPolicy | None = None) -> None:
+    def __init__(
+        self,
+        scope,
+        scoring_enabled: bool = True,
+        *,
+        policy: DispatchPolicy | None = None,
+        escalation: "escalation_mod.EscalationPolicy | None" = None,
+    ) -> None:
         self.scope = scope
         self.policy = policy or DispatchPolicy()
+        #: The eligibility policy consulted when a caller names its operation.
+        #: ``None`` means "ask me nothing about escalation", which is the
+        #: behaviour every existing caller already relies on.
+        self.escalation = escalation
         self.scoring_enabled = scoring_enabled
         self._host_counts: dict[str, int] = defaultdict(int)
         self._run_count = 0
@@ -92,8 +112,18 @@ class Dispatcher:
         score: int | None = None,
         scope_decision=None,
         now: float | None = None,
+        operation: str = "",
+        hosting: str = escalation_mod.HOSTING_UNKNOWN,
+        evidence_state: str = "",
+        operations: frozenset[str] = frozenset(),
+        has_service_evidence: bool = False,
     ) -> Decision:
-        """Should we actively touch *host*?  Pure: pass ``now`` on a fake clock."""
+        """Should we actively touch *host*?  Pure: pass ``now`` on a fake clock.
+
+        *operation* (one of :mod:`platform.escalation`'s names) turns the
+        decision over to the escalation policy; without it the call behaves
+exactly as it did before that policy existed.
+        """
         now = time.time() if now is None else now
 
         # 0. cooldown on a recent DENY — do not re-litigate every request.
@@ -128,6 +158,28 @@ class Dispatcher:
             return self._record(
                 host, Decision(DENY, f"score {score} below floor {self.policy.min_score}")
             )
+
+        # 3b. the escalation policy — why this asset deserves this work, and
+        #     whether the operation has already been paid for.  Checked before
+        #     the budgets so a refused operation costs no budget.
+        if operation:
+            verdict_for_policy = self.escalation or escalation_mod.EscalationPolicy()
+            eligibility = escalation_mod.decide(
+                escalation_mod.AssetEvidence(
+                    asset_type=asset_type,
+                    identity=host,
+                    scope_state=verdict.state,
+                    score=score,
+                    evidence_state=evidence_state,
+                    hosting=hosting,
+                    has_service_evidence=has_service_evidence,
+                    operations=frozenset(operations),
+                ),
+                operation,
+                policy=verdict_for_policy,
+            )
+            if not eligibility.eligible:
+                return self._record(host, Decision(DENY, eligibility.reason))
 
         # 4. budgets.
         if self.policy.run_budget and self._run_count >= self.policy.run_budget:

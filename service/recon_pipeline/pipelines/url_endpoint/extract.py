@@ -66,6 +66,13 @@ class UrlExtraction:
     by_kind: dict[str, int] = field(default_factory=dict)
     #: ``{parameter: [url, ...]}`` — the reverse index, full (not sampled).
     parameter_index: dict[str, list[str]] = field(default_factory=dict)
+    #: One row per ``(url, parameter)`` observation, sorted.  This is the artifact
+    #: that keeps a parameter's *provenance*: a flat name list answers "which
+    #: parameters exist" but not "which URL exposes this one", and the second
+    #: question is the one that gates a fuzzing pass.  Duplicate observations of
+    #: the same pair collapse to one row; the same parameter seen on many URLs
+    #: keeps every observation.
+    parameter_observations: list[dict[str, object]] = field(default_factory=list)
 
     @property
     def counts(self) -> dict[str, int]:
@@ -75,6 +82,7 @@ class UrlExtraction:
             "hosts": len(self.hosts),
             "endpoints": len(self.endpoints),
             "parameters": len(self.parameters),
+            "parameter_observations": len(self.parameter_observations),
             "javascript": len(self.javascript),
             "source_maps": len(self.source_maps),
             "api_endpoints": len(self.api_endpoints),
@@ -90,6 +98,7 @@ class UrlExtraction:
             "hosts": self.hosts,
             "endpoints_sample": self.endpoints[:REPORT_SAMPLE],
             "parameters_sample": self.parameters[:REPORT_SAMPLE],
+            "parameter_observations": self.parameter_observations[:REPORT_SAMPLE],
             "javascript_sample": self.javascript[:REPORT_SAMPLE],
             "source_maps_sample": self.source_maps[:REPORT_SAMPLE],
             "api_endpoints_sample": self.api_endpoints[:REPORT_SAMPLE],
@@ -154,4 +163,37 @@ def extract_parsed(parsed: list[ParsedUrl], apex: str) -> UrlExtraction:
         interesting=interesting,
         by_kind=by_kind,
         parameter_index={name: sorted(urls) for name, urls in sorted(index.items())},
+        parameter_observations=parameter_observations(parsed),
     )
+
+
+def parameter_observations(parsed: Iterable[ParsedUrl]) -> list[dict[str, object]]:
+    """``(url, parameter)`` observations — where each name was actually seen.
+
+    One row per pair, so the question "which URLs expose this parameter?" and its
+    inverse are both a single filter away, and the pair — not the name — is the
+    unit of deduplication.  The value is deliberately *not* recorded: an archived
+    query string is somebody's real token, session id or e-mail address often
+    enough that keeping it would turn an evidence artifact into a data leak.  The
+    location is recorded instead, because that is what a consumer needs (a query
+    parameter and a path segment are different testing surfaces) and it carries
+    no secret.
+    """
+    observations: dict[tuple[str, str, str], dict[str, object]] = {}
+    for item in parsed:
+        for name in item.parameter_names:
+            if not is_plausible_parameter(name):
+                continue
+            key = (item.url, name, "query")
+            observations.setdefault(
+                key,
+                {
+                    "parameter": name,
+                    "url": item.url,
+                    "host": item.host,
+                    "location": "query",
+                    "kind": item.kind,
+                    "discovered_by": ["url_endpoint:passive"],
+                },
+            )
+    return [observations[key] for key in sorted(observations)]

@@ -57,6 +57,15 @@ RESOLVES_TO = "resolves_to"
 PTR_MAPS_TO = "ptr_maps_to"
 #: A hostname appears in the URL pipeline's harvest.
 HAS_URL = "has_url"
+#: A URL exposes a named query parameter, *as observed on that URL*.
+#: Deliberately not a global ``has_parameter`` from every URL to every name: the
+#: provenance is the fact.  A name list answers "which parameters exist"; this
+#: edge answers "which URLs expose this parameter" and "which parameters were
+#: observed on this URL", which is the pair a testing pass is built from.
+OBSERVED_PARAMETER = "observed_parameter"
+#: A URL answered with a redirect to another location we validated (or at least
+#: observed as the final URL).  ``url -> url``, with the status chain on the edge.
+REDIRECTS_TO = "redirects_to"
 #: A wildcard DNS answer covers a hostname.
 WILDCARD_COVERS = "wildcard_covers"
 #: An address exposes a port/service (our scan).
@@ -85,6 +94,8 @@ EDGE_TYPES = (
     RESOLVES_TO,
     PTR_MAPS_TO,
     HAS_URL,
+    OBSERVED_PARAMETER,
+    REDIRECTS_TO,
     WILDCARD_COVERS,
     EXPOSES_SERVICE,
     IN_NETWORK,
@@ -165,6 +176,8 @@ GRAPH_RELATIONSHIPS: dict[str, tuple[str, str]] = {
     RESOLVES_TO: ("RESOLVES_TO", "domain -> ip"),
     PTR_MAPS_TO: ("PTR_MAPS_TO", "ip -> domain"),
     HAS_URL: ("HAS_URL", "domain -> url"),
+    OBSERVED_PARAMETER: ("OBSERVED_PARAMETER", "url -> parameter"),
+    REDIRECTS_TO: ("REDIRECTS_TO", "url -> url"),
     WILDCARD_COVERS: ("WILDCARD_COVERS", "wildcard -> domain"),
     EXPOSES_SERVICE: ("EXPOSES_SERVICE", "ip -> service"),
     IN_NETWORK: ("IN_NETWORK", "ip -> network"),

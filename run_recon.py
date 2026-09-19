@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Run the names, ports/services, URL/endpoint and ASN/CIDR pipelines against one
-target and write one combined report at the project root.
+"""Run the names, ports/services, URL/endpoint, ASN/CIDR and cloud-resource
+pipelines against one target and write one combined report at the project root.
 
 What it does, in order:
 
@@ -11,7 +11,9 @@ What it does, in order:
 4. runs ``asn_cidr`` (network ownership discovery; never scans, emits the ports
    stage's discovered-scope files) — best *after* pipeline 2 so sibling
    addresses exist for annotation;
-5. assembles ``RECON_<target>_OUTPUT.md`` at the project root: a data-driven
+5. runs ``cloud_resource`` (storage-bucket harvest + provider probes) — last
+   deliberately, since the names/URL artifacts are its seed material;
+6. assembles ``RECON_<target>_OUTPUT.md`` at the project root: a data-driven
    summary (read from the stages' machine reports, never hand-written) followed
    by every curated artifact verbatim, then the console logs.
 
@@ -33,6 +35,7 @@ Usage::
     python run_recon.py -t example.com --skip-ports                  # names + URLs
     python run_recon.py -t example.com --skip-url                    # names + ports
     python run_recon.py -t example.com --skip-asn                    # names + ports + URLs
+    python run_recon.py -t example.com --skip-cloud                  # all but buckets
 
 Per-stage knobs keep working through their environment variables (``PSH_*``,
 ``ACTIVE_*``) — this script forwards nothing it does not understand, so a run is
@@ -55,11 +58,13 @@ SDW_MODULE = "service.recon_pipeline.pipelines.subdomain_domain_wildcards.main"
 PSH_MODULE = "service.recon_pipeline.pipelines.port_service_host.pipeline"
 URL_MODULE = "service.recon_pipeline.pipelines.url_endpoint.main"
 ASN_MODULE = "service.recon_pipeline.pipelines.asn_cidr.main"
+CLOUD_MODULE = "service.recon_pipeline.pipelines.cloud_resource.main"
 
 SDW_DIR = ROOT / "service/recon_pipeline/pipelines/subdomain_domain_wildcards"
 PSH_DIR = ROOT / "service/recon_pipeline/pipelines/port_service_host"
 URL_DIR = ROOT / "service/recon_pipeline/pipelines/url_endpoint"
 ASN_DIR = ROOT / "service/recon_pipeline/pipelines/asn_cidr"
+CLOUD_DIR = ROOT / "service/recon_pipeline/pipelines/cloud_resource"
 
 #: The artifacts worth embedding, relative to each stage directory.  Anything
 #: absent or stale is skipped and reported.  The permutation stage's 26
@@ -108,6 +113,12 @@ URL_ARTIFACTS: tuple[str, ...] = (
     "passive/output/report.json",
     "output/endpoints.txt",
     "output/parameters.txt",
+    # The provenance-bearing forms: which URL exposes which parameter, and what
+    # the live validation stage actually measured.  ``url_validation.jsonl`` is
+    # the difference between "the archive mentioned it" and "it answered today".
+    "output/parameters.jsonl",
+    "output/url_validation.jsonl",
+    "output/validation.json",
     "output/javascript.txt",
     "output/source_maps.txt",
     "output/interesting.txt",
@@ -122,6 +133,17 @@ ASN_ARTIFACTS: tuple[str, ...] = (
     "output/scope/discovered.txt",
     "output/scope/discovered.annotated.txt",
     "output/report.json",
+)
+
+CLOUD_ARTIFACTS: tuple[str, ...] = (
+    "passive/output/candidates.jsonl",
+    "passive/output/candidates.txt",
+    "passive/output/report.json",
+    "output/verdicts.jsonl",
+    "output/buckets.jsonl",
+    "output/dangling.jsonl",
+    "output/report.json",
+    "output/summary.json",
 )
 
 
@@ -232,7 +254,7 @@ def _mail_records(sdw_dir: Path, apex: str) -> list[str]:
 
 
 def _summary_section(sdw_report: dict, psh_report: dict, url_report: dict,
-                     asn_report: dict, apex: str,
+                     asn_report: dict, cloud_report: dict, apex: str,
                      warnings: list[str] | None = None) -> str:
     """The data-driven header of the report: what happened, from the machine reports."""
     out: list[str] = [f"# Recon output — {apex}", ""]
@@ -347,19 +369,43 @@ def _summary_section(sdw_report: dict, psh_report: dict, url_report: dict,
         out.append(f"Counts: `{json.dumps(counts, sort_keys=True)}`")
         out.append("")
 
-    if not sdw_report and not psh_report and not url_report and not asn_report:
+    if cloud_report:
+        counts = cloud_report.get("counts") or {}
+        by_state = cloud_report.get("by_state") or {}
+        out.append("## Pipeline 5 — cloud_resource (storage buckets; probes touch providers, never the target)")
+        out.append("")
+        out.append(
+            f"{counts.get('probed', 0)} probe(s): {by_state.get('open', 0)} open, "
+            f"{by_state.get('auth_required', 0)} auth-required, "
+            f"{by_state.get('dangling', 0)} dangling, "
+            f"{by_state.get('exists_other_region', 0)} other-region, "
+            f"{by_state.get('unavailable', 0)} unavailable, in "
+            f"{cloud_report.get('seconds', 0):.1f}s · ok={cloud_report.get('ok')}"
+        )
+        out.append("")
+        out.append(
+            "Dangling CNAME-claimed names are the takeover detector's (S25) raw "
+            "material — a bucket the target's DNS claims but the provider says is absent."
+        )
+        out.append("")
+        out.append(f"Counts: `{json.dumps(counts, sort_keys=True)}`")
+        out.append("")
+
+    if not sdw_report and not psh_report and not url_report and not asn_report and not cloud_report:
         out.append("_No pipeline produced a readable report — see the logs below._")
         out.append("")
     return "\n".join(out) + "\n"
 
 
 def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
-             ran_asn: bool,
+             ran_asn: bool, ran_cloud: bool,
              sub_log: Path, port_log: Path, url_log: Path, asn_log: Path,
+             cloud_log: Path,
              sdw_before: dict[str, float] | None = None,
              psh_before: dict[str, float] | None = None,
              url_before: dict[str, float] | None = None,
-             asn_before: dict[str, float] | None = None) -> Path:
+             asn_before: dict[str, float] | None = None,
+             cloud_before: dict[str, float] | None = None) -> Path:
     """Write the combined report: computed summary + this-run artifacts + logs.
 
     ``*_before`` are the mtime snapshots taken *before* the stages ran; a file
@@ -370,6 +416,7 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
     psh_before = psh_before if psh_before is not None else _mtimes(PSH_DIR)
     url_before = url_before if url_before is not None else _mtimes(URL_DIR)
     asn_before = asn_before if asn_before is not None else _mtimes(ASN_DIR)
+    cloud_before = cloud_before if cloud_before is not None else _mtimes(CLOUD_DIR)
 
     def fresh(directory: Path, before: dict[str, float], relative: str) -> bool:
         """True when the artifact is new or was rewritten after the snapshot."""
@@ -384,6 +431,7 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
     psh_report = _read_json(PSH_DIR / "output/report.json") if ran_ports else {}
     url_report = _read_json(URL_DIR / "output/summary.json") if ran_url else {}
     asn_report = _read_json(ASN_DIR / "output/report.json") if ran_asn else {}
+    cloud_report = _read_json(CLOUD_DIR / "output/summary.json") if ran_cloud else {}
 
     # The summary is only as fresh as the machine report it was read from.  When
     # a stage was asked to run but did not rewrite its report (a crash before the
@@ -419,8 +467,17 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
             "pipeline 4 did not rewrite its report this run - "
             "the figures below describe a previous run"
         )
+    if ran_cloud and cloud_report and not fresh(
+        CLOUD_DIR, cloud_before or {}, "output/summary.json"
+    ):
+        warnings.append(
+            "pipeline 5 did not rewrite its summary this run - "
+            "the figures below describe a previous run"
+        )
 
-    parts: list[str] = [_summary_section(sdw_report, psh_report, url_report, asn_report, apex, warnings)]
+    parts: list[str] = [
+        _summary_section(sdw_report, psh_report, url_report, asn_report, cloud_report, apex, warnings)
+    ]
 
     if ran_subdomain:
         parts.append("---\n\n## Verbatim artifacts — subdomain_domain_wildcards\n")
@@ -482,6 +539,19 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
         if stale_asn:
             parts.append(f"\n_Stale artifacts excluded from embedding: {', '.join(stale_asn)}_\n")
 
+    if ran_cloud:
+        parts.append("---\n\n## Verbatim artifacts — cloud_resource\n")
+        stale_cloud: list[str] = []
+        for relative in CLOUD_ARTIFACTS:
+            path = CLOUD_DIR / relative
+            if path.is_file() and not fresh(CLOUD_DIR, cloud_before, relative):
+                stale_cloud.append(relative)
+                parts.append(_fence(path, relative, stale=True))
+            else:
+                parts.append(_fence(path, relative, stale=False))
+        if stale_cloud:
+            parts.append(f"\n_Stale artifacts excluded from embedding: {', '.join(stale_cloud)}_\n")
+
     parts.append("---\n\n## Console logs\n")
     if ran_subdomain:
         parts.append(_fence(sub_log, sub_log.name, stale=False))
@@ -491,6 +561,8 @@ def assemble(apex: str, *, ran_subdomain: bool, ran_ports: bool, ran_url: bool,
         parts.append(_fence(url_log, url_log.name, stale=False))
     if ran_asn:
         parts.append(_fence(asn_log, asn_log.name, stale=False))
+    if ran_cloud:
+        parts.append(_fence(cloud_log, cloud_log.name, stale=False))
 
     report_path = ROOT / f"RECON_{apex}_OUTPUT.md"
     report_path.write_text("".join(parts), encoding="utf-8", newline="\n")
@@ -509,6 +581,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-ports", action="store_true", help="skip pipeline 2")
     parser.add_argument("--skip-url", action="store_true", help="skip pipeline 3")
     parser.add_argument("--skip-asn", action="store_true", help="skip pipeline 4 (ASN/CIDR discovery)")
+    parser.add_argument("--skip-cloud", action="store_true", help="skip pipeline 5 (cloud buckets)")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging in every stage")
     args = parser.parse_args(argv)
 
@@ -529,12 +602,14 @@ def main(argv: list[str] | None = None) -> int:
     port_log = ROOT / f"recon_{apex}_ports_{stamp}.log"
     url_log = ROOT / f"recon_{apex}_url_{stamp}.log"
     asn_log = ROOT / f"recon_{apex}_asn_{stamp}.log"
+    cloud_log = ROOT / f"recon_{apex}_cloud_{stamp}.log"
 
     exit_codes: list[int] = []
     ran_subdomain = not args.skip_subdomain
     ran_ports = not args.skip_ports
     ran_url = not args.skip_url
     ran_asn = not args.skip_asn
+    ran_cloud = not args.skip_cloud
 
     # Snapshot the output trees BEFORE the stages run: the stale-artifact guard
     # is "did this file's mtime move during the run", which needs a baseline.
@@ -542,6 +617,7 @@ def main(argv: list[str] | None = None) -> int:
     psh_before = _mtimes(PSH_DIR) if ran_ports else None
     url_before = _mtimes(URL_DIR) if ran_url else None
     asn_before = _mtimes(ASN_DIR) if ran_asn else None
+    cloud_before = _mtimes(CLOUD_DIR) if ran_cloud else None
 
     if ran_subdomain:
         command = [sys.executable, "-u", "-m", SDW_MODULE, "-t", apex,
@@ -566,13 +642,21 @@ def main(argv: list[str] | None = None) -> int:
         if args.verbose:
             command.append("-v")
         exit_codes.append(_run_streamed(command, asn_log))
+    if ran_cloud:
+        # Last deliberately: the URL and names artifacts are this pipeline's
+        # seed material (CNAMEs, JS hosts, brand tokens).
+        command = [sys.executable, "-u", "-m", CLOUD_MODULE, "-t", apex]
+        if args.verbose:
+            command.append("-v")
+        exit_codes.append(_run_streamed(command, cloud_log))
 
     report_path = assemble(
         apex, ran_subdomain=ran_subdomain, ran_ports=ran_ports, ran_url=ran_url,
-        ran_asn=ran_asn,
+        ran_asn=ran_asn, ran_cloud=ran_cloud,
         sub_log=sub_log, port_log=port_log, url_log=url_log, asn_log=asn_log,
+        cloud_log=cloud_log,
         sdw_before=sdw_before, psh_before=psh_before, url_before=url_before,
-        asn_before=asn_before,
+        asn_before=asn_before, cloud_before=cloud_before,
     )
     print(f"\n[run_recon] combined report: {report_path}")
     return 0 if all(code == 0 for code in exit_codes) else 1

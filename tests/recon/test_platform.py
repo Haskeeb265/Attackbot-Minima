@@ -26,9 +26,25 @@ from service.recon_pipeline.platform.observability import RunRecord, RunRegistry
 from service.recon_pipeline.platform.registry import Registration, Registry
 from service.recon_pipeline.platform.scope import ScopeEngine
 from service.recon_pipeline.platform.scoring import (
+    BAND_HIGH,
+    BAND_MEDIUM,
+    CORROBORATION_FACTOR,
+    EVIDENCE_ACTIVELY_VERIFIED,
+    EVIDENCE_DEAD,
+    EVIDENCE_HISTORICAL,
+    EVIDENCE_NEEDS_REVIEW,
+    EVIDENCE_ORDER,
+    EVIDENCE_PASSIVE,
+    EVIDENCE_UNVERIFIED,
+    PASSIVE_CORROBORATION_FACTOR,
     UNKNOWN_SOURCE_WEIGHT,
+    W_ARCHIVE_MENTION,
+    W_LIVE_CONFIRMATION,
     ScoredAsset,
+    Signal,
     band_for,
+    evidence_state,
+    evidence_state_rank,
     score,
     score_many,
     signal_for_source,
@@ -58,10 +74,70 @@ def test_the_strongest_signal_is_a_floor_not_a_sum() -> None:
 
     result = score(asset)
 
-    # floor 80 + 10% of the *other* signal's weight — not 130.
-    assert result.score == 85
-    assert result.corroboration_bonus == 5
-    assert result.band == "high"
+    # floor 80 + 25% of the *other* signal's weight — not 130.  The 50-weight
+    # signal is a medium one, so it corroborates at the passive factor: weak
+    # evidence only means something in aggregate.
+    assert result.corroboration_bonus == round(50 * PASSIVE_CORROBORATION_FACTOR)
+    assert result.score == 80 + result.corroboration_bonus
+    # 93: a strong claim (an 80-weight signal) plus one *independent* medium one
+    # clears the core threshold.  That is the intended consequence of the passive
+    # factor — agreement between two unrelated weak/medium sources is exactly
+    # what "corroboration" is supposed to look like — and the mid-band collapse
+    # the score distribution used to suffer is addressed by the evidence state,
+    # not by suppressing this.
+    assert result.band == "core"
+
+
+def test_strong_evidence_corroborates_at_the_strong_factor() -> None:
+    """A second strong signal must not buy its way to the ceiling."""
+    asset = ScoredAsset(asset_type="Domain", canonical_value="api.acme.test")
+    asset.add_signal(80, "certificate SAN match", kind="certificate")
+    asset.add_signal(80, "live URL validation", kind="validation")
+
+    result = score(asset)
+
+    assert result.corroboration_bonus == round(80 * CORROBORATION_FACTOR)
+    assert result.score == 88
+
+
+def test_a_live_confirmation_outweighs_a_historical_mention() -> None:
+    """The distinction the URL validation stage exists to make."""
+    archived = score(
+        ScoredAsset(
+            asset_type="URL",
+            canonical_value="https://acme.test/a",
+            signals=[Signal(W_ARCHIVE_MENTION, "source: gau", "source:gau")],
+        )
+    )
+    live = score(
+        ScoredAsset(
+            asset_type="URL",
+            canonical_value="https://acme.test/a",
+            signals=[Signal(W_LIVE_CONFIRMATION, "source: validate", "source:validate")],
+        )
+    )
+
+    assert live.score > archived.score
+    assert live.band == BAND_HIGH
+    assert archived.band == BAND_MEDIUM
+
+
+def test_evidence_states_rank_a_measurement_above_a_claim() -> None:
+    assert (
+        evidence_state(verified_alive=True, historical=True) == EVIDENCE_ACTIVELY_VERIFIED
+    )
+    assert evidence_state(verified_dead=True, historical=True) == EVIDENCE_DEAD
+    assert evidence_state(historical=True) == EVIDENCE_HISTORICAL
+    assert evidence_state(passive=True) == EVIDENCE_PASSIVE
+    assert evidence_state() == EVIDENCE_UNVERIFIED
+    # A scope verdict outranks provenance: an asset we may not touch should be
+    # seen for that reason, not for how it was found.
+    assert evidence_state(needs_review=True, historical=True) == EVIDENCE_NEEDS_REVIEW
+    # Triage order: a verified asset first, a dead one last.
+    assert evidence_state_rank(EVIDENCE_ACTIVELY_VERIFIED) < evidence_state_rank(
+        EVIDENCE_UNVERIFIED
+    )
+    assert evidence_state_rank(EVIDENCE_DEAD) == len(EVIDENCE_ORDER) - 1
 
 
 def test_scores_are_clamped_to_the_zero_to_hundred_range() -> None:
@@ -406,6 +482,7 @@ def test_the_registry_discovers_exactly_the_built_pipelines() -> None:
 
     assert registry.names() == [
         "asn_cidr",
+        "cloud_resource",
         "graph_normalize",
         "port_service_host",
         "subdomain_domain_wildcards",

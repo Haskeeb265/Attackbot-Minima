@@ -281,12 +281,40 @@ every row into one model of typed nodes and edges:
 collect    names · ports · URL · network artifacts
    ↓
 merge      rows → nodes + edges, deduped by identity, trust merged strongest-wins
+   ↓scope      every place (domain · ip · network) → the platform scope engine's verdict
    ↓
 score      every claimed node → score + band + audit (platform S2, no local weights)
    ↓
-emit       nodes.jsonl · edges.jsonl · vocabulary.json · scoring.json
-           · graph_state.json · report.json · nodes.txt
+plan       the platform escalation policy → eligible queue + every refusal, by rule
+   ↓
+emit       nodes.jsonl · edges.jsonl · vocabulary.json · scoring.json ·
+           graph_state.json · report.json · nodes.txt · network_relevance.jsonl
+           · active_candidates.jsonl · escalation_refusals.jsonl · measurement.{json,md}
 ```
+
+`platform/escalation.py` is the one function that answers *should this asset be
+actively touched, and why* — an operation × evidence bundle in, an `Eligibility`
+out, always with a machine-readable `code` naming the rule that fired (`REFUSAL_*`
+/ `ALLOW_*`). It is deny-by-default and ordered: scope (no verdict, out of scope,
+needs_review), idempotency (the operation was already attempted), shared
+infrastructure (never port-scanned without a declaration of the exact address as
+an origin), hosting state (`unclassified` ≠ `unknown` ≠ `shared`: an address nobody
+classified is refused, not assumed to be the target's), then the operation's own
+evidence floor. The executors (the ports ladder, the URL validate stage,
+`Dispatcher.decide(operation=…)`) consume the same decisions rather than
+re-deciding, and `escalation_refusals.jsonl` makes each refusal listable — an
+unlistable refusal is indistinguishable from an asset nobody looked at.
+
+Two provenance rules the policy depends on: **idempotency reads only our own
+output** (an address's `port_scan` is "already attempted" when *our* scan produced
+ports, never because a third party's index has a row for it — treating the latter
+as done hid the target's one dedicated address behind an InternetDB record with an
+empty port list), and **service evidence means services we observed** (a
+`discovered`-trust port claim is a lead to verify, not a reason to skip).
+`measurement.{json,md}` reports the resulting progression per stage — candidates →
+considered → eligible → validated/scanned, with every refusal counted by rule —
+plus the two *data gaps* that no policy decision can fix (classified addresses the
+current DNS artifact does not link, and linked addresses nobody classified).
 
 Design rules the code enforces:
 

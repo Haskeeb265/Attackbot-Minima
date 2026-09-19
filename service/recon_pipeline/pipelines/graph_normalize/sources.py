@@ -46,6 +46,8 @@ STREAM_NAMES = (
     "javascript",
     "interesting",
     "parameters",
+    "parameter_observations",
+    "url_validations",
     # network pipeline
     "networks",
     "asns",
@@ -203,6 +205,12 @@ def read_urls(root: Path, *, enabled: bool = True) -> SourceFacts:
         ("javascript", "output/javascript.txt", _lines),
         ("interesting", "output/interesting.txt", _lines),
         ("parameters", "output/parameters.txt", _lines),
+        # The provenance-bearing forms.  Missing is normal (the validation stage
+        # may have been skipped, or the extract stage predates
+        # ``parameters.jsonl``), and the report says which artifact was absent
+        # rather than pretending the model is complete.
+        ("parameter_observations", "output/parameters.jsonl", _jsonl),
+        ("url_validations", "output/url_validation.jsonl", _jsonl),
     ):
         artifact, rows = reader(stream, root / relative)
         facts.add(artifact, rows)

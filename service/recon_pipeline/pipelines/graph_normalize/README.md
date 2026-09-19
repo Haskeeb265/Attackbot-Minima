@@ -132,7 +132,9 @@ inside `run` differ between two runs over the same artifacts.
 | `ip` | `ipaddress` form | | `has_url` | domain → url |
 | `service` | `address:port/proto` | | `wildcard_covers` | wildcard → domain |
 | `url` | canonical URL | | `exposes_service` | ip → service |
-| `parameter` | parameter name | | `in_network` | ip → network (the registry's own prefix) |
+| `parameter` | parameter name | | `observed_parameter` | url → parameter (**where it was seen**, not a global list) |
+| | | | `redirects_to` | url → url (a live validation's redirect) |
+| | | | `in_network` | ip → network (the registry's own prefix) |
 | `asn` | AS number | | `belongs_to_asn` | ip → asn |
 | `network` | CIDR, network address | | `announced_by` | network → asn (a routing claim) |
 | `organization` | org name or handle | | `allocated_to` | network → organization (a registry claim) |
@@ -154,10 +156,14 @@ cannot be added without deciding what the graph write would call it.
 | `vocabulary.json` | the neutral→graph mapping used for this run, plus `graph_written: false` and why |
 | `scoring.json` | the weights, bands and applied/withheld penalties that produced every `score` |
 | `graph_state.json` | **the handoff document** — nodes + edges + both contracts + integrity, in one file |
-| `report.json` | counts, per-kind/per-type/per-trust/per-band rollups, source status, orphans, conflicts, top-scoring nodes |
+| `report.json` | counts, per-kind/per-type/per-trust/per-band/per-*evidence-state* rollups, source status, orphans, conflicts, top-scoring nodes, the escalation block |
 | `nodes.txt` | bare node ids, for eyeballing a run without a JSON reader |
+| `active_candidates.jsonl` | **the policy's answer to "what deserves active validation next?"** — one row per eligible (asset, operation) pair, best-first, each with its `code` and reason |
+| `escalation_refusals.jsonl` | **every refusal**, one row per (asset, operation): `verb: SKIP`, the machine-readable `code` of the rule that fired, the reason in full. This is the diagnosis beside the queue — `0 eligible / 33 considered` is only actionable next to "14 unclassified, 14 awaiting a DNS link, 5 already scanned" |
+| `measurement.json` / `measurement.md` | the run's progression accounting: URL candidates → considered → eligible → validated → verified/redirected/dead/unreachable; addresses → shared/dedicated/unknown/unclassified → eligible → refused by rule → scanned → services; networks by relevance; nodes by evidence state; and the two **data gaps** that are nobody's policy decision |
+| `network_relevance.jsonl` | one row per network: `discovered` → `ownership_verified` → `host_discovered` → `relevant` → `active_candidate`, with the reason and the operations already attempted |
 
-Five of the seven files are **deterministic**: two runs over the same sibling
+Five of the seven model files are **deterministic**: two runs over the same sibling
 artifacts produce byte-identical `nodes.jsonl`, `edges.jsonl`,
 `vocabulary.json`, `scoring.json` and `nodes.txt` (a test asserts exactly that),
 which is what makes the model diffable between runs. `graph_state.json` and
@@ -241,6 +247,95 @@ What the model says that no single artifact could:
    specific containing network, declared space still winning), which also makes
    the reason more useful, and tests pin both halves.
 
+## Validation, relevance and escalation (2026-09-19)
+
+Three things the model gained, in the vocabulary it already used:
+
+**Discovery and validation are separate claims.** A `url` node carries the
+archive's mention *and*, when the URL stage validated it, its own
+`props.validation_state` / `alive` / `serving` / `http_status` / `final_url` /
+`redirect_chain` / `content_type` / `title` / `server` / `tech` / `validated_at` /
+`validation_tool` — with a `redirects_to` edge to where it went. A URL without
+those props is a historical candidate: read it as one. A 404 keeps both claims and
+says so in `props.evidence_conflicts`, and takes the engine's dead-host penalty.
+
+**Evidence state, alongside the score.** Every claimed node carries
+`evidence_state` — `actively_verified`, `passive`, `historical`, `unverified`,
+`dead`, `needs_review` — because a band cannot say whether a claim was measured
+today or found in a 2019 crawl. The report counts both axes
+(`nodes_by_band` and `nodes_by_evidence_state`), and `state.json` embeds both.
+
+**Relevance and escalation.** Every network is placed in
+`discovered → ownership_verified → host_discovered → relevant → active_candidate`;
+an announcement alone never promotes one. The platform's escalation policy
+(`platform/escalation.py`) then decides, per operation, which assets are eligible
+for active work — refusing out-of-scope and un-verdicted assets, shared/CDN
+infrastructure for port scanning, operations already attempted, and networks that
+are not yet relevant. `active_candidates.jsonl` is that queue; the refusals and
+their reasons are in the report, so "nothing to do" and "everything was refused"
+are different readings.
+
+Live run, `qbsco.net`, 2026-09-19 (3 207 archived URLs, 56 of them validated):
+
+| | before | after |
+|---|---|---|
+| nodes / edges | 6 817 / 6 842 | **6 820 / 7 166** |
+| by edge | … | + `observed_parameter` 319, + `redirects_to` 5 |
+| bands | medium 6 690 · core 59 · low 55 · high 11 | medium 6 629 · core 76 · low 105 · high 8 |
+| evidence states | *(did not exist)* | needs_review 3 467 · historical 3 202 · passive 63 · dead 50 · actively_verified 19 · unverified 19 |
+| network relevance | *(did not exist)* | discovered **3 410** · ownership_verified 15 · relevant 4 · host_discovered 2 |
+| escalation | *(did not exist)* | url_validation 3 198 eligible of 3 257 · port_scan **0** of 33 · network_expansion **0** of 3 431 |
+
+## Why the port scan is still empty (2026-09-19, second pass)
+
+The first pass read the two zeros as the policy working. Auditing each of the 33
+addresses showed that was only half true, and the half that was false is the
+interesting half:
+
+| Rule that fired | Addresses | Is the refusal right? |
+|---|---|---|
+| `needs_review_awaiting_dns_link` | 14 | **Yes, and it is a data gap.** Each carries a `cdn`/`hosted` verdict — the ports stage had name evidence when it classified — but no name in the current `records.jsonl` resolves to it, so the DNS-derived scope verdict cannot be issued. Re-running the names stage fixes these; widening scope would not. |
+| `hosting_unclassified` | 14 | **Yes, and it is a coverage gap.** The address *is* one of the target's (a name of ours resolves to it), but it has no row in `cdn_classified.jsonl` — those 14 include Cloudflare (`2a06:98c1:3120::6`, whose sibling `::7` *was* classified) and Microsoft 365 (`40.99.x`, `2603:1046:c0c:*`). Under the previous mapping their absent verdict fell through to "not shared" and they were **admissible to a port scan**. Deny-by-default here is what closed that, and the fix is to classify them. |
+| `shared_infrastructure_without_origin_evidence` | 4 | **Yes.** Cloudflare addresses the target's own names answer from: in scope, and refused because a port scan of a shared edge measures the provider's platform, not the target's. Declaring the exact address as an origin is the documented override. |
+| *(eligible)* | **1** | `103.53.45.170` — the target's single `dedicated` address, in scope via `mail.qbsco.net`, score 100, and **no service evidence of ours**: `ALLOW` / `dedicated_relevant_target`. This is the escalation path working end to end: passive evidence → policy → active candidate. |
+
+Two provenance bugs in the previous idempotency rule are what had kept that address
+out of the queue, and both were the same mistake in different places — a *third
+party's* record was being read as something *we* did:
+
+* `derived_operations` marked `port_scan` as already attempted when InternetDB had
+  a record for the address. `103.53.45.170`'s InternetDB row has an **empty port
+  list** — nobody had scanned it; it was refused on the strength of somebody
+  else's index. Our own scan output (`openports.jsonl`) is now the only proof.
+* `has_service_evidence` counted any `exposes_service` edge, including the
+  `discovered`-trust ones a third party's port list produces. It now counts only
+  services with `observed` trust, so a third party's finding is a lead to verify
+  rather than a reason not to look.
+
+A safety refusal also now outranks a cost refusal when both apply, so an address
+that is both scanned and shared reports `shared_infrastructure…` rather than
+`already_attempted`: the reason an asset may not be touched at all is more
+fundamental than the budget already spent on it.
+
+Two things had to change for those refusals to be *sayable*:
+
+* **the scope engine now takes DNS as evidence for addresses** — a name that is
+  itself in scope resolving to an address makes that address the target's, which
+  is the same rule the ports stage already used for its own `in_scope`. Before
+  this, the graph refused at its scope gate exactly the assets the executing stage
+  was already treating as the target's: 33 of 33 `needs_review`, before hosting was
+  consulted at all. An explicit refusal still wins, and a `needs_review` name
+  cannot drag an address into scope.
+* **absent classification is a distinct state**, and it is refused (or, if the
+  operator declared the address, escalated and reported). `cdn_classified.jsonl`
+  is a snapshot of *another* stage's seed set, one run behind; treating its silence
+  as "not shared" inverted the risk it exists to manage.
+
+Network expansion stays at zero for the honest reason: 3 410 of 3 431 announced
+networks have neither ownership nor a target host inside them, and the remaining
+21 are `needs_review` (announced ≠ owned). No budget is spent on the parts of the
+internet that merely resemble the target.
+
 ## Honest gaps
 
 - **No graph writes.** By design, until the schema is final. `graph_state.json`
@@ -250,11 +345,15 @@ What the model says that no single artifact could:
   through its `exposes_service` edge to the address that is in or out of scope.
   Annotating the service too would mean inventing a verdict for a node that did
   not ask.
-- **Parameters have no URL linkage.** `parameters.txt` is a bare name list, so
-  parameter nodes are emitted with no edge and counted as
-  `unlinked_parameters` — inventing `has_parameter` from every URL to every name
-  would be a lie with good manners. An artifact carrying the parameter→URL index
-  would close this.
+- **Parameters without an observation stay unlinked — and are counted.** The URL
+  stage's `parameters.jsonl` now carries the `(url, parameter, location)`
+  observations, so both directions are a single traversal
+  (`observed_parameter`). What remains unlinked is a name that only the flat
+  `parameters.txt` mentioned: a node with no edge, reported as
+  `unlinked_parameters`, because inventing an edge from every URL to every name
+  would still be a lie with good manners. The count is now expected to be a
+  *residue* (0 for an artifact set written by the current URL stage) rather than
+  the normal case, and it is reported so a stale artifact is visible.
 - **Organisations are not reconciled.** In the run above, 16 `organization`
   nodes describe roughly four real organisations: Cymru's
   "CLOUDFLARENET - Cloudflare, Inc., US", RIPEstat's spelling without the country,
@@ -268,6 +367,37 @@ What the model says that no single artifact could:
   the node's `covers_known_hosts`; the withheld edge count is in the report.
 - **The model is as fresh as its inputs.** It reads files, so it says nothing
   about a pipeline that has not run — the report names the missing artifacts.
+- **Most URLs stay unvalidated by design.** The validation stage is bounded
+  (`URL_VALIDATE_MAX_URLS`), so on a large target the historical state dominates
+  the URL population. That is a budget decision rather than a scoring artefact,
+  and the evidence state is what makes it visible: raise the cap (or run
+  `--stages validate` repeatedly — the stage is idempotent) to convert historical
+  claims into measurements.
+- **The escalation plan is a plan.** Nothing consumes
+  `active_candidates.jsonl` automatically yet: the stages that *do* act (the ports
+  ladder, the URL validate stage) consult the same policy directly. Wiring the
+  artifact into a dispatcher-driven loop is the next step, and it is a
+  deliberately explicit one — a file cannot start scanning on its own.
+- **Classification is a snapshot of another stage's seed set.** 14 of the 33
+  addresses above have no `cdn_classified.jsonl` row because it was written from
+  an earlier pass over a different address set (`records.jsonl` was regenerated
+  afterwards). The policy now refuses those rather than guessing, and reports them
+  as `data_gaps` — but the real fix is ordering: classify the current address set
+  before planning active work against it.
+- **No scan receipt for a scan that found nothing.** The ports stage records open
+  ports (`openports.jsonl`) but not the addresses it probed and found quiet, so the
+  graph cannot prove "we already scanned this" for such an address. It will
+  therefore request one scan of an address the ports stage has in fact already
+  scanned (on this target: `103.53.45.170`, top-N, nothing open). That is the
+  deliberate direction of the error — a bounded re-scan of the target's own
+  dedicated host rather than silently never escalating it — and the fix is a scan
+  receipt artifact from the ports stage (what was probed, not only what answered).
+- **A CDN address is `in_scope` and still not scannable.** The DNS bridge makes
+  the target's own Cloudflare addresses in scope (they are the target's *names*
+  answering), so the refusal they get is the shared-infrastructure rule, not a
+  scope verdict that happened to be unfavourable. That is the intended reading —
+  but it does mean `scope_state` alone must never be used as a scan authorisation;
+  the policy decision is what authorises.
 
 ## Running
 
@@ -292,7 +422,10 @@ artifacts; `GN_INCLUDE_*` turn a source off; `GN_SCORE_MODEL` turns the scoring
 pass off (the model then carries no `score`/`band` at all and the report says
 so); `GN_MAX_SCORE_AUDIT` and `GN_MAX_TOP_SCORED` bound the audit and the
 report's leaderboard; `GN_MAX_NODES`, `GN_MAX_EDGES`, `GN_MAX_EVIDENCE`,
-`GN_MAX_ORPHANS`, `GN_MAX_WILDCARD_EDGES` bound the output.
+`GN_MAX_ORPHANS`, `GN_MAX_WILDCARD_EDGES` bound the output; `GN_PLAN_ESCALATION`
+turns the escalation pass (and `active_candidates.jsonl`) off, and
+`GN_ESCALATION_ALLOW_NEEDS_REVIEW` is the explicit override that lets the policy
+promote a discovered asset.
 
 ## Where this goes next
 

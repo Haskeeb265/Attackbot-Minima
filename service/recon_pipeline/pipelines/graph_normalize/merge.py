@@ -51,6 +51,8 @@ SOURCE_LABEL = {
     "javascript": "url_endpoint:javascript",
     "interesting": "url_endpoint:interesting",
     "parameters": "url_endpoint:parameters",
+    "parameter_observations": "url_endpoint:parameter-observations",
+    "url_validations": "url_endpoint:validation",
     "networks": "asn_cidr:networks",
     "asns": "asn_cidr:asns",
 }
@@ -76,6 +78,34 @@ class MergeResult:
     rows_by_stream: dict[str, int] = field(default_factory=dict)
     #: What the S2 scoring pass did, or why it was skipped.
     score_stats: ScoreStats | None = None
+    #: Distinct ``(url, parameter)`` observations, built from the URL stage's
+    #: ``parameters.jsonl``.  Distinct because the artifact may repeat a pair
+    #: (two sources saw the same query); the graph carries the same fact as
+    #: ``observed_parameter`` edges, and the count must not exceed them.
+    parameter_observations: int = 0
+    #: The pairs already counted, so a repeated row cannot inflate the count.
+    observed_pairs: set = field(default_factory=set, repr=False)
+    parameter_urls: dict[str, list[str]] = field(default_factory=dict)
+    #: URL live-validation outcomes, for the report's own accounting.
+    url_validations: int = 0
+    urls_live: int = 0
+    urls_dead: int = 0
+    #: Networks by relevance state (``discovered`` … ``active_candidate``).
+    networks_by_relevance: dict[str, int] = field(default_factory=dict)
+    #: What the escalation policy decided, per operation.
+    escalation: dict[str, object] = field(default_factory=dict)
+    #: The assets the policy says are worth active validation, best-first.
+    active_candidates: list[dict[str, object]] = field(default_factory=list)
+    #: One row per *refused* candidate: the asset, the operation, the rule that
+    #: refused it and the reason in full.  Written as an artifact because "0
+    #: eligible / 33 considered" is only actionable next to the rule that fired,
+    #: and because a refusal nobody can list is indistinguishable from an asset
+    #: nobody looked at.
+    escalation_refusals: list[dict[str, object]] = field(default_factory=list)
+    #: Addresses the scope engine accepted on DNS evidence (see
+    #: ``ScopeEngine.add_resolved_address``) — the bridge that let the target's
+    #: own addresses reach the policy at all.
+    dns_scoped_addresses: int = 0
 
 
 def build_model(
@@ -90,6 +120,8 @@ def build_model(
     scored: bool = settings.SCORE_MODEL,
     max_score_audit: int = settings.MAX_SCORE_AUDIT,
     top_scored: int = settings.MAX_TOP_SCORED,
+    plan_escalation: bool = settings.PLAN_ESCALATION,
+    allow_needs_review: bool = settings.ESCALATION_ALLOW_NEEDS_REVIEW,
 ) -> MergeResult:
     """Build the model, annotate it with scope, then score every node."""
     model = norm.Model()
@@ -130,7 +162,13 @@ def build_model(
         result, max_edges=max_edges, cap=max_wildcard_edges, max_evidence=max_evidence
     )
     _annotate_scope(result, scope)
+    _annotate_network_relevance(result)
     _annotate_scores(result, scored=scored, max_audit=max_score_audit, top=top_scored)
+    # Last, because it reads every annotation above it: the policy decides what
+    # deserves active work from the *finished* model (scope verdicts, hosting
+    # classes, evidence states), never from a row.
+    if plan_escalation:
+        _plan_escalation(result, scope, allow_needs_review=allow_needs_review)
     return result
 
 
@@ -579,6 +617,11 @@ def _merge_ports(
                 "hosting_verdict": verdict,
                 "hosting_provider": provider,
                 "hosting_confidence": str(row.get("confidence", "")),
+                # Explicit, because its *absence* is a state the policy acts on: a
+                # verdict of ``unknown`` means the classifier looked and found no
+                # signal, while a missing verdict means nobody looked.  Only an
+                # address with a row here can reach a port scan.
+                "hosting_classified": True,
             },
             evidence=f"classified as {verdict}"
             + (f" ({provider})" if provider else ""),
@@ -722,12 +765,24 @@ def _merge_urls(
                 max_evidence=max_evidence,
             )
 
-    # Parameters: names with no URL linkage in the artifact, so nodes only — and
-    # the report counts them as unlinked rather than inventing an edge.
+    _merge_url_validations(
+        result, source, max_nodes=max_nodes, max_edges=max_edges, max_evidence=max_evidence
+    )
+    _merge_parameter_observations(
+        result, source, max_nodes=max_nodes, max_edges=max_edges, max_evidence=max_evidence
+    )
+
+    # Parameters: names the URL pipeline harvested.  A name that carries an
+    # observation above already has its ``observed_parameter`` edge; what is left
+    # here is a name whose artifact predates ``parameters.jsonl`` (or which the
+    # observation rows filtered out), and *that* is what the report counts as
+    # unlinked — the honest answer, rather than inventing an edge from every URL
+    # to every name.
     for row in source.streams.get("parameters", []):
         name = str(row.get("value", "")).strip()
         if not name:
             continue
+        linked = bool(result.parameter_urls.get(name))
         model.add_node(
             vocab.PARAMETER,
             name,
@@ -735,15 +790,219 @@ def _merge_urls(
             trust=vocab.DISCOVERED,
             props={"name": name},
             evidence=(
-                "harvested parameter name; the URL pipeline's artifact carries no "
-                "URL linkage for it, so no edge is stated"
+                "harvested parameter name, observed on at least one URL"
+                if linked
+                else (
+                    "harvested parameter name; the URL pipeline's artifact carries "
+                    "no URL linkage for it, so no edge is stated"
+                )
             ),
             max_nodes=max_nodes,
             max_evidence=max_evidence,
         )
-        result.unlinked.append(vocab.node_id(vocab.PARAMETER, name))
+        if not linked:
+            result.unlinked.append(vocab.node_id(vocab.PARAMETER, name))
 
     _mark_roles(result, roles)
+
+
+def _merge_url_validations(
+    result: MergeResult,
+    source: SourceFacts,
+    *,
+    max_nodes: int | None,
+    max_edges: int | None,
+    max_evidence: int,
+) -> None:
+    """Fold live validation records onto the URL nodes they measured.
+
+    Discovery and validation stay separate claims: the node keeps its historical
+    ``sources`` (the archives that mentioned it) *and* gains the validation's own
+    provenance.  The record's own words become ``props.validation_*`` — status,
+    final URL, redirect chain, content type, title, server, technology and the
+    timestamp — so a consumer can tell ``historically discovered`` from
+    ``currently verified``, ``currently dead``, ``redirected`` and ``errored``
+    without going back to the URL stage's artifact.
+    """
+    model = result.model
+    label = SOURCE_LABEL["url_validations"]
+
+    for row in source.streams.get("url_validations", []):
+        url = norm.url_identity(str(row.get("url", "")))
+        if not url:
+            continue
+        state = str(row.get("state", "")).strip()
+        status = _port_number(row.get("status"))
+        final_url = norm.url_identity(str(row.get("final_url", "")))
+        chain = _as_list(row.get("redirect_chain"))
+        # Two different statements, kept apart on purpose: ``alive`` is "a server
+        # answered" (a 404 answers), ``serving`` is "this URL serves something"
+        # (a 200/3xx).  Collapsing them would make a 404 look like a live asset,
+        # which is the exact confusion this whole stage exists to remove.
+        alive = bool(row.get("alive"))
+        serving = state in {"verified", "redirected"}
+        url_id = vocab.node_id(vocab.URL, url)
+
+        model.add_node(
+            vocab.URL,
+            url,
+            source=label,
+            trust=vocab.OBSERVED,
+            props={
+                "validation_state": state,
+                "alive": alive,
+                "serving": serving,
+                "http_status": status,
+                "final_url": final_url,
+                "redirect_chain": chain,
+                "content_type": str(row.get("content_type", "")),
+                "title": str(row.get("title", "")),
+                "server": str(row.get("server", "")),
+                "tech": _as_list(row.get("tech")),
+                "validated_at": str(row.get("validated_at", "")),
+                "validation_tool": str(row.get("validation_tool", "")),
+                "validation_source": "active",
+            },
+            evidence=(
+                f"live validation ({row.get('validation_tool') or 'httpx'}): "
+                f"{state or 'unknown'}" + (f" {status}" if status is not None else "")
+            ),
+            max_nodes=max_nodes,
+            max_evidence=max_evidence,
+        )
+        result.url_validations += 1
+        if serving:
+            result.urls_live += 1
+        elif state in {"dead", "unreachable"}:
+            result.urls_dead += 1
+
+        if not final_url or final_url == url:
+            continue
+        if state != "redirected" and not chain:
+            # A URL the tool reported at a different location *without* observing a
+            # redirect hop is an artefact of a failed probe (httpx normalises the
+            # scheme on an error response), not a relationship worth stating.
+            continue
+        # A redirect is a relationship between two URLs we know, not a property
+        # that overwrites the first one: the archived URL *and* where it went are
+        # both assets, and a later run validating the destination corroborates
+        # this edge rather than replacing it.
+        model.add_node(
+            vocab.URL,
+            final_url,
+            source=label,
+            trust=vocab.OBSERVED,
+            evidence=f"the final URL of {url} (redirect target)",
+            max_nodes=max_nodes,
+            max_evidence=max_evidence,
+        )
+        model.add_edge(
+            vocab.REDIRECTS_TO,
+            url_id,
+            vocab.node_id(vocab.URL, final_url),
+            source=label,
+            trust=vocab.OBSERVED,
+            props={
+                "chain": chain,
+                "status": status,
+                "observed_at": str(row.get("validated_at", "")),
+            },
+            evidence=f"{url} answered with a redirect to {final_url}",
+            max_edges=max_edges,
+            max_evidence=max_evidence,
+        )
+
+    # Contradictions are *represented*, not resolved by dropping one of the two
+    # claims: an archived URL that now answers 404 is a real, useful fact (the
+    # endpoint moved or was retired), and a model that quietly deleted the
+    # historical claim would hide the only evidence of where it went.  The URL
+    # keeps both, says so in ``evidence_conflicts``, and the scoring pass applies
+    # the engine's dead-host penalty on top of the historical claim's weight.
+    historical_labels = {
+        SOURCE_LABEL[stream] for stream in ("urls", "endpoints", "javascript", "interesting")
+    }
+    for node in result.model.nodes.values():
+        if node.kind != vocab.URL:
+            continue
+        if str(node.props.get("validation_state", "")) not in {"dead", "unreachable"}:
+            continue
+        if not (set(node.sources) & historical_labels):
+            continue
+        node.props["evidence_conflicts"] = sorted(
+            {
+                *[str(item) for item in _as_list(node.props.get("evidence_conflicts"))],
+                "historical archive claim contradicted by live validation "
+                f"({node.props.get('validation_state')})",
+            }
+        )
+
+
+def _merge_parameter_observations(
+    result: MergeResult,
+    source: SourceFacts,
+    *,
+    max_nodes: int | None,
+    max_edges: int | None,
+    max_evidence: int,
+) -> None:
+    """State ``url --observed_parameter--> parameter`` for every observation.
+
+    The pair — not the name — is the unit: one parameter seen on forty URLs is
+    forty edges on one node, and one URL exposing eight parameters is eight edges
+    on one URL.  Both questions the model has to answer ("which URLs expose this
+    parameter?", "which parameters were observed on this URL?") are then a single
+    traversal, and neither is answered by a flat name list.
+    """
+    model = result.model
+    label = SOURCE_LABEL["parameter_observations"]
+
+    for row in source.streams.get("parameter_observations", []):
+        name = str(row.get("parameter", "")).strip()
+        url = norm.url_identity(str(row.get("url", "")))
+        if not name or not url:
+            continue
+        location = str(row.get("location", "") or "query")
+        model.add_node(
+            vocab.PARAMETER,
+            name,
+            source=label,
+            trust=vocab.DISCOVERED,
+            props={"name": name, "locations": [location]},
+            evidence=f"observed on a harvested URL ({location})",
+            max_nodes=max_nodes,
+            max_evidence=max_evidence,
+        )
+        model.add_node(
+            vocab.URL,
+            url,
+            source=label,
+            trust=vocab.DISCOVERED,
+            evidence="carries a harvested query parameter",
+            max_nodes=max_nodes,
+            max_evidence=max_evidence,
+        )
+        model.add_edge(
+            vocab.OBSERVED_PARAMETER,
+            vocab.node_id(vocab.URL, url),
+            vocab.node_id(vocab.PARAMETER, name),
+            source=label,
+            trust=vocab.DISCOVERED,
+            props={
+                "location": location,
+                "path": str(row.get("path", "")),
+                "kind": str(row.get("kind", "")),
+            },
+            evidence=f"{name} was observed on {url} ({location})",
+            max_edges=max_edges,
+            max_evidence=max_evidence,
+        )
+        pair = (url, name)
+        if pair not in result.observed_pairs:
+            result.observed_pairs.add(pair)
+            result.parameter_observations += 1
+        result.parameter_urls.setdefault(name, [])
+        if url not in result.parameter_urls[name]:
+            result.parameter_urls[name].append(url)
 
 
 def _merge_networks(
@@ -938,6 +1197,215 @@ def _merge_wildcard_coverage(
             result.wildcard_edges_truncated += len(covered) - cap
 
 
+def derived_operations(model: norm.Model, node: norm.Node) -> set[str]:
+    """Which operations the model's own evidence says have already happened.
+
+    Read out of the *relationships and provenance* the merge already recorded,
+    never out of a new mutable field: a ``resolves_to`` edge whose source is our
+    records stream **is** the record that DNS resolution was attempted for that
+    host, and a validated URL is a URL an experiment already touched.  Deriving
+    it keeps one notion of "done" in the model, and the escalation policy uses it
+    to refuse paying for the same work twice (see :mod:`platform.escalation`).
+
+    Idempotency that lives in a *property* would be a second source of truth that
+    a half-finished run could disagree with.
+    """
+    operations: set[str] = set()
+    sources = set(node.sources)
+    records = SOURCE_LABEL["records"]
+    scan = SOURCE_LABEL["open_ports"]
+    validations = SOURCE_LABEL["url_validations"]
+
+    # ``scan`` is **our own** output and the only sound proof that a scan happened.
+    # A third party's index (``intel``) is a claim *about* an address, not a record
+    # that we touched it, and treating it as a completed operation refused a
+    # legitimate escalation: on the measured run the target's one ``dedicated``
+    # address was refused as "port_scan already attempted" because InternetDB had
+    # seen an open port on it.  The evidence to act on a third party's finding is
+    # to verify it, and "already attempted" must mean attempted by us.
+    if node.kind in (vocab.IP, vocab.SERVICE) and scan in sources:
+        operations.add("port_scan")
+    if node.kind == vocab.DOMAIN and records in sources:
+        operations.add("dns_resolution")
+    if node.kind == vocab.URL and validations in sources:
+        operations.add("url_validation")
+    if node.kind == vocab.PARAMETER or any(
+        edge.type == vocab.OBSERVED_PARAMETER and edge.source_id == node.id
+        for edge in model.edges.values()
+    ):
+        operations.add("parameter_extraction")
+    # Deliberately *no* ``network_expansion`` derivation: a network holding hosts
+    # our DNS resolved proves discovery happened *inside* it, not that the prefix
+    # was enumerated.  Marking it done would refuse the very expansion the
+    # relevance state says is worth doing — a network is a candidate until an
+    # active pass actually walks it, and the graph has no artifact that says one
+    # did.
+    return operations
+
+
+def _annotate_network_relevance(result: MergeResult) -> None:
+    """Place every network in the ``discovered → … → active_candidate`` progression.
+
+    The progression the design asks for, applied to facts the model already has:
+    an announcement is a routing claim, an ``allocated_to`` edge is a registry's
+    ownership claim, and ``known_hosts`` is the count of addresses inside the
+    prefix that our own DNS resolution reached.  A broadly announced prefix with
+    none of the latter two therefore stays ``discovered`` — it does not become
+    operationally equal to a validated target network just by existing, which is
+    what stops thousands of unrelated BGP ranges from dominating the model.
+
+    The states are recorded as node properties *and* counted in the report, so
+    "how much of this graph is actually the target's" is a number, not an
+    impression.
+    """
+    from service.recon_pipeline.platform import escalation
+
+    allocated_ids = {
+        edge.source_id for edge in result.model.edges.values() if edge.type == vocab.ALLOCATED_TO
+    }
+    counts: dict[str, int] = {}
+    for node in result.model.nodes.values():
+        if node.kind != vocab.NETWORK:
+            continue
+        classes = [str(item) for item in _as_list(node.props.get("classes"))]
+        relevance = escalation.network_relevance(
+            allocated="allocated" in classes or node.id in allocated_ids,
+            announced="announced" in classes,
+            known_hosts=_as_int(node.props.get("known_hosts")),
+            in_scope=str(node.props.get("scope_state", "")) == "in_scope",
+        )
+        node.props.update(relevance.to_dict())
+        counts[relevance.state] = counts.get(relevance.state, 0) + 1
+    result.networks_by_relevance = dict(sorted(counts.items()))
+
+
+def _plan_escalation(
+    result: MergeResult, scope, *, allow_needs_review: bool = False
+) -> None:
+    """Ask the platform's policy which assets deserve active validation next.
+
+    Three operations are planned, because they are the ones a *graph* can hand
+    to an execution path: port/service scanning of addresses, live validation of
+    URLs, and expansion of networks.  Each candidate carries the reason it was
+    allowed and its exact evidence bundle, so the artifact is auditable — and the
+    refusals are counted too, because "3 431 networks considered, 40 relevant" is
+    the number that matters here, not the queue size.
+
+    Nothing in this pass sends a packet: it writes a plan.  The stages that do
+    act read the same policy, so a decision cannot be made twice in two ways.
+    """
+    from service.recon_pipeline.platform import escalation
+    from service.recon_pipeline.platform import scoring as engine
+
+    policy = escalation.EscalationPolicy(allow_needs_review=allow_needs_review)
+    operations = (
+        escalation.OPERATION_PORT_SCAN,
+        escalation.OPERATION_URL_VALIDATION,
+        escalation.OPERATION_NETWORK_EXPANSION,
+    )
+    addresses: list[escalation.AssetEvidence] = []
+    urls: list[escalation.AssetEvidence] = []
+    networks: list[escalation.AssetEvidence] = []
+    # Service evidence *we* measured, computed once for the whole pass: an
+    # ``exposes_service`` edge whose trust is ``observed`` is a port an HTTP probe
+    # or a scan answered on.  A service node from a third party's index is a lead
+    # to verify, not evidence that leaves nothing to escalate (see
+    # :func:`derived_operations` for the same distinction on idempotency).
+    measured_services = {
+        edge.source_id
+        for edge in result.model.edges.values()
+        if edge.type == vocab.EXPOSES_SERVICE and edge.trust == vocab.OBSERVED
+    }
+
+    for node in result.model.nodes.values():
+        scope_state = str(node.props.get("scope_state", ""))
+        operations_done = frozenset(derived_operations(result.model, node))
+        if node.kind == vocab.IP:
+            classified = bool(node.props.get("hosting_classified", False))
+            addresses.append(
+                escalation.AssetEvidence(
+                    asset_type="ip",
+                    identity=node.identity,
+                    scope_state=scope_state,
+                    score=node.score,
+                    band=node.band,
+                    evidence_state=node.evidence_state,
+                    hosting=escalation.hosting_class(
+                        str(node.props.get("hosting_verdict", "")),
+                        str(node.props.get("hosting_provider", "")),
+                        classified=classified,
+                    ),
+                    hosting_classified=classified,
+                    origin_declared=_origin_declared(node),
+                    origin_address_declared=_declaration_level(node) == "address",
+                    has_service_evidence=node.id in measured_services,
+                    operations=operations_done,
+                )
+            )
+        elif node.kind == vocab.URL:
+            urls.append(
+                escalation.AssetEvidence(
+                    asset_type="url",
+                    identity=node.identity,
+                    # A URL is not a place, so the scope engine never annotated it
+                    # — but the *host* it names is one, and the URL's scope is its
+                    # host's scope.  Without this every URL would be refused for
+                    # having no verdict, which is right for an unknown host and
+                    # wrong for the target's own.
+                    scope_state=_host_scope_state(result.model, node.identity),
+                    score=node.score,
+                    band=node.band,
+                    evidence_state=node.evidence_state
+                    or engine.EVIDENCE_HISTORICAL,
+                    operations=operations_done,
+                )
+            )
+        elif node.kind == vocab.NETWORK:
+            classes = [str(item) for item in _as_list(node.props.get("classes"))]
+            networks.append(
+                escalation.AssetEvidence(
+                    asset_type="network",
+                    identity=node.identity,
+                    scope_state=scope_state,
+                    score=node.score,
+                    band=node.band,
+                    evidence_state=node.evidence_state,
+                    allocated="allocated" in classes,
+                    announced="announced" in classes,
+                    known_hosts=_as_int(node.props.get("known_hosts")),
+                    already_expanded="network_expansion" in operations_done,
+                )
+            )
+
+    cohort = {
+        escalation.OPERATION_PORT_SCAN: addresses,
+        escalation.OPERATION_URL_VALIDATION: urls,
+        escalation.OPERATION_NETWORK_EXPANSION: networks,
+    }
+    summary: dict[str, object] = {}
+    queue: list[dict[str, object]] = []
+    refusals: list[dict[str, object]] = []
+    for operation in operations:
+        decisions = escalation.plan(cohort[operation], operation, policy=policy)
+        block = escalation.summarise(decisions)
+        # The per-candidate refusal rows are an artifact of their own; keeping
+        # them inside the report block as well would write the same 3 000 rows
+        # twice into one JSON document.
+        refusals.extend(
+            row for row in block.pop("refusals", [])  # type: ignore[arg-type]
+        )
+        summary[operation] = block
+        for decision in decisions:
+            if decision.eligible:
+                queue.append(decision.to_dict())
+
+    result.escalation = summary
+    result.active_candidates = queue
+    result.escalation_refusals = sorted(
+        refusals, key=lambda row: (str(row["operation"]), str(row["identity"]))
+    )
+
+
 def _annotate_scores(
     result: MergeResult, *, scored: bool, max_audit: int, top: int
 ) -> None:
@@ -976,6 +1444,7 @@ def _annotate_scope(result: MergeResult, scope) -> None:
             scope.add_discovered_network(node.identity)
             registered += 1
     result.registered_networks = registered
+    result.dns_scoped_addresses = _register_dns_scope(result, scope)
     for node in result.model.nodes.values():
         if node.kind == vocab.DOMAIN:
             decision = scope.check_host(node.identity)
@@ -1015,6 +1484,96 @@ def _host_of(url: str) -> str:
 def _strings(values: list[object]) -> list[str]:
     """Non-empty string forms of a loose list, for joining into prose."""
     return [str(value).strip() for value in values if str(value).strip()]
+
+
+def _register_dns_scope(result: MergeResult, scope) -> int:
+    """Hand the engine the model's own DNS evidence: name → address.
+
+    A ``resolves_to`` edge is a record we observed, and it is the *only* thing
+    this adds — no inference, no names from artifacts nobody resolved.  Only
+    the target's own names count: a ``needs_review`` hostname cannot drag an
+    address into scope, and an explicit refusal always wins (both rules live in
+    the engine, not here).  Edges are walked in a deterministic order so the
+    registration — and therefore every verdict — is identical between runs.
+    """
+    registered = 0
+    for edge in sorted(result.model.edges.values(), key=lambda item: item.key):
+        if edge.type != vocab.RESOLVES_TO:
+            continue
+        source = result.model.nodes.get(edge.source_id)
+        target = result.model.nodes.get(edge.target_id)
+        if source is None or target is None:
+            continue
+        if source.kind != vocab.DOMAIN or target.kind != vocab.IP:
+            continue
+        if scope.check_host(source.identity).state != "in_scope":
+            continue
+        if scope.add_resolved_address(target.identity, source.identity):
+            registered += 1
+    return registered
+
+
+def _declaration_level(node: norm.Node) -> str:
+    """``"address"``, ``"network"`` or ``""`` — what the operator declared here.
+
+    Read from the scope engine's own wording rather than kept as a second field:
+    the engine already distinguishes a declaration from an inference (and a
+    declaration of an address from one of a range), so the policy asks it instead
+    of maintaining a parallel notion of "ours".
+
+    A DNS-derived verdict is deliberately **not** a declaration.  That is the
+    whole reason the distinction is worth this function: the target's name
+    pointing at a CDN edge makes the address *ours to probe with a URL*, and it
+    must never make it ours to port-scan.
+    """
+    reason = str(node.props.get("scope_reason", ""))
+    if reason.startswith("declared address"):
+        return "address"
+    if any(
+        marker in reason
+        for marker in (
+            "declared network",
+            "inside declared network",
+            "contained in declared network",
+        )
+    ):
+        return "network"
+    return ""
+
+
+def _origin_declared(node: norm.Node) -> bool:
+    """True when the operator declared this address, or a network holding it."""
+    return _declaration_level(node) in ("address", "network")
+
+
+def _host_scope_state(model: norm.Model, url: str) -> str:
+    """The scope verdict of the host a URL names, if the model has one.
+
+    Empty when the host is not in the model at all — which the policy correctly
+    reads as "no verdict", and refuses.  Never guessed from the URL string: the
+    verdict comes from the node the scope engine actually annotated.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    if not host:
+        return ""
+    for kind in (vocab.DOMAIN, vocab.IP):
+        node = model.nodes.get(vocab.node_id(kind, host))
+        if node is not None:
+            return str(node.props.get("scope_state", ""))
+    return ""
+
+
+def _as_int(value: object) -> int:
+    """An integer from a loose artifact value; ``0`` when it is not one."""
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _port_number(value: object) -> int | None:

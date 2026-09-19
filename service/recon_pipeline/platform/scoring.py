@@ -19,10 +19,27 @@ floor.  Corroboration (many weak signals) can lift an asset above its best
 single signal but never double-counts its way to certainty — which is the
 difference between "eight sources agree" and "one source echoed eight times".
 
+Two refinements make the number answer the question triage actually asks
+("which assets deserve active validation next?") rather than "how many passive
+sources mentioned this?":
+
+* **Corroboration is tier-aware.**  A second *weak or medium* signal is worth
+  25 % of its weight, not 10 %.  Weak evidence is only meaningful in aggregate -
+  one archived URL mention is a rumour, two independent archives agreeing is
+  evidence, three is strong - whereas a second *strong* signal (a live response,
+  a certificate) is already near-certain, so it corroborates at 10 % to keep the
+  ceiling meaningful.  The two factors are named, not inline numbers.
+* **Live confirmation has its own weight.**  ``W_LIVE_CONFIRMATION`` (85) sits
+  between our DNS resolution (90) and a scanned service (80), so a URL that
+  actually answered now is *never* comparable to one an archive mentioned in
+  2019 (40) - which was the point of separating discovery from validation.
+
 The engine is deliberately dumb about *what* an asset is: it scores
 :class:`ScoredAsset` records built by callers (the graph writers, the
 pipelines' report paths), keeping this module pure and independently
-testable.
+testable.  It also renders one *categorical* judgement the number cannot carry -
+:func:`evidence_state` - because "score 44" says nothing about whether the
+claim was verified today or found in a crawl a decade ago.
 """
 
 from __future__ import annotations
@@ -40,6 +57,12 @@ W_AUTHENTICATED_SOURCE = 100
 
 #: Strong signals (weight 70–90).
 W_ACTIVE_DNS_RESOLUTION = 90
+#: A URL (or host) we asked, and which answered, in this run.  Deliberately
+#: below our own DNS resolution and above a scanned service: it is a live
+#: confirmation of the *asset*, not of the address behind it, but it is a
+#: current measurement rather than a historical claim - which is exactly the
+#: distinction the URL pipeline's validation stage exists to make.
+W_LIVE_CONFIRMATION = 85
 W_CERTIFICATE_SAN = 80
 W_SERVICE_RESPONSE = 80
 W_WILDCARD_NEGATIVE = 70
@@ -67,14 +90,102 @@ P_WILDCARD_MATCH = -40
 P_DEAD_HOST = -30
 P_SHARED_INFRASTRUCTURE = -15
 
-#: Corroboration: each additional distinct signal adds 10% of its weight.
+#: Corroboration: each additional distinct signal adds a fraction of its weight.
+#: Strong evidence corroborates at 10 % (it is already near-certain, so a second
+#: one must not buy its way to the ceiling); weak/medium evidence at 25 %, because
+#: a single weak signal is a rumour and agreement between independent weak signals
+#: is the whole of what it can ever tell us.
 CORROBORATION_FACTOR = 0.1
+PASSIVE_CORROBORATION_FACTOR = 0.25
+
+#: Above this weight a signal is "strong" for the purpose of the factor above.
+STRONG_SIGNAL_WEIGHT = W_WILDCARD_NEGATIVE
+
+
+def corroboration_factor(weight: int) -> float:
+    """The fraction a confirming signal of *weight* adds to the floor."""
+    return CORROBORATION_FACTOR if weight >= STRONG_SIGNAL_WEIGHT else PASSIVE_CORROBORATION_FACTOR
 
 #: Score bands — how the report talks about a score.
 BAND_CORE = "core"                # 90+
 BAND_HIGH = "high"                # 70–89
 BAND_MEDIUM = "medium"            # 40–69
 BAND_LOW = "low"                  # < 40
+
+# --------------------------------------------------------------------------- #
+# Evidence state — the categorical half of "how much attention?"
+# --------------------------------------------------------------------------- #
+
+#: Our own measurement confirms the asset answers now.
+EVIDENCE_ACTIVELY_VERIFIED = "actively_verified"
+#: Claimed by evidence, never measured.  The candidates active validation is for.
+EVIDENCE_UNVERIFIED = "unverified"
+#: Third-party OSINT/CT datasets name it; nobody has asked it anything.
+EVIDENCE_PASSIVE = "passive"
+#: Only historical archives mention it (Wayback/gau): it existed, maybe not now.
+EVIDENCE_HISTORICAL = "historical"
+#: Measured, and it did not answer.
+EVIDENCE_DEAD = "dead"
+#: Not ours to decide: outside declared scope, or discovered and unreviewed.
+EVIDENCE_NEEDS_REVIEW = "needs_review"
+
+#: How a triage queue orders the states (lower = look at it sooner).  A verified
+#: asset moves on to exploitation; an unverified claim is the next thing to
+#: validate; a dead one is kept for the record and looked at last.
+EVIDENCE_ORDER: tuple[str, ...] = (
+    EVIDENCE_ACTIVELY_VERIFIED,
+    EVIDENCE_NEEDS_REVIEW,
+    EVIDENCE_UNVERIFIED,
+    EVIDENCE_PASSIVE,
+    EVIDENCE_HISTORICAL,
+    EVIDENCE_DEAD,
+)
+
+
+def evidence_state_rank(state: str) -> int:
+    """Position of *state* in :data:`EVIDENCE_ORDER` (unknown states last)."""
+    try:
+        return EVIDENCE_ORDER.index(state)
+    except ValueError:
+        return len(EVIDENCE_ORDER)
+
+
+def evidence_state(
+    *,
+    verified_alive: bool = False,
+    verified_dead: bool = False,
+    active: bool = False,
+    historical: bool = False,
+    passive: bool = False,
+    needs_review: bool = False,
+) -> str:
+    """The categorical state of the evidence behind an asset.
+
+    The order of the checks *is* the policy, and it is deliberately:
+
+    1. **a live measurement wins.**  ``verified_alive`` describes the asset now,
+       whatever a 2019 archive said about it;
+    2. **a negative measurement is still a measurement** - ``dead`` outranks
+       anything nobody has checked;
+    3. **needs_review** is a scope verdict, and outranks provenance because an
+       asset we may not touch should be seen for that reason, not for how it was
+       found;
+    4. then provenance, strongest first: our own active evidence, third-party
+       datasets, historical archives, and finally a claim nothing supports yet.
+    """
+    if verified_alive:
+        return EVIDENCE_ACTIVELY_VERIFIED
+    if verified_dead:
+        return EVIDENCE_DEAD
+    if needs_review:
+        return EVIDENCE_NEEDS_REVIEW
+    if active:
+        return EVIDENCE_ACTIVELY_VERIFIED
+    if historical:
+        return EVIDENCE_HISTORICAL
+    if passive:
+        return EVIDENCE_PASSIVE
+    return EVIDENCE_UNVERIFIED
 
 
 @dataclass(frozen=True)
@@ -195,7 +306,7 @@ def score(asset: ScoredAsset) -> ScoreResult:
             audit.append(f"echo ignored: {signal.weight} ({signal.reason})")
             continue
         seen_kinds.add(kind)
-        contribution = round(signal.weight * CORROBORATION_FACTOR)
+        contribution = round(signal.weight * corroboration_factor(signal.weight))
         bonus += contribution
         audit.append(f"corroboration +{contribution}: {signal.reason}")
 
@@ -249,6 +360,10 @@ def signal_for_source(source: str) -> Signal:
         "httpx": W_SERVICE_RESPONSE,
         "naabu": W_SERVICE_RESPONSE,
         "nmap": W_SERVICE_RESPONSE,
+        # strong — our own live confirmation of the asset itself
+        "validate": W_LIVE_CONFIRMATION,
+        "url-validated-live": W_LIVE_CONFIRMATION,
+        "active-url-validation": W_LIVE_CONFIRMATION,
         # medium
         "crtsh": W_CRT_LOG,
         "certspotter": W_CRT_LOG,
@@ -284,8 +399,14 @@ def penalty_for_wildcard() -> Signal:
     return Signal(weight=P_WILDCARD_MATCH, reason="wildcard match", kind="wildcard")
 
 
-def penalty_for_dead_host() -> Signal:
-    return Signal(weight=P_DEAD_HOST, reason="dead host (NXDOMAIN on re-check)", kind="dead")
+def penalty_for_dead_host(detail: str = "a live re-check did not find it serving") -> Signal:
+    """The measurement penalty: someone looked, and it was not there.
+
+    *detail* is the caller's own words for *how* that was established (a 404 from
+    a URL validation, an NXDOMAIN from a DNS re-check), so the audit line states
+    the evidence rather than a mechanism the caller may not have used.
+    """
+    return Signal(weight=P_DEAD_HOST, reason=f"dead host ({detail})", kind="dead")
 
 
 def penalty_for_shared_infra() -> Signal:

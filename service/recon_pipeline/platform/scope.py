@@ -19,9 +19,33 @@ Three decisions the engine can make (and the report's vocabulary for them):
 
 The engine is conservative by construction: it auto-claims only what DNS
 arithmetic proves (subdomains of declared domains, addresses inside declared
-CIDRs).  Everything else it discovered lands in ``needs_review`` — being
-conservative here is free, and the cost of wrongly claiming someone else's
-host is not.
+CIDRs, and — see below — addresses one of the target's own names resolves to).
+Everything else it discovered lands in ``needs_review`` — being conservative
+here is free, and the cost of wrongly claiming someone else's host is not.
+
+Addresses behind the target's own names
+---------------------------------------
+
+A declared domain makes every *name* under it ``in_scope``, but an address is a
+place, and until this rule existed the two were unrelated: ``scope =
+['qbsco.net']`` put 3 254 URLs in scope and all 33 addresses it resolved to in
+``needs_review``.  The active pipeline had already solved this for itself — the
+ports stage defines an in-scope address as *one of the target's own names
+resolves here* (``seed_builder``, ``classify(in_scope=…)``) and scans on that
+basis — so the graph was refusing at its own scope gate exactly the assets the
+executing stage was already treating as the target's.  The measured result was
+``port_scan: 0 eligible / 33 considered``, of which the real cause was
+``needs_review`` on all 33, before hosting was ever consulted.
+
+So the engine accepts DNS as evidence, under three conditions that keep it a
+*scope* rule rather than a loophole:
+
+* the name must itself be ``in_scope`` (a declared domain or a subdomain of one)
+  — an address reached only from a needs_review name stays needs_review;
+* an explicit refusal always wins, so a refused range cannot be re-entered by
+  resolving a name into it;
+* the decision records the name that produced it, so the report says *why* an
+  address is in scope and an operator can disagree with the specific fact.
 """
 
 from __future__ import annotations
@@ -90,6 +114,11 @@ class ScopeEngine:
     discovered_networks: set[str] = field(default_factory=set)
     #: Out-of-scope refusals recorded by the seed stage (refused ranges).
     refused: dict[str, str] = field(default_factory=dict)
+    #: Address -> one of the target's own names that resolved to it.  Populated
+    #: from DNS evidence by :meth:`add_resolved_address`; the *name* is kept, not
+    #: just the fact, because it is what the reason quotes and what makes the
+    #: verdict reviewable.
+    resolved_from: dict[str, str] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ #
     # construction
@@ -135,6 +164,30 @@ class ScopeEngine:
         canonical = network.strip()
         if canonical:
             self.discovered_networks.add(canonical)
+
+    def add_resolved_address(self, address: str, host: str) -> bool:
+        """Record that *host* resolves to *address* — DNS evidence, not a claim.
+
+        The first name to reach an address is kept, and names are compared before
+        being accepted so two callers iterating the same evidence in different
+        orders cannot produce different verdicts: a shared/CDN address reached by
+        several of the target's names must be reported the same way every run.
+        Returns ``True`` when the mapping was added or was already present.
+        """
+        from .common.normalize import canonicalize_host, canonicalize_ip, is_ip_literal
+
+        canonical_address = canonicalize_ip(address)
+        canonical_host = canonicalize_host(host)
+        if canonical_address is None or canonical_host is None:
+            return False
+        if is_ip_literal(canonical_host):
+            # A name is required: an address pointing at an address proves nothing
+            # about *whose* it is, and accepting it would make the rule circular.
+            return False
+        existing = self.resolved_from.get(canonical_address)
+        if existing is None or canonical_host < existing:
+            self.resolved_from[canonical_address] = canonical_host
+        return True
 
     # ------------------------------------------------------------------ #
     # the three questions
@@ -183,6 +236,16 @@ class ScopeEngine:
         declared_match = _most_specific_containing(ip, self.declared_networks)
         if declared_match is not None:
             return ScopeDecision(IN_SCOPE, f"inside declared network {declared_match}")
+        # DNS evidence, after every declared statement and before any inference:
+        # the target's own name resolving here is what makes an address *the
+        # target's*, and it is the same rule the ports stage scans on.  The name
+        # itself must be in scope, so a needs_review name cannot drag an address
+        # into scope with it.
+        resolved_host = self.resolved_from.get(canonical)
+        if resolved_host is not None and self.check_host(resolved_host).state == IN_SCOPE:
+            return ScopeDecision(
+                IN_SCOPE, f"one of the target's own names resolves here: {resolved_host}"
+            )
         discovered_match = _most_specific_containing(ip, self.discovered_networks)
         if discovered_match is not None:
             return ScopeDecision(
@@ -232,5 +295,6 @@ class ScopeEngine:
             "declared_networks": sorted(self.declared_networks),
             "declared_addresses": sorted(self.declared_addresses),
             "discovered_networks": len(self.discovered_networks),
+            "resolved_addresses": len(self.resolved_from),
             "refused": len(self.refused),
         }

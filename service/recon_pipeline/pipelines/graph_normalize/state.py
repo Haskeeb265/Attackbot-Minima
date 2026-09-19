@@ -82,9 +82,12 @@ def build_graph_state(
             endpoints_missing += 1
 
     by_band: dict[str, int] = {}
+    by_state: dict[str, int] = {}
     scores: list[int] = []
     unscored = 0
     for node in model.nodes.values():
+        if node.evidence_state:
+            by_state[node.evidence_state] = by_state.get(node.evidence_state, 0) + 1
         if node.score is None:
             unscored += 1
             continue
@@ -101,6 +104,10 @@ def build_graph_state(
         "edges_with_unresolved_endpoints": endpoints_missing,
         "orphan_nodes": orphan_total,
         "nodes_by_band": dict(sorted(by_band.items())),
+        # The second axis: two nodes in the same band can be a measurement taken
+        # today and a claim nobody has checked, and a consumer that only reads
+        # ``band`` cannot tell them apart.
+        "nodes_by_evidence_state": dict(sorted(by_state.items())),
         "checks": [
             "every edge endpoint resolves to a node in this document",
             "node ids are unique (a node id is kind:identity)",
@@ -143,6 +150,30 @@ def build_graph_state(
                 "discovered networks were registered. Zero means no engine was "
                 "present, not that nothing is in scope"
             ),
+            "evidence_state": (
+                "every claimed node carries `evidence_state` (actively_verified / "
+                "unverified / passive / historical / dead / needs_review), which "
+                "says *how* the evidence was established - a live measurement, a "
+                "third-party dataset, a historical archive, or a claim nobody has "
+                "checked. The band says how strong the evidence is; this says what "
+                "kind of thing it is"
+            ),
+            "validation": (
+                "a URL node with `props.validation_state` was checked live by the "
+                "URL pipeline: `alive`, `http_status`, `final_url`, "
+                "`redirect_chain`, `content_type`, `title`, `server`, `tech`, "
+                "`validated_at` and `validation_tool` carry the measurement, and "
+                "``redirects_to`` edges (not overwritten properties) carry where it "
+                "went. A URL without those props is a historical candidate that has "
+                "not been validated - never read as live"
+            ),
+            "escalation": (
+                "`run.escalation` is the platform policy's decision for each active "
+                "operation (which assets are eligible and why), and "
+                "`active_candidates.jsonl` is the same queue as an artifact. "
+                "Refusals are counted there too, so 'nothing to do' is "
+                "distinguishable from 'everything was refused'"
+            ),
         },
         "vocabulary": vocab.mapping_document(),
         "scoring": score_mod.weights_document(),
@@ -156,7 +187,16 @@ def build_graph_state(
         # being left behind in a sibling artifact.
         document["run"] = {
             key: report[key]
-            for key in ("counts", "sources", "conflicts", "notes", "seconds", "started_at")
+            for key in (
+                "counts",
+                "sources",
+                "conflicts",
+                "notes",
+                "seconds",
+                "started_at",
+                "escalation",
+                "networks_by_relevance",
+            )
             if key in report
         }
     return document

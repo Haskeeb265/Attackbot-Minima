@@ -25,6 +25,13 @@ Environment overrides
 ``URL_MAX_URLS``                           cap on the union (0 = no cap)
 ``URL_HTTP_MAX_BYTES``                     per-response read cap (64 MiB)
 ``URL_HTTP_RETRIES``                       transient retries per request (3)
+``URL_VALIDATE``                           run the live validation stage (on)
+``URL_VALIDATE_MAX_URLS``                  candidates validated per run (200)
+``URL_VALIDATE_MAX_PER_HOST``             candidates validated per host (25)
+``URL_VALIDATE_TTL``                       reuse window for a measurement, s (86400)
+``URL_VALIDATE_RATE_LIMIT``                requests/second handed to httpx (5)
+``URL_VALIDATE_THREADS``                   concurrent httpx workers (10)
+``URL_HTTPX_IMAGE``                        image carrying httpx (port_service_host_image)
 ========================================== ==========================================
 """
 
@@ -114,3 +121,40 @@ HTTP_CONNECT_TIMEOUT = float(env_int("URL_HTTP_CONNECT_TIMEOUT", 10))
 #: target whose historical surface is millions of near-duplicate URLs; 0 means
 #: no cap.  When a cap bites, the report says so instead of silently truncating.
 MAX_URLS = env_int("URL_MAX_URLS", 0)
+
+
+# --------------------------------------------------------------------------- #
+# Live validation (the pipeline's one active stage)
+# --------------------------------------------------------------------------- #
+
+#: Run the validation stage.  Off means the pipeline is exactly as passive as it
+#: was before the stage existed: no candidate is selected and no packet is sent,
+#: and the report says which way it went.
+VALIDATE_ENABLED = env_flag("URL_VALIDATE", True)
+
+#: Candidates validated per run, applied *after* the policy gate and priority
+#: ordering — so the cap keeps the most interesting URLs, not the first 200
+#: alphabetically.  0 means no cap.
+VALIDATE_MAX_URLS = env_int("URL_VALIDATE_MAX_URLS", 200)
+
+#: Per-host cap, so one chatty host cannot consume a whole run's budget.  The
+#: cap is a volume control, not a judgement: the escalation policy allows a
+#: single archived URL to be checked because that is precisely what validation is
+#: for (see ``platform.escalation``).
+VALIDATE_MAX_PER_HOST = env_int("URL_VALIDATE_MAX_PER_HOST", 25)
+
+#: Seconds a previous measurement stays reusable.  Re-running the stage within
+#: this window validates only what changed — the operation-state half of
+#: idempotency.  ``0`` forces a full re-check.
+VALIDATE_TTL = env_int("URL_VALIDATE_TTL", 86_400)
+
+#: Requests per second and worker count handed to httpx.  Deliberately lower
+#: than the ports stage's probe: these requests go to the target's own hosts.
+VALIDATE_RATE_LIMIT = env_int("URL_VALIDATE_RATE_LIMIT", 5)
+VALIDATE_THREADS = env_int("URL_VALIDATE_THREADS", 10)
+
+#: The image that carries ``httpx``.  Reusing the ports/services stage's image
+#: rather than pulling a second one is deliberate (one httpx integration, one
+#: version of the tool); ``projectdiscovery/httpx`` works too, since the argument
+#: builder only uses flags both images accept.
+HTTPX_IMAGE = os.getenv("URL_HTTPX_IMAGE", "port_service_host_image").strip() or "port_service_host_image"

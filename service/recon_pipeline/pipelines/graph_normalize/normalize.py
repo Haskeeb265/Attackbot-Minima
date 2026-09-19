@@ -49,6 +49,13 @@ UNION_PROPS = frozenset(
         "classes",
         "roles",
         "discovered_by",
+        # Multi-valued by nature: a redirect chain, a technology list and the
+        # locations a parameter was seen in all union across artifacts, and
+        # treating them as scalars would report a disagreement where there is
+        # none (two validations observing different chains is two facts).
+        "redirect_chain",
+        "tech",
+        "locations",
     }
 )
 
@@ -75,6 +82,12 @@ class Node:
     #: ``GN_MAX_SCORE_AUDIT`` — a score nobody can explain is a number, not a
     #: decision.
     score_audit: list[str] = field(default_factory=list)
+    #: The categorical half of "how much attention?" — ``actively_verified``,
+    #: ``passive``, ``historical``, ``unverified``, ``dead``, ``needs_review``
+    #: (see :mod:`platform.scoring`).  Set by the scoring pass, not the merge: it
+    #: is a judgement about the finished evidence, and it exists because a number
+    #: cannot say whether the claim was measured today or found in a 2019 crawl.
+    evidence_state: str = ""
 
     @property
     def id(self) -> str:
@@ -88,6 +101,7 @@ class Node:
             "trust": self.trust,
             "sources": sorted(set(self.sources)),
             **({"score": self.score, "band": self.band} if self.score is not None else {}),
+            **({"evidence_state": self.evidence_state} if self.evidence_state else {}),
             **({"score_audit": self.score_audit} if self.score_audit else {}),
             "props": self.props,
             **({"evidence": self.evidence} if self.evidence else {}),
@@ -258,6 +272,32 @@ class Model:
         for node in self.nodes.values():
             counts[node.trust] = counts.get(node.trust, 0) + 1
         return dict(sorted(counts.items()))
+
+    def counts_by_evidence_state(self) -> dict[str, int]:
+        """How the model's evidence is *established*, not how strong it is.
+
+        The second axis a band cannot carry: 3 000 URLs at score 44 are not one
+        kind of thing — some were verified alive this run, some are historical
+        claims nobody has checked, and some answered 404.
+        """
+        counts: dict[str, int] = {}
+        for node in self.nodes.values():
+            if not node.evidence_state:
+                continue
+            counts[node.evidence_state] = counts.get(node.evidence_state, 0) + 1
+        return dict(sorted(counts.items()))
+
+    def operations_for(self, node: Node) -> set[str]:
+        """Operations the model's own evidence says were already performed.
+
+        Derived, never stored: the artifacts *are* the operation state (a
+        ``resolves_to`` edge from our records stream is the record that DNS was
+        attempted for that host).  Keeping it derived is what stops a second,
+        drifting notion of "scanned" from appearing in a node property.
+        """
+        from . import merge as merge_mod
+
+        return merge_mod.derived_operations(self, node)
 
     def sorted_nodes(self) -> list[Node]:
         """Nodes in a stable order: by kind, then identity."""

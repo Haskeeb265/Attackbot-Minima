@@ -441,6 +441,84 @@ These need folding into `IMPLEMENTATION_PLAN*.md` status tables, `docs/recon_doc
   `ARCHITECTURE.md` §2f, `STRUCTURE.md`, `TESTING.md`, `CONCERNS.md` #4, root
   `README.md`, `docs/README.md`.
 
+## Added 2026-09-19 (two sessions) — live URL validation, parameter provenance, and a policy that refuses with reasons
+
+Two sessions on *what to do with* the surface, not on finding more of it. The
+first added the missing active half of the URL pipeline and one place that decides
+whether an asset may be touched; the second audited that decision on a live run,
+found it was refusing everything for one reason, and fixed the three causes.
+
+**New** — `url_endpoint/validate.py` (+ `url_endpoint/active/probe.py`, the ports
+stage's `httpx` image): a live validation stage. `passive → extract → validate`
+records `alive` / `serving` / status / final URL / redirect chain / content-type /
+title / server / tech / timestamp / tool per URL, keeps discovery and measurement
+as separate claims on the same node, and is idempotent through a TTL over its own
+artifact. Measured on `qbsco.net`: 96 URLs measured — **2 verified, 2 redirected,
+86 dead, 3 errored, 3 unreachable** — and every one of the 19 "interesting"
+paths (`.well-known/*`, `wp-admin/*`, `wp-json/*`) answered **404**: the site moved
+to Next.js and the WordPress history is dead, which the file-only model could not
+say before.
+
+**New** — `platform/escalation.py`: one pure policy module answering *should this
+operation run against this asset, and why*, with a machine-readable code per rule
+(`REFUSAL_*` / `ALLOW_*`). It is deny-by-default and ordered scope → shared
+infrastructure and hosting state → idempotency → the operation's evidence floor,
+and it is consumed by the graph's planner, the URL validate stage and
+`Dispatcher.decide(operation=…)`. `url_endpoint` also gained URL↔parameter
+provenance (`url --observed_parameter--> parameter`, 319 observations, values never
+recorded) and `graph_normalize` gained `escalation_refusals.jsonl`,
+`measurement.{json,md}` and network relevance (`discovered → ownership_verified →
+host_discovered → relevant → active_candidate`).
+
+**The audit that mattered.** The first live run reported `port_scan: 0 eligible /
+33 considered` and the README read that as the CDN gate working. Checking each
+address showed the gate had never run: all 33 were refused `needs_review` at
+check #1 because the graph's scope engine had no DNS-derived verdict for
+addresses, while `port_service_host` already treats "one of the target's own names
+resolves here" as in-scope and scans on it. Three fixes, no policy weakened:
+
+- **DNS evidence is scope evidence for addresses** (`ScopeEngine.add_resolved_address`):
+  a name that is itself in scope resolving to an address makes that address the
+target's. An explicit refusal still wins and a `needs_review` name cannot drag an
+address in. 19 of 33 addresses became `in_scope`; the Cloudflare ones are now
+refused by the *shared-infrastructure* rule rather than by a scope verdict.
+- **`unclassified` became a third hosting state.** `cdn_classified.jsonl` is a
+snapshot of another stage's seed set (19 rows; `records.jsonl` was regenerated
+later), so 14 addresses had no verdict — and `unknown` was read as *not shared*,
+which made Cloudflare (`2a06:98c1:3120::6`, whose sibling `::7` *was* classified)
+and Microsoft 365 addresses **admissible to a port scan**. Absence is now refused
+for scans unless the operator declared the address, and the override for a shared
+address is a declaration of *that address*, never of the range around it.
+- **A third party's record is not something we did.** `port_scan` was marked
+"already attempted" when InternetDB had a row; the target's only `dedicated`
+address (`103.53.45.170`) was refused on the strength of an InternetDB record with
+**an empty port list**. Idempotency now reads our own scan output only, and
+`has_service_evidence` counts only `observed`-trust services.
+
+Result on the same artifacts: **`port_scan: 1 eligible / 33 considered`** —
+`ALLOW` / `dedicated_relevant_target` for `mail.qbsco.net`'s dedicated address —
+with every refusal named (`hosting_unclassified` 14, `needs_review_awaiting_dns_link`
+14, `shared_infrastructure_without_origin_evidence` 4) instead of one opaque
+bucket. Two other defects were fixed on the way: a shared/CDN *network* was
+reported "not an active candidate" while `relevant` made it expandable anyway, and
+`node.sources`-less network nodes were told they were "classified but unlinked".
+
+**URL selection was also bounded by the wrong setting.** 3 207 URLs live on 5
+hosts (2 408 on the apex); a flat 25-per-host ceiling selected 50 of a 200 budget
+and skipped 3 061 as "cap reached". Ranking now comes from the policy
+(sensitive path, kind, parameters, independent sources, the host's measured state
+this run) and the per-host setting is a **floor under an equal share** of the
+budget, with a second pass spending leftovers: the same run selects 200, with 83
+API endpoints in the top 200 where the old rule had 0.
+
+Test count 1 236 → **1 296** (+60: `test_escalation_policy.py` 44 cases, plus the
+URL-validation, provenance and graph suites), 1 skipped. New modules are
+mypy-clean. Docs reconciled: both pipeline READMEs, `ARCHITECTURE.md` §2f, this
+file. **Still open, and now measurable:** there is no scan *receipt* (an address
+scanned with nothing open is indistinguishable from one never scanned, so the
+policy will re-scan one such address), nothing consumes `active_candidates.jsonl`,
+and the escalation plan is only as good as `cdn_classified.jsonl`'s freshness.
+
 ## Suggested next moves (dependency order from the plans)
 
 1. **Consume `graph_state.json` in the vulnerability-finder engine** — the model,

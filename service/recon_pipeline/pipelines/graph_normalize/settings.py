@@ -24,6 +24,8 @@ Environment overrides
 ``GN_SCORE_MODEL``                               score every node with S2 (on)
 ``GN_MAX_SCORE_AUDIT``                           audit lines kept per node (6)
 ``GN_MAX_TOP_SCORED``                            top-scoring nodes in the report (20)
+``GN_PLAN_ESCALATION``                           run the escalation policy planner (on)
+``GN_ESCALATION_ALLOW_NEEDS_REVIEW``             let the policy promote discovered assets (off)
 =============================================== ==========================================
 
 The pipeline makes no network requests and reads no configuration beyond these
@@ -120,3 +122,17 @@ MAX_SCORE_AUDIT = env_int("GN_MAX_SCORE_AUDIT", 6)
 
 #: Highest-scoring nodes listed in the report, for eyeballing a run.
 MAX_TOP_SCORED = env_int("GN_MAX_TOP_SCORED", 20)
+
+# --------------------------------------------------------------------------- #
+# Escalation planning (S16)
+# --------------------------------------------------------------------------- #
+
+#: Ask the platform's escalation policy which assets deserve active validation
+#: next, and write the answer to ``active_candidates.jsonl``.  Off means the
+#: model is emitted without a plan — smaller output, and the report says so.
+PLAN_ESCALATION = env_flag("GN_PLAN_ESCALATION", True)
+
+#: The policy's own override: may it promote an asset the scope engine put in
+#: ``needs_review``?  Off by default, because a discovered asset is the
+#: operator's decision — this exists so an engagement can opt in deliberately.
+ESCALATION_ALLOW_NEEDS_REVIEW = env_flag("GN_ESCALATION_ALLOW_NEEDS_REVIEW", False)

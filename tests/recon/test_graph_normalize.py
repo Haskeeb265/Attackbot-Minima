@@ -624,8 +624,15 @@ def test_scope_annotation_uses_the_platform_engine(tmp_path: Path) -> None:
     network = nodes["network:104.16.0.0/12"]
     assert network["props"]["scope_state"] == "needs_review"
     assert "declared scope" in network["props"]["scope_reason"]
-    # An address inside it follows the same verdict.
-    assert nodes["ip:104.16.1.10"]["props"]["scope_state"] == "needs_review"
+    # The *address* is a different question from the network, and DNS answers it:
+    # ``www.acme.test`` -- a declared domain's own name -- resolves here, so the
+    # address is the target's to touch even though the /12 it sits in is only
+    # discovered.  The network verdict above is unchanged, because "an announced
+    # prefix" and "an address one of our names points at" are different claims.
+    address = nodes["ip:104.16.1.10"]
+    assert address["props"]["scope_state"] == "in_scope"
+    assert "one of the target's own names resolves here" in address["props"]["scope_reason"]
+    assert "www.{} ".format(APEX).strip() in address["props"]["scope_reason"]
     # Objects that pose no scope question are left unannotated.
     assert "scope_state" not in nodes["asn:64500"]["props"]
     assert report.counts["registered_networks"] == 1
@@ -744,8 +751,13 @@ def test_a_prefix_one_stream_announces_and_another_allocates_is_scored_by_edge()
     # The two streams' claims are different kinds, so they corroborate rather
     # than echo: the ownership floor plus the routing claim's 10%, which here
     # lands on the ceiling.
+    # The routing claim (weight 40) is a *medium* signal, so it corroborates at
+    # the passive factor (25%) rather than the strong one: weak evidence is only
+    # meaningful in aggregate, which is what makes two independent weak sources
+    # visibly stronger than one without promoting either of them above
+    # near-certain evidence.
     owned = engine.W_ASN_CIDR_OWNERSHIP + int(
-        engine.W_THIRD_PARTY_DATASET * engine.CORROBORATION_FACTOR
+        engine.W_THIRD_PARTY_DATASET * engine.PASSIVE_CORROBORATION_FACTOR
     )
     assert owned > 100  # the clamp is doing real work, so the line is checked
     assert network.score == 100
@@ -876,6 +888,16 @@ def test_run_writes_the_model_and_says_it_wrote_no_graph(tmp_path: Path) -> None
         state.GRAPH_STATE_FILE,
         emit.REPORT_FILE,
         emit.NODE_INDEX_FILE,
+        # The network relevance progression and the policy's active-candidate
+        # queue: the two artifacts a consumer acts on.
+        emit.RELEVANCE_FILE,
+        emit.ACTIVE_CANDIDATES_FILE,
+        # The diagnosis beside the queue (every refusal, with its rule) and the
+        # run's own measurement — because "N eligible" is only useful next to
+        # "and here is why the rest were not".
+        emit.REFUSALS_FILE,
+        emit.MEASUREMENT_FILE,
+        emit.MEASUREMENT_REPORT_FILE,
     }
     # The report names the handoff document, so a consumer that only reads the
     # report still knows where the graph state is.
@@ -900,6 +922,8 @@ def test_the_same_inputs_produce_identical_model_bytes(tmp_path: Path) -> None:
         emit.VOCABULARY_FILE,
         emit.NODE_INDEX_FILE,
         emit.SCORING_FILE,
+        emit.RELEVANCE_FILE,
+        emit.ACTIVE_CANDIDATES_FILE,
     ):
         assert (first / name).read_bytes() == (second / name).read_bytes(), name
 
@@ -945,7 +969,13 @@ def test_the_run_report_carries_the_score_distribution_and_the_top_nodes(tmp_pat
     assert [row["score"] for row in top] == sorted(
         (row["score"] for row in top), reverse=True
     )
-    assert {"id", "kind", "score", "band", "sources", "trust"} == set(top[0])
+    assert {"id", "kind", "score", "band", "evidence_state", "sources", "trust"} == set(
+        top[0]
+    )
+    # The distribution has a second, categorical axis: how the evidence was
+    # established, which a band cannot express.
+    assert sum(scoring["nodes_by_evidence_state"].values()) == len(nodes)
+    assert set(scoring["nodes_by_evidence_state"]) <= set(engine.EVIDENCE_ORDER)
     # The report quotes the artifact rather than re-scoring: same number, same band.
     for row in top:
         assert nodes[row["id"]]["score"] == row["score"]
@@ -963,9 +993,17 @@ def test_the_weight_table_travels_with_the_scores(tmp_path: Path) -> None:
     assert table["weights"]["active_dns_resolution"] == engine.W_ACTIVE_DNS_RESOLUTION
     assert table["weights"]["asn_cidr_ownership"] == engine.W_ASN_CIDR_OWNERSHIP
     assert table["weights"]["third_party_dataset"] == engine.W_THIRD_PARTY_DATASET
-    assert sorted(table["penalties_applied"]) == ["shared_infrastructure", "wildcard_match"]
-    # The two penalties the model cannot prove say why they are not applied.
-    assert set(table["penalties_not_applied"]) == {"takedown_notice", "dead_host"}
+    # Live URL validation gave the model the one thing it was missing to apply
+    # the engine's dead-host penalty: a re-check that can prove a URL is gone.
+    assert sorted(table["penalties_applied"]) == [
+        "dead_host",
+        "shared_infrastructure",
+        "wildcard_match",
+    ]
+    # The one penalty the model still cannot prove says why it is not applied.
+    assert set(table["penalties_not_applied"]) == {"takedown_notice"}
+    assert table["weights"]["live_confirmation"] == engine.W_LIVE_CONFIRMATION
+    assert table["corroboration"]["passive_signal_factor"] == engine.PASSIVE_CORROBORATION_FACTOR
     # Every artifact label the merge can record has a mapping, so no real source
     # silently falls through to the weak default.
     mapped = set(score_mod.SOURCE_KEY) | set(score_mod.NO_SIGNAL_SOURCES)

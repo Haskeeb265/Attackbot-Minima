@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import emit, merge as merge_mod, settings, sources, state
+from . import emit, measurement, merge as merge_mod, settings, sources, state
 from . import normalize as norm
 from . import vocabulary as vocab
 
@@ -59,6 +59,19 @@ class GraphNormalizeReport:
     conflicts: list[dict] = field(default_factory=list)
     #: The S2 scoring pass: band distribution, top-scoring nodes, penalties.
     scoring: dict[str, object] = field(default_factory=dict)
+    #: What the escalation policy decided, per operation (the graph's answer to
+    #: "which assets deserve active validation next?").
+    escalation: dict[str, object] = field(default_factory=dict)
+    #: Networks by relevance state (``discovered`` … ``active_candidate``).
+    networks_by_relevance: dict[str, int] = field(default_factory=dict)
+    #: The run's progression accounting, per stage (see :mod:`~.measurement`):
+    #: how many candidates each stage saw, how many it refused and by which rule.
+    measurement: dict[str, object] = field(default_factory=dict)
+    #: One row per refused candidate.  Deliberately *not* in :meth:`to_dict`:
+    #: it has its own artifact (``escalation_refusals.jsonl``) and inlining
+    #: thousands of rows into ``report.json`` would write the same data twice in
+    #: one directory.  The counts that summarise it are in ``escalation``.
+    escalation_refusal_rows: list[dict] = field(default_factory=list, repr=False)
     notes: list[str] = field(default_factory=list)
     outputs: dict[str, str] = field(default_factory=dict)
     #: Always false until the schema is final — stated as data, not prose.
@@ -82,6 +95,9 @@ class GraphNormalizeReport:
             "orphans": self.orphans,
             "conflicts": self.conflicts,
             "scoring": self.scoring,
+            "escalation": self.escalation,
+            "networks_by_relevance": self.networks_by_relevance,
+            "measurement": self.measurement,
             "notes": self.notes,
             "outputs": self.outputs,
         }
@@ -158,6 +174,12 @@ def build_report(
     report.scoring = (
         stats.to_dict() if stats is not None else {"skipped": "the scoring pass did not run"}
     )
+    report.escalation = result.escalation
+    report.networks_by_relevance = result.networks_by_relevance
+    report.escalation_refusal_rows = result.escalation_refusals
+    # Measured from the finished model, before any artifact is written, so the
+    # report and ``measurement.json`` are the same numbers by construction.
+    report.measurement = measurement.measure(result)
 
     scoped_kinds = (vocab.DOMAIN, vocab.IP, vocab.NETWORK)
     report.counts = {
@@ -169,6 +191,11 @@ def build_report(
         "rows_read": sum(source.rows_read for source in enabled),
         "malformed_lines": sum(source.malformed for source in enabled),
         "unlinked_parameters": len(result.unlinked),
+        "parameter_observations": result.parameter_observations,
+        "parameters_with_provenance": len(result.parameter_urls),
+        "url_validations": result.url_validations,
+        "urls_live": result.urls_live,
+        "urls_dead": result.urls_dead,
         "orphan_nodes": orphan_total,
         "endpoint_only_nodes": len(set(model.endpoint_only)),
         "property_conflicts": len(model.conflicts),
@@ -184,6 +211,14 @@ def build_report(
         "nodes_unscored": stats.unscored if stats is not None else 0,
         "nodes_penalised": stats.penalised if stats is not None else 0,
         "wildcard_edges_withheld": result.wildcard_edges_truncated,
+        "active_candidates": len(result.active_candidates),
+        "escalation_refusals": len(result.escalation_refusals),
+        "dns_scoped_addresses": result.dns_scoped_addresses,
+        "networks_relevant": sum(
+            count
+            for state, count in result.networks_by_relevance.items()
+            if state not in ("discovered",)
+        ),
         "truncated_nodes": model.truncated_nodes,
         "truncated_edges": model.truncated_edges,
         "graph_written": 0,
@@ -212,6 +247,8 @@ def run_pipeline(
     scored: bool = settings.SCORE_MODEL,
     max_score_audit: int = settings.MAX_SCORE_AUDIT,
     top_scored: int = settings.MAX_TOP_SCORED,
+    plan_escalation: bool = settings.PLAN_ESCALATION,
+    allow_needs_review: bool = settings.ESCALATION_ALLOW_NEEDS_REVIEW,
 ) -> GraphNormalizeReport:
     """Run all three stages and write the model artifacts."""
     started = time.monotonic()
@@ -237,6 +274,8 @@ def run_pipeline(
         scored=scored,
         max_score_audit=max_score_audit,
         top_scored=top_scored,
+        plan_escalation=plan_escalation,
+        allow_needs_review=allow_needs_review,
     )
     report = build_report(
         target,
@@ -267,7 +306,17 @@ def write_outputs(
     directory = Path(output_dir)
     if not report.finished_at:
         report.finished_at = _utc_now()
-    outputs = {name: str(path) for name, path in emit.write_model(directory, model).items()}
+    outputs = {
+        name: str(path)
+        for name, path in emit.write_model(
+            directory,
+            model,
+            active_candidates=report_escalation_queue(report),
+            refusals=report_escalation_refusals(report),
+            measurement=report.measurement or None,
+            target=report.target,
+        ).items()
+    }
     # The handoff document for downstream consumers (the vulnerability finder
     # engine).  Built before the report so the report can name it as an output;
     # it carries the run's own accounting, so a consumer needs no sibling file.
@@ -284,6 +333,34 @@ def write_outputs(
     outputs["report"] = str(emit.write_json(directory / emit.REPORT_FILE, report.to_dict()))
     report.outputs = outputs
     return outputs
+
+
+def report_escalation_queue(report: GraphNormalizeReport) -> list[dict] | None:
+    """The escalation queue carried by *report*, or ``None`` when none ran.
+
+    Read back out of the report so the artifact is literally the same rows the
+    report counted — one decision, two views of it.
+    """
+    if not report.escalation:
+        return None
+    queue: list[dict] = []
+    for block in report.escalation.values():
+        if isinstance(block, dict):
+            rows = block.get("queue")
+            if isinstance(rows, list):
+                queue.extend(row for row in rows if isinstance(row, dict))
+    return queue
+
+
+def report_escalation_refusals(report: GraphNormalizeReport) -> list[dict] | None:
+    """Every refused candidate, or ``None`` when the escalation pass did not run.
+
+    Taken straight off the report so the artifact *is* the rows the report
+    counted — one decision, two views of it (the same rule the queue follows).
+    """
+    if not report.escalation:
+        return None
+    return list(report.escalation_refusal_rows)
 
 
 def _utc_now() -> str:
@@ -336,6 +413,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-orphans", type=int, default=settings.MAX_ORPHANS, help="orphan ids in the report")
     parser.add_argument("--max-score-audit", type=int, default=settings.MAX_SCORE_AUDIT)
     parser.add_argument("--top-scored", type=int, default=settings.MAX_TOP_SCORED)
+    parser.add_argument(
+        "--no-escalation-plan",
+        action="store_true",
+        help="skip the S16 escalation pass (no active_candidates.jsonl)",
+    )
+    parser.add_argument(
+        "--allow-needs-review",
+        action="store_true",
+        help="let the escalation policy promote assets the scope engine put in needs_review",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return parser
 
@@ -368,6 +455,8 @@ def main(argv: list[str] | None = None) -> int:
         networks_dir=args.networks_dir,
         scope=scope,
         scored=not args.no_score,
+        plan_escalation=not args.no_escalation_plan,
+        allow_needs_review=args.allow_needs_review,
         max_nodes=args.max_nodes,
         max_edges=args.max_edges,
         max_evidence=args.max_evidence,
@@ -393,6 +482,31 @@ def main(argv: list[str] | None = None) -> int:
         report.outputs.get("graph_state"),
         counts.get("scope_annotated"),
     )
+    for operation, block in (report.escalation or {}).items():
+        if not isinstance(block, dict):
+            continue
+        codes = block.get("refusal_codes")
+        log.info(
+            "escalation %-20s %s eligible / %s considered — refusals: %s",
+            operation,
+            block.get("eligible"),
+            block.get("considered"),
+            ", ".join(
+                f"{code}×{count}"
+                for code, count in (codes.items() if isinstance(codes, dict) else ())
+            )
+            or "none",
+        )
+    ip_port = report.measurement.get("ip_port")
+    if isinstance(ip_port, dict):
+        log.info(
+            "measurement: %s address(es) — %s dedicated, %s unclassified, "
+            "%s eligible for active work",
+            ip_port.get("addresses"),
+            ip_port.get("hosting_dedicated"),
+            ip_port.get("hosting_unclassified"),
+            ip_port.get("eligible"),
+        )
     for note in report.notes:
         log.warning(note)
     return 0 if report.ok else 1

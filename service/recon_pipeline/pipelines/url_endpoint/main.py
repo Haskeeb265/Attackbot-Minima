@@ -6,14 +6,17 @@ actually wants::
     passive   archived/historical harvest (Wayback, Common Crawl, urlscan, gau)
               -> canonical, in-scope, deduplicated URLs
     extract   URLs -> endpoints, parameters, JS bundles, source maps, findings
+    validate  policy-gated live HTTP check -> url_validation.jsonl (URL enriched)
 
 Each stage is independently runnable and owns its own ``output/`` directory; this
 module adds only what belongs to the *whole* pipeline:
 
-* **ordering** — extract consumes the passive union;
+* **ordering** — extract consumes the passive union, validate consumes the same
+  union (and reads its own previous artifact for idempotency);
 * **the derived asset artifacts** — ``endpoints.txt``, ``parameters.txt``,
-  ``javascript.txt``, ``source_maps.txt``, ``interesting.txt``, ``hosts.txt`` and
-  ``urls.jsonl``, each one sorted and deterministic;
+  ``parameters.jsonl`` (per-URL parameter provenance), ``javascript.txt``,
+  ``source_maps.txt``, ``interesting.txt``, ``hosts.txt``, ``urls.jsonl`` and
+  ``url_validation.jsonl``, each one sorted and deterministic;
 * **a combined report** — ``output/summary.json`` with per-stage status, counts
   and timings, so a partial run is legible without reading two reports.
 
@@ -47,13 +50,26 @@ from service.recon_pipeline.platform.common.normalize import canonicalize_host
 from .extract import extract
 from .passive import pipeline as passive_mod
 from .passive.pipeline import URLS_FILE, run_passive_stage
-from .settings import DEFAULT_SOURCE_TIMEOUT, OUTPUT_DIR, PASSIVE_OUTPUT_DIR
+from .settings import (
+    DEFAULT_SOURCE_TIMEOUT,
+    OUTPUT_DIR,
+    PASSIVE_OUTPUT_DIR,
+    VALIDATE_ENABLED,
+    VALIDATE_MAX_PER_HOST,
+    VALIDATE_MAX_URLS,
+    VALIDATE_TTL,
+)
+from .validate import VALIDATIONS_FILE, UrlValidationReport, run_validate_stage
 
 log = logging.getLogger("url_endpoint.main")
 
 #: The whole-pipeline artifacts (per-stage artifacts live in each stage's output/).
 ENDPOINTS_FILE = "endpoints.txt"
 PARAMETERS_FILE = "parameters.txt"
+#: ``(url, parameter)`` observations — the provenance-bearing form of the flat
+#: name list above, and the artifact ``graph_normalize`` builds its
+#: ``OBSERVED_PARAMETER`` edges from.
+PARAMETERS_JSONL_FILE = "parameters.jsonl"
 JAVASCRIPT_FILE = "javascript.txt"
 SOURCE_MAPS_FILE = "source_maps.txt"
 INTERESTING_FILE = "interesting.txt"
@@ -62,7 +78,7 @@ URLS_JSONL_FILE = "urls.jsonl"
 REPORT_FILE = "report.json"
 SUMMARY_FILE = "summary.json"
 
-ALL_STAGES: tuple[str, ...] = ("passive", "extract")
+ALL_STAGES: tuple[str, ...] = ("passive", "extract", "validate")
 
 
 @dataclass
@@ -128,9 +144,49 @@ def run_extract_stage(
     write_lines(output_dir / INTERESTING_FILE, result.interesting)
     write_lines(output_dir / HOSTS_FILE, result.hosts)
     write_jsonl(output_dir / URLS_JSONL_FILE, _parsed_records(result))
+    # The provenance-bearing form of the parameter list: ``parameters.txt`` stays
+    # (operators and older consumers read it) but a bare name list cannot answer
+    # "which URL exposes this parameter?", which is what a fuzzing pass and the
+    # graph both need.
+    write_jsonl(output_dir / PARAMETERS_JSONL_FILE, result.parameter_observations)
     _write_json(output_dir / REPORT_FILE, result.to_dict())
 
     return dict(result.counts)
+
+
+def run_validation_stage(
+    urls: Iterable[str],
+    apex: str,
+    *,
+    output_dir: Path | str = OUTPUT_DIR,
+    scope=None,
+    session=None,
+    runner=None,
+    enabled: bool | None = None,
+    max_urls: int | None = None,
+    max_per_host: int | None = None,
+    ttl: float | None = None,
+    dispatcher=None,
+) -> UrlValidationReport:
+    """Run the pipeline's one active stage: live HTTP validation of candidates.
+
+    A thin adapter over :func:`..validate.run_validate_stage`, kept here so the
+    orchestrator forwards the CLI's options in one place — the stage's own module
+    owns the policy, the parsing and the artifact.
+    """
+    return run_validate_stage(
+        apex,
+        list(urls),
+        output_dir=output_dir,
+        scope=scope,
+        dispatcher=dispatcher,
+        session=session,
+        run=runner,
+        enabled=VALIDATE_ENABLED if enabled is None else enabled,
+        max_urls=VALIDATE_MAX_URLS if max_urls is None else max_urls,
+        max_per_host=VALIDATE_MAX_PER_HOST if max_per_host is None else max_per_host,
+        ttl=VALIDATE_TTL if ttl is None else ttl,
+    )
 
 
 def _parsed_records(result: object) -> list[dict[str, object]]:
@@ -152,6 +208,14 @@ def run_pipeline(
     output_dir: Path | str = OUTPUT_DIR,
     passive_output_dir: Path | str = PASSIVE_OUTPUT_DIR,
     timeout: float = DEFAULT_SOURCE_TIMEOUT,
+    scope=None,
+    validation_session=None,
+    validation_runner=None,
+    validation_dispatcher=None,
+    validate_enabled: bool | None = None,
+    max_validate: int | None = None,
+    max_validate_per_host: int | None = None,
+    validate_ttl: float | None = None,
     **stage_options: Any,
 ) -> UrlPipelineSummary:
     """Run the requested *stages* in order and write the combined artifacts.
@@ -166,6 +230,17 @@ def run_pipeline(
         Where the passive stage writes (and ``uris.txt`` is read from).
     timeout:
         Forwarded to the passive stage's per-source budget.
+    scope:
+        The scope engine the ``validate`` stage gates its candidates with.  When
+        omitted, the stage builds one from the target (``ScopeEngine.from_domain``),
+        which is the same engine the platform runner would hand over.
+    validation_session:
+        The stealth session the validation stage probes with (identity, pacing,
+        quarantine).  ``None`` means the tool's own defaults — still gated, just
+        not paced by the platform.
+    validation_runner:
+        Injected tool runner for tests, so the ``validate`` stage can be exercised
+        against canned httpx output with no Docker and no network.
     stage_options:
         Extra keyword arguments forwarded verbatim to the passive stage (used by
         tests to inject a fake source runner).
@@ -200,7 +275,33 @@ def run_pipeline(
         log.info("=== %s stage ===", stage)
         stage_started = time.monotonic()
         try:
-            if stage == "passive":
+            if stage == "validate":
+                validation = run_validation_stage(
+                    _read_union(union_path),
+                    apex,
+                    output_dir=output_dir,
+                    scope=scope,
+                    dispatcher=validation_dispatcher,
+                    session=validation_session,
+                    runner=validation_runner,
+                    enabled=validate_enabled,
+                    max_urls=max_validate,
+                    max_per_host=max_validate_per_host,
+                    ttl=validate_ttl,
+                )
+                entry = {
+                    "stage": stage,
+                    "ok": bool(validation.ok),
+                    "seconds": round(validation.seconds, 2),
+                    "counts": dict(validation.counts),
+                    "by_state": dict(validation.by_state),
+                    "outputs": dict(validation.outputs),
+                }
+                if validation.notes:
+                    entry["notes"] = list(validation.notes)
+                if not validation.ok:
+                    summary.ok = False
+            elif stage == "passive":
                 report = run_passive_stage(
                     apex,
                     timeout=timeout,
@@ -231,6 +332,7 @@ def run_pipeline(
                         for name in (
                             ENDPOINTS_FILE,
                             PARAMETERS_FILE,
+                            PARAMETERS_JSONL_FILE,
                             JAVASCRIPT_FILE,
                             SOURCE_MAPS_FILE,
                             INTERESTING_FILE,
@@ -289,6 +391,14 @@ def _log_summary(summary: UrlPipelineSummary) -> None:
         f"{summary.counts.get('javascript', 0)} JS bundle(s), "
         f"{summary.counts.get('interesting', 0)} interesting file(s)"
     )
+    verified = summary.counts.get("verified")
+    if verified is not None:
+        colorlog.log.info(
+            f"live validation: {verified} URL(s) verified, "
+            f"{summary.counts.get('redirected', 0)} redirected, "
+            f"{summary.counts.get('dead', 0) + summary.counts.get('unreachable', 0)} "
+            "dead/unreachable"
+        )
     for entry in summary.stages:
         status = "ok" if entry["ok"] else "FAILED"
         detail = entry.get("error") or ""
@@ -332,6 +442,23 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SOURCE_TIMEOUT,
         help=f"per-source timeout in seconds (default: {DEFAULT_SOURCE_TIMEOUT})",
     )
+    parser.add_argument(
+        "--no-validate",
+        action="store_true",
+        help="skip the live URL validation stage (passive-only run)",
+    )
+    parser.add_argument(
+        "--max-validate",
+        type=int,
+        default=VALIDATE_MAX_URLS,
+        help=f"URL candidates validated per run, 0 = no cap (default: {VALIDATE_MAX_URLS})",
+    )
+    parser.add_argument(
+        "--max-validate-per-host",
+        type=int,
+        default=VALIDATE_MAX_PER_HOST,
+        help=f"URL candidates validated per host (default: {VALIDATE_MAX_PER_HOST})",
+    )
     parser.add_argument("--output-dir", default=str(OUTPUT_DIR), help="derived-artifact directory")
     parser.add_argument(
         "--passive-output-dir",
@@ -360,7 +487,16 @@ def main(argv: list[str] | None = None) -> int:
         print("stages, in run order:")
         print("  passive  Wayback / Common Crawl / urlscan / gau -> canonical URLs")
         print("  extract  URLs -> endpoints, parameters, JS, source maps, findings")
+        print("  validate policy-gated live HTTP check -> url_validation.jsonl")
         return 0
+
+    # The scope engine is built here exactly as the platform runner builds it, so
+    # a standalone run and a platform run gate their active stages identically.
+    scope = None
+    if not args.no_validate:
+        from service.recon_pipeline.platform.scope import ScopeEngine
+
+        scope = ScopeEngine.from_domain(args.target)
 
     try:
         summary = run_pipeline(
@@ -369,6 +505,10 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             passive_output_dir=args.passive_output_dir,
             timeout=args.timeout,
+            scope=scope,
+            validate_enabled=not args.no_validate,
+            max_validate=args.max_validate,
+            max_validate_per_host=args.max_validate_per_host,
             only=_split(args.only) if args.only else None,
             skip=_split(args.skip),
             cap=args.max_urls,
