@@ -1,0 +1,61 @@
+# cloud_resource — raw per-provider commands (reproduction notes)
+#
+# The pipeline is pure Python + keyless HTTP; there is no tool image and
+# nothing to build.  These are the raw commands behind each provider probe,
+# for reproducing one lookup by hand or verifying a response-matrix change
+# upstream (the matrices themselves are DESIGN.md §3).
+
+# ---------------------------------------------------------------- #
+# AWS S3 — virtual-hosted style, legacy global endpoint
+# ---------------------------------------------------------------- #
+# Exists, open + listable (a 200 whose body opens with
+# <?xml ...><ListBucketResult> is the open+listable verdict):
+curl -s "https://acme-open.s3.amazonaws.com/"
+# -> HTTP/1.1 200 OK  (XML: <ListBucketResult> ...)</ListBucketResult>
+
+# Exists in another region (note the Location header):
+curl -sI "https://acme-eu-backups.s3.amazonaws.com/"
+# -> HTTP/1.1 301 Moved Permanently
+#    Location: https://acme-eu-backups.s3.eu-west-1.amazonaws.com/
+
+# Exists, denies anonymous reads (THE most common verdict; do not
+# misread as "not found"):
+curl -s "https://acme-private.s3.amazonaws.com/"
+# -> HTTP/1.1 403 Forbidden  (XML: <Code>AccessDenied</Code>)
+
+# Absent (a usable fact — dangling when a CNAME claimed it):
+curl -s "https://no-such-bucket-xyz.s3.amazonaws.com/"
+# -> HTTP/1.1 404 Not Found  (XML: <Code>NoSuchBucket</Code>)
+
+# ---------------------------------------------------------------- #
+# Azure Blob — account-shaped host; watch the quirk:
+# an absent ACCOUNT answers 409, an absent CONTAINER answers 404
+# ---------------------------------------------------------------- #
+# Exists, denies anonymous reads:
+curl -s "https://acmeexport.blob.core.windows.net/backups"
+# -> HTTP/1.1 403 (XML: <Code>PublicAccessNotPermitted</Code>)
+
+# Account does not exist (409 — not 404!):
+curl -s "https://nosuchaccount123.blob.core.windows.net/backups"
+# -> HTTP/1.1 409 (XML: <Code>AccountNotFound</Code>)
+
+# ---------------------------------------------------------------- #
+# Google Cloud Storage — one canonical host, two error dialects
+# ---------------------------------------------------------------- #
+# XML dialect:
+curl -s "https://no-such-bucket-xyz.storage.googleapis.com/"
+# -> HTTP/1.1 404, XML <Error><Code>NoSuchBucket</Code></Error>
+# JSON dialect (some endpoints):
+# -> 404, {"error": {"code": 404, "errors": [{"reason": "notFound"}]}}
+
+# Exists, denies anonymous reads:
+curl -s "https://acme-static.storage.googleapis.com/"
+# -> HTTP/1.1 403
+
+# ---------------------------------------------------------------- #
+# The pipeline itself
+# ---------------------------------------------------------------- #
+python -m service.recon_pipeline.pipelines.cloud_resource.main -t qbsco.net
+python -m service.recon_pipeline.pipelines.cloud_resource.main -t qbsco.net --stages harvest
+python -m service.recon_pipeline.pipelines.cloud_resource.main -t qbsco.net --name acme-backups --no-sibling-input
+python -m service.recon_pipeline.pipelines.cloud_resource.main --list   # (stages: harvest, probe)

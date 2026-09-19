@@ -190,6 +190,12 @@ service/recon_pipeline/pipelines/asn_cidr/output/
 # siblings' artifacts, never tracked.
 service/recon_pipeline/pipelines/graph_normalize/output/
 
+# cloud_resource stage run artifacts: harvested bucket-name candidates and the
+# provider probe verdicts (buckets, dangling refs). Same rule as the siblings -
+# reproduced by re-running the stage, never tracked.
+service/recon_pipeline/pipelines/cloud_resource/passive/output/
+service/recon_pipeline/pipelines/cloud_resource/output/
+
 # ASM platform run artifacts: one directory per run (summary.json + a report per
 # stage), the shared run timeline runs.jsonl the `history` command reads, and the
 # graph journal written while Neo4j is down (flushed by `replay`). All of it is
