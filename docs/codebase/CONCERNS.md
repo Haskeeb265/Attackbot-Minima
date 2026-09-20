@@ -55,7 +55,14 @@ label in it was a guess), and the replacement is to be designed **from**
 * `platform/graph/ingest.py`'s `GraphSink` is handed to every pipeline as
   `context.graph` and **no pipeline calls it**; until the schema exists it
   journals every offered write and reports `available=False` with that reason;
-* seed ingestion from Postgres (the other half of S4) is unbuilt;
+* ~~seed ingestion from Postgres (the other half of S4) is unbuilt~~ — the
+  **program half now runs** (2026-09-20): `platform/programs.py` loads a
+  program's declared scope from `bounty_master`/`bounty_detail` and both entry
+  points engage it (`--program HANDLE`), one engagement per declared domain,
+  scope applied to the engine and handed to child processes (`PSH_SCOPE_FILE`,
+  `RECON_SCOPE_JSON`). Still open on the S4 line: the scraper's mapper drops
+  `eligible_for_bounty`/`eligible_for_submission`, so no per-asset eligibility
+  filter exists, and organizations are not reconciled into anchors (below);
 * organisations are not reconciled — one real organisation appears as several
   `organization` nodes (Cymru's name, RDAP's name, the handle), which is the one
   place the model is knowingly fragmentary;

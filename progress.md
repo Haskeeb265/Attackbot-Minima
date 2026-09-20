@@ -11,7 +11,9 @@ S0  ███░░░░░░░░ partial  Infrastructure (Neo4j + Redis in 
 S1  ██████████ built   Graph schema + CRUD + indexing
 S2  ██████████ built   Scoring engine (pure, auditable, clamped to 0–100)
 S3  ████░░░░░░░ partial  Extraction & normalization (hostnames only)
-S4  ████░░░░░░░░ partial  GraphSink writers built + journal/replay; no Postgres seed ingestion
+S4  ██████░░░░░ partial  GraphSink writers built + journal/replay; program scope
+                        now loads from Postgres (platform/programs.py, --program)
+                        — per-asset eligibility still dropped by the scraper's mapper
 S5  ██████░░░░░ built*  crt.sh (standalone, writes files not graph)
 S6  ██████░░░░░ built*  Wayback CDX (standalone)
 S7  ██████░░░░░ partial  Platform run loop + writers exist; no pipeline calls the sink
@@ -36,6 +38,112 @@ XX  ████████░░░ built   port_service_host — exists OUTSI
 XX  █████████ built   url_endpoint — URLs / endpoints / parameters, OUTSIDE both
                         plans' numbering (passive + extract + S24 JS crawl built)
 ```
+
+## Session 2026-09-20 (part 3) — the operator feeds recon: `--scope-file`/`--asset`
+
+**The third engagement path.** After part 2 there were two ways to start a run:
+the legacy `-t` (apex-only, scope guessed from the apex) and `--program`
+(declared scope from the scraper's tables). But recon's actual input is not a
+program — it is a *declared scope*, and an operator can author one directly:
+a pentest engagement with no HackerOne page, a re-run of yesterday's scope
+minus one asset, a lab. `--scope-file PATH` (repeatable) and `--asset VALUE`
+(repeatable) are that seam: a `ProgramScope` authored by the operator instead
+of scraped from Postgres.
+
+**Everything downstream is shared, not duplicated.** The file's lines go
+through the *same* classifier the DB rows use (`parse_scope_file` →
+`classify_scope_asset`), the merged inputs resolve through the *same*
+engagement loop (`resolve_operator_scope` → `operator_engagements`), and each
+engagement travels to the children through the *same* two channels
+(`PSH_SCOPE_FILE`, `RECON_SCOPE_JSON`). One input surface, one set of rules:
+
+- **Refusals are named, not fatal.** A refused line returns as
+  `(file:line)`/`--asset: value`, is recorded in `unsupported`, and the run
+  reports it — but does not abort (the operator is present to answer).
+- **The untyped fallback's limit is real and now has an escape hatch.**
+  `com.example.app` is a syntactically valid three-label host, so a bare line
+  is trusted only as far as its spelling; an operator who *knows* the line is
+  an Android app id types `android:com.example.app` and gets the type-aware
+  refusal a DB row would get (also `ios:`/`mobile:`/`other:`/`repo:`).
+- **Ambiguity is refused, never resolved by accident.** A file with several
+  root domains runs only when `-t` names one (which engages the file *whole*,
+  not sliced — the operator authored it); a CIDR-only file must have its
+  engagement root named too.
+- **The three paths are mutually exclusive by construction:** `--program`
+  refuses `--scope-file`/`--asset` (DB is the source), the parser refuses
+  `--domain` without `--program`, and bare `run` keeps its pre-existing
+  meaning — `.env` TARGET, no DB touch (pinned by test).
+
+Verified: **1,492 passed, 1 skipped** (+17 new hermetic tests; suite 38 s),
+mypy clean on the touched files. No new runtime dependencies, no changes to
+the runner or any pipeline — the seam is one module and two CLIs.
+
+## Session 2026-09-20 (part 2) — the scraper feeds recon: the program seam (S4's recon half)
+
+**The seam closed.** Recon has been hand-fed one `TARGET` from `.env` since the
+first run; the scraper has been persisting programs to Postgres (`bounty_master`
++ `bounty_detail`, one row per declared scope asset) the whole time. The join is
+now built: `platform/programs.py` loads one ingested program's declared scope
+and applies it to the scope engine, and both entry points engage it with
+`--program HANDLE` (long-only — `-p` is `--pipeline`).
+
+**The rules the seam enforces (all tested, 40 new hermetic tests):**
+
+- **Type-aware classification, refuse-never-guess.** The row's `scope_type`
+  decides the question; syntax only validates. `DOMAIN`/`URL`/`WILDCARD` fold
+  to the base domain (`*.acme.test` and `acme.test` are one declaration),
+  `CIDR` normalises through `ipaddress`, `IP` canonicalises; `ANDROID`,
+  `IOS`, `OTHER`, `GITHUB`, `HARDWARE` and friends refuse outright — the
+  program told us what it declared, so `acme` under `OTHER` must not become a
+  target because it happens to look like a single-label host. Untyped rows
+  fall back to syntax with the limit written down (an offline check cannot
+  tell `com.example.app` from a three-label host).
+- **Fail-fast.** Unknown handle, empty scope, `--domain` the program does not
+  declare, or a database that will not answer → exit 2 with the reason,
+  **nothing runs**. No silent fallback to the `.env` target: scope is the
+  safety input.
+- **One engagement per declared domain.** A multi-domain program runs one
+  recon engagement per apex; each carries only its apex's slice of the
+  declared domains (`scope_for_apex` — domains under the apex travel, foreign
+  domains do not), while networks and addresses travel whole (places, not
+  names). `--domain X` limits the invocation to one engagement.
+- **Children gate identically.** Each engagement exports two channels the
+  existing code already reads: `PSH_SCOPE_FILE` (the port stage's declared
+  CIDR/IP file — which also closes a pre-existing gap, since the platform's
+  scope engine never saw declared networks before) and `RECON_SCOPE_JSON`,
+  which the standalone `graph_normalize`/`url_endpoint` CLIs apply over their
+  `from_domain` engine. A snapshot that will not parse is fail-closed: the
+  run proceeds with *narrower* scope and says so loudly.
+- **The run records its provenance.** `summary.json` and the registry row
+  carry a `program` block (handle, declared counts, refusals, unsupported
+  assets with reasons, the scope file path); `--list-programs` inventories
+  what the scraper stored (handle, scope rows, engagable domains).
+
+**Wiring:** `Runner.build_context/run` accept `program_scope=` and apply it
+through the engine's own `add_*` methods (the engine stays the single writer;
+the program is a loop over them). The PSH contract adapter forwards the
+program's scope file to `run_port_service_host_stage(scope_files=...)`, merged
+with any operator `PSH_SCOPE_FILE`. `run_recon.py` gained the same `--program`
+flow over its five subprocesses, with the per-engagement env passed to every
+child.
+
+**Deliberately not built:** per-asset eligibility filtering — the scraper's
+mapper drops `eligible_for_bounty`/`eligible_for_submission` before persisting,
+so every scope row is treated as declared; the filter belongs keyed on the row
+when the mapper keeps them. Multi-platform connectors are scraper-side and
+invisible to the seam.
+
+**Verified:** 1 475 passed / 1 skipped (40 new: `test_programs.py` 29,
+`test_program_wiring.py` 11 — real `build_context` with the Redis services
+stubbed, which also fixed a 95-second test that was waiting out two Windows
+SYN drops). mypy clean on every touched file; the pre-existing errors
+(`pipeline.py` internals, `quarantine.py`, `colorlog`, `url_endpoint/main.py:409`)
+are untouched. Docs: `PLATFORM.md` (modules table + not-built), `CONCERNS.md`
+#4 (the S4 line), `run_recon.py` usage, this file.
+
+**Next:** organizations → anchors (the model still fragments one real org),
+and the vuln engine's agent loop consuming `dispatch` — the handoff surface
+now starts from what a program actually declared.
 
 ## Session 2026-09-20 — the graph gets a reader: storage-agnostic tool layer for the vuln engine
 

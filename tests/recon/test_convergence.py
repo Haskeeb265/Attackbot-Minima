@@ -750,7 +750,7 @@ def test_the_runner_loops_real_rounds_and_writes_the_convergence_report(
         ]
     )
 
-    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None):
+    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None, program_scope=None):
         return RunContext(target=target, output_dir=output_dir), [
             _unused_service() for _ in range(6)
         ]
@@ -909,7 +909,7 @@ def test_the_runner_stops_the_loop_when_a_stage_quarantined_us(
         ]
     )
 
-    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None):
+    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None, program_scope=None):
         return RunContext(target=target, output_dir=output_dir), [
             _unused_service() for _ in range(6)
         ]
@@ -980,7 +980,7 @@ def test_a_round_that_added_no_address_spends_no_scan_requests(
     )
     (tmp_path / "scans" / "out" / "ips.txt").write_text("", encoding="utf-8")
 
-    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None):
+    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None, program_scope=None):
         return RunContext(target=target, output_dir=output_dir), [
             _unused_service() for _ in range(6)
         ]
@@ -1043,7 +1043,7 @@ def test_a_round_with_nothing_relevant_to_run_is_convergence_not_a_broken_loop(
     (tmp_path / "scans" / "out").mkdir(parents=True)
     (tmp_path / "scans" / "out" / "hosts.txt").write_text("api.acme.test\n", encoding="utf-8")
 
-    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None):
+    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None, program_scope=None):
         return RunContext(target=target, output_dir=output_dir), [
             _unused_service() for _ in range(6)
         ]
@@ -1147,7 +1147,7 @@ def test_the_runner_without_a_policy_still_runs_exactly_one_round(
         ]
     )
 
-    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None):
+    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None, program_scope=None):
         return RunContext(target=target, output_dir=output_dir), [
             _unused_service() for _ in range(6)
         ]

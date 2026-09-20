@@ -51,7 +51,14 @@ class PortsPipeline(BasePipeline):
                 "error": "pipeline.py exposes no run_pipeline()",
                 "counts": {},
             }
-        summary = run_pipeline(target=context.target)
+        # A program run's declared CIDR/IP file (S4): the runner writes it beside
+        # the run's artifacts; the stage merges it with its own scope settings,
+        # so an operator's PSH_SCOPE_FILE still applies alongside the program's.
+        scope_files: tuple[str, ...] = ()
+        program_scope_file = (context.program or {}).get("scope_file")
+        if program_scope_file:
+            scope_files = (str(program_scope_file),)
+        summary = run_pipeline(target=context.target, scope_files=scope_files)
         return {
             "ok": bool(getattr(summary, "ok", True)),
             "counts": dict(getattr(summary, "counts", {}) or {}),

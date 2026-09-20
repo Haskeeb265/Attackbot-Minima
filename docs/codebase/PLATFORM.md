@@ -30,6 +30,7 @@ cli.py ─▶ runner.Runner
 | `runner.py` | — | The one code path that runs every pipeline: context construction, stage execution, timing, per-stage failure isolation, run/registry/report writing. Owns no asset logic and never parses pipeline artifacts. |
 | `scoring.py` | S2 | Evidence scoring. `score = round(max(base, strongest signal) + 0.1 × (remaining weights) − penalties)` — the strongest signal is a floor, corroboration nudges, so "eight sources agree" never becomes "one source echoed eight times". Pure: no I/O, no clock, and an audit trail per score. Callers build a `ScoredAsset`; `signal_for_source` maps a provenance string to its §4 weight and **names an unknown source as unknown** rather than handing back a weight indistinguishable from a real one. The only caller today is `graph_normalize`'s scoring pass, which scores every node of the asset model. |
 | `scope.py` | S15 | The `in_scope` / `needs_review` / `out_of_scope` chokepoint between discovery and action. Conservative by construction: it auto-claims what DNS pointed at, and puts ASN/CIDR-derived networks in `needs_review` because *announced ≠ owned* (recon.md §5.4). Answers come from a *rule*, not from iteration order: the container it names is the most specific match (declared space still outranks discovered), because the candidate sets are `set`s and Python randomises string hashing per process — "the first containing network" meant the same address reported a different network in every run. |
+| `programs.py` | S4 (recon half) | The program seam: load one ingested program's declared scope from the scraper's Postgres tables (`bounty_master`/`bounty_detail`) and apply it to the scope engine. Type-aware classification (the row's `scope_type` decides; syntax only validates — an Android application id never becomes a target), refuse-never-guess for everything not host/network/address, per-apex slicing for multi-domain programs, and two child-process channels: a PSH-format scope file and the `RECON_SCOPE_JSON` snapshot. `--list-programs` inventories what the scraper stored. Fail-fast by design: an unknown handle or an unreadable database ends the run before any request. The same `ProgramScope` is also authored directly by the operator — `parse_scope_file` (one asset per line, `#` comments, optional `domain:`/`cidr:`/`ip:`/`wildcard:`/`url:` prefixes, plus `android:`/`ios:`/`other:`/`repo:` to refuse lines the untyped fallback would guess at) and `resolve_operator_scope` (merges `--scope-file` ×N + `--asset` ×N + `-t`, keeps each refusal's origin) feed the same classifier, engagement loop, and child channels as `--program`. |
 | `dispatch.py` | S10 | The policy gate every active step asks first. Answers `ALLOW` / `DEFER` / `DENY` with a reason; deny-by-default (no scope decision, no score or unknown type ⇒ `DENY`); per-host and global token budgets; the full decision log lands in the run report. |
 | `convergence.py` | — | The round loop behind `--until-converged`, and the reason a naive one would be worse than none. After every round it canonicalises each pipeline's declared `frontier_artifacts` into asset tokens (`host:` / `ip:` / `url:` / `net:`), records them in an append-only `Ledger`, and reports how many were **new** — that number is what "exhausted" means. `decide()` is pure over the rounds so far and always names its condition, and caps deliberately outrank the happy ending: a run that hit its time budget with a quiet frontier reports the budget, with a note that the frontier was quiet too, rather than claiming the surface ran out. Which stages may repeat is declared per pipeline (`repeat_stages`), because it is an empirical property of the collector — the passive names sources are subtree queries and `url_endpoint`'s archives are per-domain, so repeating them re-asks a question already answered in full — and which *kinds* of new asset justify the repeat is declared too (`repeat_on`). The runner gates on those kinds, so a round that added only URLs runs **no** port scan and makes **no** registry query, and records why. |
 | `receipt.py` | — | The attempt receipt: what this engagement already **tried**, per `(asset, operation)`, using the operation vocabulary `escalation.py` already asks about. The ledger records what a run has *seen*; this records what it has *attempted*, which is a different question — an address scanned with nothing open leaves no trace in any discovery artifact, so from the outside it is indistinguishable from one nobody looked at. **Only a conclusive attempt earns a skip** (`none` or `found`; a failed scan is recorded as failed and skips nothing, because an outage is not knowledge). Append-only JSONL, same conventions as the ledger, and one call for the consumer: `pending(assets, operation)`. First consumer: `port_service_host`, whose scan set is now the addresses this engagement has not already paid for. |
@@ -105,14 +106,21 @@ and the receipt is deliberately generic so they need no new mechanism.
   policy's `operations` argument is the same question asked somewhere else: a
   caller still answers it from what it happens to know, rather than from the
   receipt.
+- **S4's scraper half is trusted, not extended** — the program seam reads what
+  `ingest_program` persisted and no more: per-asset eligibility filtering
+  (`eligible_for_bounty`/`eligible_for_submission`) waits until the mapper
+  keeps those fields, and multi-platform connectors (Bugcrowd, Intigriti) are
+  a scraper-side change the seam does not need to know about.
 - **Shared/Redis-backed quarantine** — stealth quarantine state is a JSON file
   (stealth/README.md §6).
 - **Alerting sinks** for S14 (no external monitoring exists in this tree).
 - **The graph schema itself** — deliberately. The pre-run guess (20+ labels, a
   CRUD repository, seed ingestion) was removed 2026-09-19; until a schema is
   designed from `graph_state.json`, writes journal and nothing connects.
-  Seed ingestion from Postgres, typed writers, and the `:Organization` anchor
-  all belong to that discussion, not to code written ahead of it.
+  Typed writers and the `:Organization` anchor all belong to that discussion,
+  not to code written ahead of it. (Seed ingestion's *program* half now runs —
+  see `programs.py` above; the Postgres **scraper-side** feeding of program
+  data is unchanged.)
 
 ## Evidence
 

@@ -166,6 +166,11 @@ class RunContext:
     options: dict[str, str] = field(default_factory=dict)
     #: Pipeline outputs go here (the runner owns the directory layout).
     output_dir: Any = None
+    #: The program block (S4): what the scraper's program declared and how it
+    #: was applied to this run's scope engine — handle, declared counts,
+    #: refusals, and the scope file the port stage reads. ``None`` for a
+    #: classic single-target run (the ``-t``/``TARGET`` path, unchanged).
+    program: dict | None = None
 
     def log(self) -> Any:
         """The platform's structured logger (colorlog-backed)."""

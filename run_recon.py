@@ -42,12 +42,29 @@ Two properties it exists to guarantee:
 Usage::
 
     python run_recon.py -t qbsco.net
+    python run_recon.py --program acme                    # engage an ingested program
+    python run_recon.py --program acme --domain acme.test # one engagement of its scope
+    python run_recon.py --scope-file scope.txt            # operator-authored scope
+    python run_recon.py --scope-file scope.txt --asset 203.0.113.0/24
     python run_recon.py -t example.com --stages active,permutation   # skip passive
     python run_recon.py -t example.com --skip-subdomain              # ports + URLs
     python run_recon.py -t example.com --skip-ports                  # names + URLs
     python run_recon.py -t example.com --skip-url                    # names + ports
     python run_recon.py -t example.com --skip-asn                    # names + ports + URLs
     python run_recon.py -t example.com --skip-cloud                  # all but buckets
+
+With ``--program HANDLE`` the target and the declared scope come from what the
+scraper ingested (``bounty_master``/``bounty_detail`` in Postgres) instead of
+``TARGET`` in ``.env`` — one engagement per declared domain, each handed its
+slice of the program's scope through ``PSH_SCOPE_FILE`` (the port stage's
+declared CIDR/IP file) and ``RECON_SCOPE_JSON`` (the snapshot the standalone
+CLIs apply over their ``from_domain`` engine). Fail-fast: an unknown handle or
+a program with no engagable domains ends the invocation before any request.
+
+``--scope-file``/``--asset`` are the same seam without the scraper: the
+operator authors the declared scope (same classifier, same refuse-never-guess
+rules, same per-engagement child channels as ``--program``). An ambiguous
+file — several root domains — must be named with ``-t``.
 
 Per-stage knobs keep working through their environment variables (``PSH_*``,
 ``ACTIVE_*``) — this script forwards nothing it does not understand, so a run is
@@ -577,6 +594,7 @@ def _run_converged(
     stamp: str,
     verbose: bool,
     policy,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[dict, list[int]]:
     """Loop rounds until the frontier stops growing, or a limit says stop."""
     sys.path.insert(0, str(ROOT))
@@ -595,7 +613,11 @@ def _run_converged(
     # engagement cannot inherit the last one's scan history and skip work it never
     # did — while the rounds inside the run share it, which is the point.
     receipt_path = ROOT / f"recon_{apex}_attempts_{stamp}.jsonl"
-    child_env = {**os.environ, "PSH_ATTEMPT_RECEIPT": str(receipt_path)}
+    child_env = {
+        **os.environ,
+        "PSH_ATTEMPT_RECEIPT": str(receipt_path),
+        **(extra_env or {}),
+    }
 
     def round_fn(index: int, found: frozenset[str]) -> Round:
         labels: list[str]
@@ -900,51 +922,15 @@ def _configure_console() -> None:
             pass
 
 
-def main(argv: list[str] | None = None) -> int:
-    _configure_console()
-    parser = argparse.ArgumentParser(
-        prog="run_recon.py",
-        description="Run every recon pipeline and write a combined report to the project root.",
-    )
-    parser.add_argument("-t", "--target", help="apex domain (default: TARGET from .env)")
-    parser.add_argument("--stages", default="passive,active,permutation",
-                        help="subdomain stages to run (forwarded to the orchestrator)")
-    parser.add_argument("--skip-subdomain", action="store_true", help="skip pipeline 1")
-    parser.add_argument("--skip-ports", action="store_true", help="skip pipeline 2")
-    parser.add_argument("--skip-url", action="store_true", help="skip pipeline 3")
-    parser.add_argument("--skip-asn", action="store_true", help="skip pipeline 4 (ASN/CIDR discovery)")
-    parser.add_argument("--skip-cloud", action="store_true", help="skip pipeline 5 (cloud buckets)")
-    parser.add_argument(
-        "--until-converged", action="store_true",
-        help=(
-            "keep running rounds until the discovery frontier stops growing (or a "
-            "budget says stop); later rounds re-run only the stages a new asset can "
-            "change the answer for"
-        ),
-    )
-    parser.add_argument("--max-rounds", type=int, default=None,
-                        help="round ceiling for --until-converged (default 4)")
-    parser.add_argument("--time-budget", type=float, default=None,
-                        help="seconds allowed for the whole converged run "
-                             "(default 2700; 0 = no limit)")
-    parser.add_argument("--max-active-actions", type=int, default=None,
-                        help="cumulative active actions across all rounds (0 = unlimited)")
-    parser.add_argument("-v", "--verbose", action="store_true", help="debug logging in every stage")
-    args = parser.parse_args(argv)
+def _engage(
+    apex: str, args, stamp: str, extra_env: dict[str, str] | None = None
+) -> tuple[int, Path]:
+    """Run every selected pipeline against one apex and assemble its report.
 
-    if args.target:
-        apex = args.target.strip().lower().rstrip(".")
-    else:
-        try:
-            sys.path.insert(0, str(ROOT))
-            from service.recon_pipeline.platform.common.config import TARGET
-        except Exception as exc:  # pragma: no cover - only without .env
-            parser.error(f"-t/--target is required when TARGET is unset ({exc})")
-        apex = str(TARGET).strip().lower().rstrip(".")
-    if not apex:
-        parser.error("no target: pass -t or set TARGET in .env")
-
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ``extra_env`` carries per-engagement scope to the children (a program run's
+    ``RECON_SCOPE_JSON`` / ``PSH_SCOPE_FILE``); the classic single-target flow
+    passes nothing and behaves exactly as before.
+    """
     sub_log = ROOT / f"recon_{apex}_subdomain_{stamp}.log"
     port_log = ROOT / f"recon_{apex}_ports_{stamp}.log"
     url_log = ROOT / f"recon_{apex}_url_{stamp}.log"
@@ -1009,12 +995,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.max_active_actions is not None:
             policy.max_active_actions = max(0, args.max_active_actions)
         convergence, round_codes = _run_converged(
-            apex, first_round_jobs, stamp=stamp, verbose=args.verbose, policy=policy
+            apex, first_round_jobs, stamp=stamp, verbose=args.verbose, policy=policy,
+            extra_env=extra_env,
         )
         exit_codes.extend(round_codes)
     else:
         for _label, command, log_path in first_round_jobs:
-            exit_codes.append(_run_streamed(command, log_path))
+            exit_codes.append(_run_streamed(command, log_path, env=extra_env))
 
     report_path = assemble(
         apex, ran_subdomain=ran_subdomain, ran_ports=ran_ports, ran_url=ran_url,
@@ -1025,8 +1012,209 @@ def main(argv: list[str] | None = None) -> int:
         sdw_before=sdw_before, psh_before=psh_before, url_before=url_before,
         asn_before=asn_before, cloud_before=cloud_before,
     )
+    return (0 if all(code == 0 for code in exit_codes) else 1), report_path
+
+
+def _run_operator(args, parser, stamp: str) -> int:
+    """Engage operator-authored scope: ``-t`` + ``--scope-file`` + ``--asset``.
+
+    The same engagement loop the program path runs — per-apex scope files,
+    the snapshot channel, the combined report — with the scope authored by
+    the operator instead of scraped. Refused lines are named up front and
+    recorded, never silently dropped and never allowed to smuggle a target in.
+    """
+    sys.path.insert(0, str(ROOT))
+    from service.recon_pipeline.platform.programs import (
+        ProgramScopeError,
+        engagement_domain_conflicts,
+        operator_engagements,
+        resolve_operator_scope,
+        snapshot_json,
+        write_psh_scope_file,
+    )
+
+    try:
+        scope, refused = resolve_operator_scope(
+            scope_files=args.scope_files, assets=args.assets, target=args.target
+        )
+        engagements = operator_engagements(scope, target=args.target)
+    except ProgramScopeError as exc:
+        parser.error(f"operator scope: {exc}")  # exits 2 — nothing runs
+
+    if refused:
+        print(f"[run_recon] WARNING: {len(refused)} scope line(s) refused: {'; '.join(refused)}")
+    if scope.unsupported:
+        print(
+            f"[run_recon] {len(scope.unsupported)} declared asset(s) are not "
+            "recon-actable and are recorded as unsupported"
+        )
+
+    apex, engagement = engagements[0]
+    conflicts = engagement_domain_conflicts(engagement, apex)
+    if conflicts:
+        print(
+            f"[run_recon] WARNING: {len(conflicts)} declared domain(s) outside "
+            f"{apex} remain declared in this engagement: {', '.join(conflicts)}"
+        )
+
+    print(
+        f"[run_recon] operator scope: {len(engagement.apexes)} domain(s), "
+        f"{len(engagement.networks)} network(s), {len(engagement.addresses)} address(es)"
+    )
+
+    engagement_scope_file = ROOT / f"recon_{apex}_program_scope_{stamp}.txt"
+    write_psh_scope_file(engagement, engagement_scope_file)
+    extra_env = {
+        "RECON_SCOPE_JSON": json.dumps(snapshot_json(engagement)),
+        "PSH_SCOPE_FILE": str(engagement_scope_file),
+    }
+    code, report_path = _engage(apex, args, stamp, extra_env=extra_env)
     print(f"\n[run_recon] combined report: {report_path}")
-    return 0 if all(code == 0 for code in exit_codes) else 1
+    return code
+
+
+def _run_program(args, parser, stamp: str) -> int:
+    """Engage an ingested program: one recon run per declared domain.
+
+    The scope comes from what the scraper stored (S4's join): each engagement
+    gets its apex's slice of the program's declared scope through two channels
+    the children already read — ``PSH_SCOPE_FILE`` (the port stage's declared
+    CIDR/IP file) and ``RECON_SCOPE_JSON`` (the snapshot the standalone CLIs
+    apply over ``from_domain``). Fail-fast: an unknown handle, a program with
+    no engagable domains, or a ``--domain`` the program does not declare ends
+    the invocation before a single request is made.
+    """
+    sys.path.insert(0, str(ROOT))
+    from service.recon_pipeline.platform.programs import (
+        ProgramScopeError,
+        ProgramScopeLoader,
+        choose_apexes,
+        scope_for_apex,
+        snapshot_json,
+        write_psh_scope_file,
+    )
+
+    try:
+        scope = ProgramScopeLoader().load(args.program)
+        apexes = choose_apexes(scope, args.domain)
+    except ProgramScopeError as exc:
+        parser.error(f"program scope: {exc}")  # exits 2 — nothing runs
+
+    print(
+        f"[run_recon] program {scope.handle}: {len(apexes)} engagement(s): "
+        f"{', '.join(apexes)}"
+    )
+    if scope.unsupported:
+        print(
+            f"[run_recon] {len(scope.unsupported)} declared asset(s) are not "
+            "recon-actable and are recorded as unsupported"
+        )
+
+    worst = 0
+    for apex in apexes:
+        engagement = scope_for_apex(scope, apex)
+        scope_file = ROOT / f"recon_{apex}_program_scope_{stamp}.txt"
+        write_psh_scope_file(engagement, scope_file)
+        extra_env = {
+            "RECON_SCOPE_JSON": json.dumps(snapshot_json(engagement)),
+            "PSH_SCOPE_FILE": str(scope_file),
+        }
+        print(f"\n[run_recon] — engagement: {apex} —")
+        code, report_path = _engage(apex, args, stamp, extra_env=extra_env)
+        print(f"\n[run_recon] combined report: {report_path}")
+        worst = max(worst, code)
+    return worst
+
+
+def main(argv: list[str] | None = None) -> int:
+    _configure_console()
+    parser = argparse.ArgumentParser(
+        prog="run_recon.py",
+        description="Run every recon pipeline and write a combined report to the project root.",
+    )
+    parser.add_argument("-t", "--target", help="apex domain (default: TARGET from .env; not with --program)")
+    parser.add_argument(
+        "--program", metavar="HANDLE",
+        help=(
+            "engage an ingested program: scope comes from the scraper's tables "
+            "(one engagement per declared domain, fail-fast on unknown handles)"
+        ),
+    )
+    parser.add_argument(
+        "--domain", metavar="DOMAIN",
+        help="with --program: run a single engagement for this one declared domain",
+    )
+    parser.add_argument(
+        "--scope-file", action="append", default=[], dest="scope_files", metavar="PATH",
+        help=(
+            "operator-authored scope file (one asset per line: domain:cidr:ip:" 
+            "wildcard:value or bare; # comments). Repeatable; replaces the .env TARGET"
+        ),
+    )
+    parser.add_argument(
+        "--asset", action="append", default=[], dest="assets", metavar="ASSET",
+        help="inline declared asset, classified by the same rules (repeatable)",
+    )
+    parser.add_argument("--stages", default="passive,active,permutation",
+                        help="subdomain stages to run (forwarded to the orchestrator)")
+    parser.add_argument("--skip-subdomain", action="store_true", help="skip pipeline 1")
+    parser.add_argument("--skip-ports", action="store_true", help="skip pipeline 2")
+    parser.add_argument("--skip-url", action="store_true", help="skip pipeline 3")
+    parser.add_argument("--skip-asn", action="store_true", help="skip pipeline 4 (ASN/CIDR discovery)")
+    parser.add_argument("--skip-cloud", action="store_true", help="skip pipeline 5 (cloud buckets)")
+    parser.add_argument(
+        "--until-converged", action="store_true",
+        help=(
+            "keep running rounds until the discovery frontier stops growing (or a "
+            "budget says stop); later rounds re-run only the stages a new asset can "
+            "change the answer for"
+        ),
+    )
+    parser.add_argument("--max-rounds", type=int, default=None,
+                        help="round ceiling for --until-converged (default 4)")
+    parser.add_argument("--time-budget", type=float, default=None,
+                        help="seconds allowed for the whole converged run "
+                             "(default 2700; 0 = no limit)")
+    parser.add_argument("--max-active-actions", type=int, default=None,
+                        help="cumulative active actions across all rounds (0 = unlimited)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="debug logging in every stage")
+    args = parser.parse_args(argv)
+
+    if args.domain and not args.program:
+        parser.error("--domain belongs to --program (it selects one engagement of a program's scope)")
+    if args.program and (args.scope_files or args.assets):
+        parser.error(
+            "--program builds its scope from the database; use --scope-file/--asset instead"
+        )
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if args.scope_files or args.assets:
+        return _run_operator(args, parser, stamp)
+
+    if args.program:
+        if args.target:
+            parser.error(
+                "--program picks its own targets from the declared scope; "
+                "use --domain to limit one engagement"
+            )
+        return _run_program(args, parser, stamp)
+
+    if args.target:
+        apex = args.target.strip().lower().rstrip(".")
+    else:
+        try:
+            sys.path.insert(0, str(ROOT))
+            from service.recon_pipeline.platform.common.config import TARGET
+        except Exception as exc:  # pragma: no cover - only without .env
+            parser.error(f"-t/--target is required when TARGET is unset ({exc})")
+        apex = str(TARGET).strip().lower().rstrip(".")
+    if not apex:
+        parser.error("no target: pass -t or set TARGET in .env")
+
+    code, report_path = _engage(apex, args, stamp)
+    print(f"\n[run_recon] combined report: {report_path}")
+    return code
 
 
 if __name__ == "__main__":

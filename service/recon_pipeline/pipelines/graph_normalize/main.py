@@ -450,9 +450,15 @@ def main(argv: list[str] | None = None) -> int:
     # touching anything.
     scope = None
     if not args.no_scope:
+        from service.recon_pipeline.platform.programs import scope_from_environment
         from service.recon_pipeline.platform.scope import ScopeEngine
 
         scope = ScopeEngine.from_domain(args.target)
+        # A program run (--program via either entry point) hands its declared
+        # scope down as a snapshot; apply it so this standalone build gates on
+        # the program's scope, not just the apex (S4). The verdicts reach the
+        # state document through the node annotations, as always.
+        scope_from_environment(scope)
 
     report = run_pipeline(
         args.target,

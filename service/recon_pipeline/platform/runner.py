@@ -37,6 +37,7 @@ from .contract import RunContext
 from .convergence import ConvergenceDriver, Ledger, Round, StopPolicy, token_kind
 from .dispatch import DispatchPolicy, Dispatcher
 from .graph.ingest import GraphSink
+from .programs import ProgramScope
 from .registry import Registry
 from .scope import ScopeEngine
 
@@ -139,18 +140,35 @@ class Runner:
         env_prefix: str = "",
         output_dir: Path | None = None,
         options: dict[str, str] | None = None,
+        program_scope: "ProgramScope | None" = None,
     ) -> tuple[RunContext, list]:
         """Assemble the platform services into a RunContext.
 
         Returns ``(context, services)`` so the caller can read health from the
         services afterwards without the pipelines seeing them mutate.
+
+        With *program_scope*, the program's declared assets are applied to the
+        scope engine on top of the target domain (S4's recon half): the run's
+        declared scope is what the program says it is, not just the apex. The
+        application block lands on ``context.program`` for the report, and a
+        PSH-format scope file is written beside the run's artifacts for the
+        port stage.
         """
         from .cache import HotCache
         from .enrich import LLMEnricher
+        from .programs import apply_program_scope, write_psh_scope_file
         from .queueing import Queue
 
         services: list = []
         scope_engine = ScopeEngine.from_domain(target)
+        program_block: dict | None = None
+        if program_scope is not None:
+            application = apply_program_scope(scope_engine, program_scope)
+            program_block = application.to_dict()
+            if output_dir is not None:
+                program_block["scope_file"] = write_psh_scope_file(
+                    program_scope, output_dir / "program_scope.txt"
+                ).as_posix()
         scoring_mod = __import__("service.recon_pipeline.platform.scoring", fromlist=["score"])
         cache = HotCache()
         queue = Queue(
@@ -175,6 +193,7 @@ class Runner:
             env_prefix=env_prefix,
             options=dict(options or {}),
             output_dir=output_dir,
+            program=program_block,
         )
         return context, services
 
@@ -190,6 +209,7 @@ class Runner:
         stages: list[str] | None = None,
         options: dict[str, str] | None = None,
         convergence: StopPolicy | None = None,
+        program_scope: "ProgramScope | None" = None,
     ) -> RunResult:
         """Run the selected pipelines (default: all discovered) against *target*.
 
@@ -219,7 +239,7 @@ class Runner:
         )
 
         context, services = self.build_context(
-            target, output_dir=run_dir, options=options
+            target, output_dir=run_dir, options=options, program_scope=program_scope
         )
         scope_engine, cache, queue, enricher, graph, dispatcher = services
 
@@ -242,6 +262,8 @@ class Runner:
             )
         )
         result.summary = self._summarise(result, dispatcher, queue, cache, graph, enricher)
+        if context.program:
+            result.summary["program"] = dict(context.program)
         result.run_dir = run_dir
 
         self._write_reports(result)

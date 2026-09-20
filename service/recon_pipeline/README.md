@@ -27,10 +27,33 @@ python -m service.recon_pipeline run -t example.com      # all pipelines, in dep
 python -m service.recon_pipeline run -t example.com -p url_endpoint -s passive
 python -m service.recon_pipeline run -t example.com --until-converged
 python -m service.recon_pipeline run -t example.com --until-converged --max-rounds 6 --time-budget 3600
+python -m service.recon_pipeline run --list-programs     # what the scraper ingested
+python -m service.recon_pipeline run --program acme      # engage a program: scope from Postgres (S4)
+python -m service.recon_pipeline run --program acme --domain acme.test   # one engagement
+python -m service.recon_pipeline run --scope-file scope.txt              # operator-authored scope
+python -m service.recon_pipeline run --scope-file scope.txt --asset 203.0.113.0/24
+python -m service.recon_pipeline run --asset api.acme.test               # inline, no file
 python -m service.recon_pipeline history -n 10           # the run registry (S14)
 python -m service.recon_pipeline dlq                     # queue ops, degraded-aware
 python -m service.recon_pipeline replay                  # report journaled graph writes (schema pending)
 ```
+
+`--program HANDLE` replaces the hand-fed `-t`: the target and the declared
+scope come from what the scraper ingested (`platform/programs.py`), one
+engagement runs per declared domain, and the run fails fast — exit 2, nothing
+runs — on an unknown handle, a program with no engagable domains, or a
+`--domain` the program does not declare. Each engagement's scope travels to
+the stage processes (`PSH_SCOPE_FILE`, `RECON_SCOPE_JSON`), so every gate in
+every pipeline judges against what the program actually declared.
+
+`--scope-file`/`--asset` are the same seam without the scraper: an operator
+authors the declared scope directly (one asset per line, `#` comments,
+optional `domain:`/`cidr:`/`ip:`/`wildcard:`/`url:` prefixes — plus
+`android:`/`ios:`/`other:`/`repo:` to *refuse* a line the untyped fallback
+would otherwise guess at). The same classifier, the same refuse-never-guess
+rules, the same child-process channels as `--program`. An ambiguous file
+(multiple root domains) must be named with `-t` — it is never resolved by
+accident.
 
 Dependency order comes from each manifest's declared `consumes`, so
 `graph_normalize` — which consumes the four collector pipelines — always runs

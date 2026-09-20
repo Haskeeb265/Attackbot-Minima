@@ -659,7 +659,7 @@ def test_the_runner_executes_a_pipeline_folder_and_records_the_run(
         ]
     )
 
-    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None):
+    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None, program_scope=None):
         return RunContext(target=target, output_dir=output_dir), [_Service() for _ in range(6)]
 
     monkeypatch.setattr(runner_mod.Runner, "build_context", _stub_context)
@@ -702,7 +702,7 @@ def test_one_failing_stage_is_recorded_without_stopping_the_run(
         ]
     )
 
-    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None):
+    def _stub_context(self, target, *, env_prefix="", output_dir=None, options=None, program_scope=None):
         return RunContext(target=target, output_dir=output_dir), [_Service() for _ in range(6)]
 
     monkeypatch.setattr(runner_mod.Runner, "build_context", _stub_context)

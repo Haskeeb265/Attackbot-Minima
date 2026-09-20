@@ -603,9 +603,13 @@ def main(argv: list[str] | None = None) -> int:
     # a standalone run and a platform run gate their active stages identically.
     scope = None
     if not args.no_validate:
+        from service.recon_pipeline.platform.programs import scope_from_environment
         from service.recon_pipeline.platform.scope import ScopeEngine
 
         scope = ScopeEngine.from_domain(args.target)
+        # A program run hands its declared scope down as a snapshot; apply it so
+        # the validate stage gates on the program's scope, not just the apex (S4).
+        scope_from_environment(scope)
 
     try:
         summary = run_pipeline(
