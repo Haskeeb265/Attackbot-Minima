@@ -38,6 +38,52 @@ services:
       retries: 10
       start_period: 30s
 
+  # ------------------------------------------------------------------ #
+  # Vuln engine, Phase 1 evaluation harness
+  #
+  # Both are measuring instruments, not products: standard-library images, no
+  # pip step, nothing to drift. They exist only for
+  # tests/vuln_engine/eval/test_phase1.py and run_engine.py's default profile.
+  # ------------------------------------------------------------------ #
+  fixture_app:
+    build: ./docker/fixture_app
+    container_name: vuln_fixture_app
+    restart: unless-stopped
+    environment:
+      FIXTURE_PORT: "8080"
+    ports:
+      - "8080:8080"
+    # Docker Desktop resolves host.docker.internal for free; on Linux the host
+    # gateway has to be added explicitly, and without it a payload that asks the
+    # fixture to fetch a host-hosted URL fails in a way that looks like a target
+    # refusal. The default profile points the fixture at the collaborator's
+    # compose service name instead, which needs neither.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=2)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  oob_collaborator:
+    build: ./service/oob_collaborator
+    container_name: vuln_oob_collaborator
+    restart: unless-stopped
+    environment:
+      OOB_PORT: "9009"
+      OOB_LOG: /data/interactions.jsonl
+    ports:
+      - "9009:9009"
+    volumes:
+      - oob_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:9009/healthz',timeout=2)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   postgres_data:
   neo4j_data:
+  oob_data:

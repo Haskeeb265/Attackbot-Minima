@@ -1,1 +1,24 @@
+# Dependencies.
+#
+# Pre-existing note (unchanged): the recon stage's own dependencies were
+# installed out of band, so this file was a comment rather than a manifest.
+#
+# --- vuln engine, Phase 1 --------------------------------------------------
+# Declared here because the engine's verification path depends on them, and
+# nothing said so until Phase 1 item 0.4 of docs/vuln_engine_docs/phase1_checklist.md.
+#
+# httpx       transports/http1.py. Already installed and already the recon
+#             platform's client idiom (pipelines/url_endpoint/validate.py).
+# playwright  D1 — the browser Effect. CDP-level events (script execution,
+#             dialogs) are the Phase 1 evidence bar. Requires a browser
+#             download: `python -m playwright install chromium`.
+#             transports/browser.py degrades to the system-Chrome CDP driver
+#             and reports `available: false` with a reason when it is absent.
+httpx
+playwright
+
+# --- tests / typing --------------------------------------------------------
+pytest
+mypy
+
 #pip install "psycopg[binary]" psycopg_pool sqlalchemy alembic --break-system-packages
