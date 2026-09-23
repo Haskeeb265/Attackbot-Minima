@@ -66,6 +66,27 @@ services:
       timeout: 3s
       retries: 10
 
+  # ------------------------------------------------------------------ #
+  # The breadth test: a real vulnerable app we did not plant bugs in.
+  # Juice Shop is an Angular SPA — the server answers with the same
+  # index.html for everything and reflects only client-side, so the
+  # server-echo lens is expected to produce an honest zero. That is the
+  # measurement, not a failure: the gap it documents (DOM-side
+  # observation) is a requirement for a future technique.
+  # ------------------------------------------------------------------ #
+  juice_shop:
+    image: bkimminich/juice-shop
+    container_name: vuln_juice_shop
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
   oob_collaborator:
     build: ./service/oob_collaborator
     container_name: vuln_oob_collaborator

@@ -181,6 +181,46 @@ clean, Phase 1's 12 e2e criteria still passing untouched.
 
 ---
 
+## The first real target: Juice Shop (2026-09-24) — an honest zero, and two bugs caught
+
+The breadth test ran against **OWASP Juice Shop 20.2.0** in compose — the first
+target with bugs we did not plant. Outcome: **0 findings, and that is the
+measurement, not a failure.** What the run actually established:
+
+- **The pipeline worked end-to-end on a non-fixture target**: surfaces declared,
+  arms picked by UCB, requests gated and sent, responses observed, receipts
+  filed, campaign stopped early when no unsettled arm remained. 280 tests still
+  green.
+- **Both declared search surfaces settled `none` on real evidence.**
+  `/api/Products?q=` returns JSON (no HTML echo to place a reflection in), and
+  the SPA's `#/search` param is rendered client-side — the server never echoes.
+- **The SPA gap is now measured, not assumed.** Juice Shop's search XSS lives in
+  client-side rendering; a server-echo lens cannot see it by construction.
+  DOM-side observation is a requirement for a future technique (and why DVWA —
+  server-rendered — is the right next target).
+- **A promising reflection was chased to a no.** The SPA fallback's 404 page
+  echoes the request path into its HTML `<title>` — but only *entity-encoded*
+  (`"` → `&quot;`, `<` → `&lt;`), so no markup survives. The engine refusing to
+  call that a finding is the false-positive control doing its job.
+
+### Two real bugs the run caught in the CLI (both fixed)
+
+1. **`parse_surface` had lost its `def` line** — its body sat unreachable inside
+   `campaign_run` after a `return`, so `--target` would have raised `NameError`
+   on the first real engagement. Only ever exercised by the fixture profile
+   before, which never parses surfaces — a live demonstration of why the fixture
+   alone is not field value.
+2. **A dotted-quad target was routed to `add_declared_domain`** — `127.0.0.1`
+   authorized as a *name* that never answers while the address itself was
+   refused ("scope: not globally routable"), because `check_address` rejects
+   non-routable space before consulting declared *networks*. IP literals now
+   land in `declared_addresses`, the same mechanism the fixture profile uses.
+
+Both are exactly the class of bug the breadth test exists to surface: code that
+only the fixture path had ever run.
+
+---
+
 ## The honest assessment: how far from finding real bugs
 
 **The instrument is built and calibrated; it has not yet been used.** Every
@@ -198,12 +238,12 @@ Two-and-a-half vuln classes is a narrow lens.
 
 ## Suggested next steps (in order)
 
-1. **Breadth test against a real vulnerable app (recommended next).** Put
-   DVWA or Juice Shop in compose, declare its surfaces, and see whether the
-   engine finds things *we didn't plant*. First genuine signal; ~1 hour to
-   wire. Expect gaps — every gap found is a requirement, not a failure.
-2. **Wire the campaign into the CLI** — `run_engine.py --campaign` exposing
-   Phase 2's runner (currently in-process only).
+1. **Second breadth target: DVWA (recommended next).** Server-rendered PHP maps
+   directly onto the current lens: `xss_r` → execution-class, `sqli_blind` →
+   differential-class. Needs the small session shim (cookies for http + browser
+   contexts) — designed, not built.
+2. ~~Wire the campaign into the CLI~~ **Done (2026-09-24)** — `run_engine.py
+   --campaign ROUNDS`.
 3. **Second browser-context technique** (e.g. stored XSS or DOM injection)
    to exercise the tree's AND edges for real.
 4. ~~Phase 3 — LLM junctions~~ **Done (2026-09-24)** — see the Phase 3 section

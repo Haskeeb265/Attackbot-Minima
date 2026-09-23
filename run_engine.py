@@ -153,10 +153,21 @@ def target_profile(
 ) -> Profile:
     """An engagement against a declared target, with operator-declared surfaces."""
     scope = ScopeEngine()
-    scope.add_declared_domain(target)
+    if target.count(".") == 3 and not target.replace(".", "").isdigit():
+        # A dotted-quad target is an address, not a domain: routing it to
+        # ``add_declared_domain`` would authorize a name that never answers and
+        # leave the address itself refused (``check_address`` rejects
+        # non-routable space before consulting declared *networks*, so an IP
+        # literal must land in ``declared_addresses`` — exactly what the fixture
+        # profile does for the same reason).
+        scope.add_declared_address(target)
+    else:
+        scope.add_declared_domain(target)
     for token in declared:
-        if "/" in token or token.count(".") == 3:
+        if "/" in token:
             scope.add_declared_network(token)
+        elif token.count(".") == 3 and token.replace(".", "").isdigit():
+            scope.add_declared_address(token)
         else:
             scope.add_declared_domain(token)
     return Profile(
@@ -250,6 +261,9 @@ def campaign_run(
         advisory=advisory,
     )
     return campaign.run(Budget(rounds=rounds))
+
+
+def parse_surface(token: str) -> Surface:
     """``url=<url>;param=<name>;capability=<name>`` → a Surface.
 
     Semicolon-separated rather than colon-separated because a URL contains colons
