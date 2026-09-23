@@ -32,6 +32,11 @@ from ..kernel.exchange import RawBrowserRun, RawHttpExchange, RawOobFetch
 from ..kernel.observation import (
     CONTEXT_COMMENT,
     CONTEXT_CSS,
+    CONTEXT_DOM_ABSENT,
+    CONTEXT_DOM_ATTRIBUTE,
+    CONTEXT_DOM_TEXT,
+    CONTEXT_DOM_UNKNOWN,
+    CONTEXT_DOM_URL_ATTRIBUTE,
     CONTEXT_DOUBLE_QUOTED_ATTRIBUTE,
     CONTEXT_IN_TAG,
     CONTEXT_JS_CODE,
@@ -42,11 +47,21 @@ from ..kernel.observation import (
     CONTEXT_UNQUOTED_ATTRIBUTE,
     OBS_BROWSER,
     OBS_DIALOG,
+    OBS_DOM_PLACEMENT,
     OBS_HTTP_RESPONSE,
     OBS_OOB_INTERACTION,
     OBS_REFLECTION,
     OBS_SCRIPT_EXECUTION,
     Observation,
+)
+from ..techniques.common import (
+    DOM_MARKER_PREFIX,
+    DOM_Q_ATTR,
+    DOM_Q_HTML,
+    DOM_Q_PRESENT,
+    DOM_Q_SCRIPT,
+    DOM_Q_TEXT,
+    DOM_Q_URLATTR,
 )
 
 #: Per-character entity maps: what an escaped character looks like.  Two tables
@@ -395,6 +410,86 @@ def http_observations(
     return observations
 
 
+def _dom_placement_question_table() -> dict[str, str]:
+    """The placement-producing question -> context mapping, as data.
+
+    The technique grammar and this reader share the question names (via
+    ``techniques.common``); this table is the reader's half, exposed so the
+    invariant test can prove the two sides never drift apart. It holds every
+    question *except* ``present`` — which is the gate question, not a
+    placement (see :func:`_dom_placement_observations`).
+    """
+    return {
+        DOM_Q_TEXT: CONTEXT_DOM_TEXT,
+        DOM_Q_ATTR: CONTEXT_DOM_ATTRIBUTE,
+        DOM_Q_URLATTR: CONTEXT_DOM_URL_ATTRIBUTE,
+        DOM_Q_HTML: CONTEXT_RAW_HTML,
+        DOM_Q_SCRIPT: CONTEXT_JS_CODE,
+    }
+
+
+def _dom_placement_observations(
+    run: RawBrowserRun, *, probe: str, at: float
+) -> list[Observation]:
+    """The ``dom:``-prefixed marker answers, as placement observations.
+
+    A placement marker is named ``dom:<mark>:<question>`` and is a **boolean
+    predicate** — the transport's marker channel coerces every answer to bool,
+    so a placement is established by *which* questions answered true, never by
+    a string the channel would have flattened. The technique's JS asks each
+    question independently ("is the canary in a text node?", "in a URL-parsed
+    attribute value?", ...) and the mapping below turns each true answer into
+    one row. A page can legitimately answer more than one (text *and* markup
+    sibling nodes); the rows record what was seen, and the technique's
+    interpreter — not this mapping — decides which row a candidate rests on.
+
+    The mapping is total and honest by construction: a ``dom:`` marker the
+    grammar never named becomes a ``dom_unknown`` row rather than a context the
+    technique invented, a question the page answered *false* produces no row,
+    and a true ``present`` with no placement beside it becomes a single
+    ``dom_absent`` row — the value landed and the DOM parsed it nowhere live:
+    a recorded negative, not a silence.
+
+    This module reads the question names from ``techniques.common`` — the one
+    shared spelling — so a renamed question is a breaking change to both sides,
+    pinned by the invariant test, rather than a silent disagreement.
+    """
+    contexts = _dom_placement_question_table()
+    rows: list[Observation] = []
+    present = False
+    for marker in sorted(run.markers):
+        if not marker.startswith(DOM_MARKER_PREFIX):
+            continue
+        question = marker.rsplit(":", 1)[-1]
+        if not bool(run.markers[marker]):
+            continue
+        if question == DOM_Q_PRESENT:
+            # The gate question: answered true, it says the value reached the
+            # page — but *where* is what the placement questions say. It never
+            # produces a row by itself; its one product is the dom_absent row
+            # below, when it is true and no placement followed.
+            present = True
+            continue
+        rows.append(
+            Observation(
+                kind=OBS_DOM_PLACEMENT,
+                probe=probe,
+                at=at,
+                payload={"context": contexts.get(question, CONTEXT_DOM_UNKNOWN), "question": question},
+            )
+        )
+    if present and not rows:
+        rows.append(
+            Observation(
+                kind=OBS_DOM_PLACEMENT,
+                probe=probe,
+                at=at,
+                payload={"context": CONTEXT_DOM_ABSENT, "question": DOM_Q_PRESENT},
+            )
+        )
+    return rows
+
+
 def browser_observations(run: RawBrowserRun, *, probe: str = "", at: float = 0.0) -> list[Observation]:
     """Parse one browser run into typed observations.
 
@@ -421,6 +516,12 @@ def browser_observations(run: RawBrowserRun, *, probe: str = "", at: float = 0.0
         )
     ]
     for marker, answer in sorted(run.markers.items()):
+        if marker.startswith(DOM_MARKER_PREFIX):
+            # A placement answer is not an execution fact: it becomes a
+            # ``dom_placement`` row below, never a ``script_execution`` row —
+            # otherwise a canary merely *landing* somewhere would be counted
+            # by the driver as "the script ran".
+            continue
         observations.append(
             Observation(
                 kind=OBS_SCRIPT_EXECUTION,
@@ -438,6 +539,7 @@ def browser_observations(run: RawBrowserRun, *, probe: str = "", at: float = 0.0
                 payload={"dialog": kind, "message": message},
             )
         )
+    observations.extend(_dom_placement_observations(run, probe=probe, at=at))
     return observations
 
 

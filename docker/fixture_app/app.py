@@ -31,6 +31,15 @@ Two vulnerabilities, one per Phase 1 technique, and one per Phase 2's:
     the verifier requires. The sleep is capped so a hostile value cannot pin a
     worker.
 
+``GET /dom?q=``
+    Phase 4's client-render fixture: the server reflects *nothing* (the wire
+    lens must honestly see no reflection here) — the page's own JavaScript
+    reads ``q`` from ``location.search`` and writes it into ``innerHTML`` after
+    load. This is the SPA-shaped vulnerability the Juice Shop breadth test
+    measured our lens blind to: the payload exists only in the DOM, so only the
+    DOM placement lens (``techniques/xss_dom``) can propose, and only a browser
+    run can confirm, a finding here.
+
 The app is only ever reachable from the compose network and the host. It is
 scoped like any other target — see ``tests/vuln_engine/eval/test_phase1.py`` and
 the note in ``docs/vuln_engine_docs/phase1_checklist.md`` item 12: the fixture is
@@ -60,6 +69,25 @@ SLEEP_CEILING = 5.0
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("fixture_app")
+
+#: The client-render page for ``/dom``: the server's bytes never contain the
+#: parameter, and the page's script writes the raw parameter into innerHTML —
+#: a sink, the way an SPA's search result container is.
+DOM_PAGE = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture DOM</title></head>
+<body>
+  <h1>Client-rendered search</h1>
+  <div id="result"></div>
+  <script>
+    (function () {
+      var q = new URLSearchParams(location.search).get("q") || "";
+      document.getElementById("result").innerHTML = q;
+    })();
+  </script>
+</body>
+</html>
+"""
 
 #: The search page.  ``{q}`` is substituted with the raw parameter — this is the
 #: whole vulnerability, and it is one line so nobody has to go looking for it.
@@ -98,6 +126,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
             return
         if parts.path == "/delay":
             self._delay(params)
+            return
+        if parts.path == "/dom":
+            self._dom()
             return
         self._send(404, b"not found", "text/plain; charset=utf-8")
 
@@ -145,6 +176,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
             _time.sleep(min(SLEEP_SECONDS, SLEEP_CEILING))
         log.info("delay q=%r", value[:64])
         self._send(200, b"delayed-or-not", "text/plain; charset=utf-8")
+
+    def _dom(self) -> None:
+        """Serve the client-render page: identical bytes for every ``q``.
+
+        The server response is deliberately parameter-independent — the whole
+        point of the endpoint is that the reflection the wire lens looks for
+        does not exist. The vulnerability lives entirely in the page's
+        client-side code, the way an SPA's does. The script runs on load, so a
+        browser probe that waits for settle sees the rendered DOM.
+        """
+        log.info("dom page (parameter-independent response)")
+        self._send(200, DOM_PAGE.encode("utf-8"), "text/html; charset=utf-8")
 
     def _send(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)

@@ -53,6 +53,43 @@ def test_techniques_are_pure_at_the_boundary() -> None:
     )
 
 
+def test_the_dom_marker_vocabulary_is_shared_by_producer_and_reader() -> None:
+    """The placement lens's one spelling, pinned on both sides.
+
+    The technique grammar writes ``dom:<mark>:<question>`` markers; the
+    observation layer maps the true ones to context rows. A question renamed on
+    one side only would silently unmap — placements would vanish from the log
+    and every DOM candidate with them. The pin: the question constants must be
+    the very strings both modules read, and the mapping table must name every
+    question the grammar can emit (unknown ones may degrade to ``dom_unknown``,
+    but a *renamed* known question must fail loudly here).
+    """
+    from service.vuln_engine.techniques import common
+    from service.vuln_engine.world import observe
+
+    questions = {
+        common.DOM_Q_PRESENT,
+        common.DOM_Q_TEXT,
+        common.DOM_Q_ATTR,
+        common.DOM_Q_URLATTR,
+        common.DOM_Q_HTML,
+        common.DOM_Q_SCRIPT,
+    }
+    # The reader's mapping table covers every question except ``present`` —
+    # the gate question, which produces no placement of its own (a true
+    # ``present`` with no placement becomes the dom_absent row instead). A
+    # question missing from the table would silently degrade to dom_unknown;
+    # a renamed one must fail loudly here.
+    table_questions = set(observe._dom_placement_question_table())
+    assert table_questions == questions - {common.DOM_Q_PRESENT}, (
+        "the DOM question vocabulary drifted between techniques/common.py and "
+        f"world/observe.py: grammar={sorted(questions)} reader={sorted(table_questions)}"
+    )
+    assert common.DOM_Q_PRESENT not in table_questions
+    # The prefix spelling is one constant, not a literal on both sides.
+    assert observe.DOM_MARKER_PREFIX == common.DOM_MARKER_PREFIX == "dom:"
+
+
 def test_only_policy_imports_a_transport() -> None:
     offenders: list[str] = []
     for path in _python_files(ENGINE):

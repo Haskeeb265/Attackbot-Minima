@@ -33,7 +33,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..kernel.evidence import FINDING_GRADES
-from ..kernel.observation import OBS_REFLECTION, OBS_SCRIPT_EXECUTION, Observation
+from ..kernel.observation import (
+    CONTEXT_DOM_ABSENT,
+    CONTEXT_DOM_UNKNOWN,
+    OBS_DOM_PLACEMENT,
+    OBS_REFLECTION,
+    OBS_SCRIPT_EXECUTION,
+    Observation,
+)
 from ..kernel.technique import (
     KIND_BROWSER,
     KIND_HTTP,
@@ -72,9 +79,11 @@ OUTCOME_FAILED = "failed"
 #: A probe the gate refused.  Not recorded as an attempt at all: nothing was
 #: learned about the target, and recording it would be the receipt inventing
 #: knowledge — the same mistake as treating an error as an answer.
-OUTCOME_REFUSED = "refused"
-#: A probe the driver never ran because its declared context was not observed.
+OUTCOME_REFUSED = "refused"#: A probe the driver never ran because its declared context was not observed.
 OUTCOME_GATED = "gated"
+
+#: Contexts that describe the *lens*, not a placement — collected by no gate.
+_LENS_CONTEXTS = (CONTEXT_DOM_ABSENT, CONTEXT_DOM_UNKNOWN)
 
 
 @dataclass
@@ -93,10 +102,21 @@ class ProbeRun:
 
     @property
     def contexts(self) -> set[str]:
+        """The contexts this probe established, from either instrument.
+
+        A byte-level reflection names its context (the wire lens); a DOM
+        placement names its context (the browser lens). Both feed the same
+        ``requires_context`` gate, because the gate's question — "has this
+        context been *observed* here?" — does not care which instrument saw
+        it. ``dom_absent``/``dom_unknown`` never enter: they are answers about
+        the lens, not placements.
+        """
         return {
             item.context
             for item in self.observations
-            if item.context and item.kind == OBS_REFLECTION
+            if item.context
+            and item.kind in (OBS_REFLECTION, OBS_DOM_PLACEMENT)
+            and item.context not in _LENS_CONTEXTS
         }
 
 

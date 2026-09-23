@@ -164,7 +164,11 @@ def test_the_log_is_append_only_jsonl_that_reads_back(report: run_engine.RunRepo
 def test_the_gate_audit_is_clean(report: run_engine.RunReport) -> None:
     assert report.gate["out_of_scope_requests"] == 0
     assert report.gate["uncleared_effects"] == 0
-    assert report.gate["by_verb"] == {"ALLOW": 3}
+    # Phase 1's three effects (xss canary, verifier browser, oob fetch) plus
+    # xss_dom's two (its canary and the placement browser run the fixture's
+    # reflected context entitles it to; its interpreter then dedupes the
+    # candidate away — the wire lens found it first).
+    assert report.gate["by_verb"] == {"ALLOW": 5}
     # Two target requests and one browser confirmation, plus the collaborator's own
     # allocation and read, which are internal by design and logged as such.
     assert report.gate["internal_effects"] == 2
@@ -211,6 +215,8 @@ def test_a_second_run_does_not_pay_for_what_it_already_proved(harness, tmp_path:
     first = run_engine.run(run_engine.fixture_profile(), output_dir=output)
     second = run_engine.run(run_engine.fixture_profile(), output_dir=output)
     assert first.counts["findings"] == 2
-    assert second.counts["skipped_conclusive"] == 2
+    # Three settled arms: Phase 1's two, plus xss_dom's settled ``none``
+    # (its dedupe rule leaves the wire-lens finding as the only claimant).
+    assert second.counts["skipped_conclusive"] == 3
     assert second.counts["probes_run"] == 0
     assert second.findings == []

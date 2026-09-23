@@ -302,7 +302,15 @@ def build_gate(made_dispatcher, fake_http, fake_browser, fake_collaborator, cloc
 
 @pytest.fixture
 def build_engine(build_gate, fixture_seed, clock):
-    """Factory for a full Engine over the fakes."""
+    """Factory for a full Engine over the fakes.
+
+    ``registry`` defaults to the full live discovery — the same techniques a
+    real run would load — so the driver/campaign tests exercise the genuine
+    registry contents. Mechanics tests that pin exact probe counts pass an
+    explicit registry (``TechniqueRegistry`` over one known folder) so their
+    assertions describe the pipeline, not the current technique catalog; the
+    catalog itself is pinned by ``test_registry.py``.
+    """
 
     def build(
         *,
@@ -310,12 +318,14 @@ def build_engine(build_gate, fixture_seed, clock):
         seed: EngagementSeed | None = None,
         receipt=None,
         force: bool = False,
+        registry=None,
         log: WorldLog | None = None,
     ) -> Engine:
         resolved_gate = gate or build_gate(log=log)
         return Engine(
             seed or fixture_seed,
             gate=resolved_gate,
+            registry=registry,
             log=resolved_gate.log,
             receipt=receipt,
             clock=clock,

@@ -77,8 +77,13 @@ def fake_package(tmp_path: Path, monkeypatch):
 
 def test_the_real_technique_folders_are_discovered() -> None:
     registry = TechniqueRegistry.discover()
-    # Phase 2 adds the timing technique; alphabetical discovery order.
-    assert registry.names() == ["oob_fetch", "sqli_blind_time", "xss_reflected"]
+    # Phase 4 adds the DOM-lens technique; alphabetical discovery order.
+    assert registry.names() == [
+        "oob_fetch",
+        "sqli_blind_time",
+        "xss_dom",
+        "xss_reflected",
+    ]
     assert registry.problems == []
 
 
@@ -90,7 +95,9 @@ def test_the_manifest_table_is_what_a_report_embeds() -> None:
 
 
 def test_a_lookup_of_an_unknown_technique_says_what_is_known() -> None:
-    with pytest.raises(KeyError, match="known: oob_fetch, sqli_blind_time, xss_reflected"):
+    with pytest.raises(
+        KeyError, match="known: oob_fetch, sqli_blind_time, xss_dom, xss_reflected"
+    ):
         TechniqueRegistry.discover().get("ssti")
 
 

@@ -34,6 +34,20 @@ from service.vuln_engine.world import views
 from tests.vuln_engine.conftest import FakeHttpEffect
 
 
+def _phase1_registry() -> TechniqueRegistry:
+    """The Phase 1 techniques only, for tests that pin exact probe counts.
+
+    These tests are about *pipeline mechanics* — cost order, gating, receipts —
+    and their counts describe the pipeline over a known technique set. The
+    technique catalog itself is pinned by ``test_registry.py``; pinning it here
+    too would make every new technique edit three unrelated assertions.
+    """
+    full = TechniqueRegistry.discover()
+    return TechniqueRegistry(
+        [reg for reg in full.all() if reg.name in ("xss_reflected", "oob_fetch")]
+    )
+
+
 # --------------------------------------------------------------------------- #
 # the whole run
 # --------------------------------------------------------------------------- #
@@ -63,7 +77,7 @@ def test_the_report_line_names_the_class_and_the_repro_url(build_engine) -> None
 
 
 def test_the_audit_shows_no_effect_without_a_clearance(build_engine) -> None:
-    report = build_engine().run()
+    report = build_engine(registry=_phase1_registry()).run()
     assert report.gate["uncleared_effects"] == 0
     assert report.gate["out_of_scope_requests"] == 0
     assert report.gate["by_verb"] == {"ALLOW": 3}
@@ -72,13 +86,13 @@ def test_the_audit_shows_no_effect_without_a_clearance(build_engine) -> None:
 def test_the_driver_never_runs_a_confirmation_probe(build_engine, fake_browser) -> None:
     # Four browser probes are emitted by the technique as *grammar*; one browser run
     # happens, and it belongs to the verifier.
-    report = build_engine().run()
+    report = build_engine(registry=_phase1_registry()).run()
     assert report.counts["probes_for_verifier"] == 4
     assert len(fake_browser.runs) == 1
 
 
 def test_the_cheap_probe_runs_before_the_expensive_one(build_engine, fake_http, fake_browser) -> None:
-    report = build_engine().run()
+    report = build_engine(registry=_phase1_registry()).run()
     # The canary is a request with no browser; the browser only happens after a
     # context was measured, and it happens once.
     assert any("ab1c2d3" in url for url in fake_http.calls)
@@ -87,7 +101,7 @@ def test_the_cheap_probe_runs_before_the_expensive_one(build_engine, fake_http, 
 
 
 def test_the_run_records_receipts_by_arm(build_engine) -> None:
-    report = build_engine().run()
+    report = build_engine(registry=_phase1_registry()).run()
     assert set(report.receipts) == {
         "oob_fetch@http://127.0.0.1:8080/fetch#url",
         "xss_reflected@http://127.0.0.1:8080/search#q",
@@ -206,10 +220,11 @@ def test_the_gating_reason_names_what_was_observed_instead(build_gate, clock, fi
 def test_a_conclusive_attempt_is_not_paid_for_twice(build_gate, build_engine, fake_http) -> None:
     gate = build_gate()
     receipt = Receipt()
-    first = build_engine(gate=gate, receipt=receipt).run()
+    registry = _phase1_registry()
+    first = build_engine(gate=gate, receipt=receipt, registry=registry).run()
     calls_after_first = list(fake_http.calls)
 
-    second = build_engine(gate=gate, receipt=receipt).run()
+    second = build_engine(gate=gate, receipt=receipt, registry=registry).run()
     assert first.counts["findings"] == 2
     assert second.counts["skipped_conclusive"] == 2
     assert fake_http.calls == calls_after_first
@@ -225,7 +240,8 @@ def test_a_failed_probe_is_inconclusive_and_tried_again(build_gate, build_engine
 
     gate = build_gate(http=FakeHttpEffect(respond=failing))
     receipt = Receipt()
-    first = build_engine(gate=gate, receipt=receipt).run()
+    registry = _phase1_registry()
+    first = build_engine(gate=gate, receipt=receipt, registry=registry).run()
 
     assert first.counts["probes_failed"] == 2
     assert first.counts["findings"] == 0
@@ -235,7 +251,7 @@ def test_a_failed_probe_is_inconclusive_and_tried_again(build_gate, build_engine
     assert receipt.attempted("xss_reflected@http://127.0.0.1:8080/search#q", "xss_reflected") is False
 
     # A second run therefore probes again rather than skipping.
-    second = build_engine(gate=gate, receipt=receipt).run()
+    second = build_engine(gate=gate, receipt=receipt, registry=registry).run()
     assert second.counts["skipped_conclusive"] == 0
     assert second.counts["probes_failed"] == 2
 
@@ -257,8 +273,9 @@ def test_a_report_describes_its_own_run_not_the_whole_ledger(build_gate, build_e
 
     gate = build_gate(log=WorldLog(tmp_path / "world.jsonl"))
     receipt = Receipt()
-    first = build_engine(gate=gate, receipt=receipt).run()
-    second = build_engine(gate=gate, receipt=receipt).run()
+    registry = _phase1_registry()
+    first = build_engine(gate=gate, receipt=receipt, registry=registry).run()
+    second = build_engine(gate=gate, receipt=receipt, registry=registry).run()
     assert len(first.findings) == 2
     assert second.counts["skipped_conclusive"] == 2  # it did no work, only read the ledger
     assert len(second.findings) == 0
@@ -281,7 +298,7 @@ def test_a_gate_refusal_is_not_recorded_as_an_attempt(build_gate, build_engine) 
         escalation=escalation.EscalationPolicy(),
     )
     gate = build_gate(dispatcher=empty)
-    report = build_engine(gate=gate).run()
+    report = build_engine(gate=gate, registry=_phase1_registry()).run()
     assert report.counts["probes_run"] == 0
     assert report.counts["probes_refused"] == 2
     assert report.gate["out_of_scope_requests"] == 1

@@ -39,6 +39,10 @@ OBS_SCRIPT_EXECUTION = "observation.script_execution"
 OBS_DIALOG = "observation.dialog"
 #: Our collaborator saw an inbound interaction.
 OBS_OOB_INTERACTION = "observation.oob"
+#: The browser placed our value into the page's DOM — placement, not execution.
+#: Payload: context, container_tag, attribute (when in an attribute value),
+#: sink (when the placement came from a known sink expression).
+OBS_DOM_PLACEMENT = "observation.dom_placement"
 
 OBSERVATION_KINDS: tuple[str, ...] = (
     OBS_HTTP_RESPONSE,
@@ -47,6 +51,7 @@ OBSERVATION_KINDS: tuple[str, ...] = (
     OBS_SCRIPT_EXECUTION,
     OBS_DIALOG,
     OBS_OOB_INTERACTION,
+    OBS_DOM_PLACEMENT,
 )
 
 # --------------------------------------------------------------------------- #
@@ -69,6 +74,41 @@ CONTEXT_COMMENT = "comment"
 #: Reflected, but the parse could not place it (a broken document, an encoding
 #: we do not walk).  Honest, and distinct from "not reflected".
 CONTEXT_UNKNOWN = "unknown"
+#: The value sits in a DOM attribute value where *any* value the page re-parses
+#: as a URL (``src``, ``href``, …) turns ``javascript:`` into execution. A byte-
+#: level reflection cannot have this shape (a URL scheme needs no breakout), so
+#: it is a DOM-only context — and executable, for the same reason the attribute
+#: breakouts are.
+CONTEXT_DOM_URL_ATTRIBUTE = "dom_url_attribute"
+#: The value sits in some attribute value the lens could not classify as URL-
+#: parsed. Serialization re-quotes attributes, so the DOM lens cannot tell a
+#: double- from a single-quoted context — and without the quoting, a breakout
+#: payload would be guesswork. A lead, never an auto-executable placement.
+CONTEXT_DOM_ATTRIBUTE = "dom_attribute"
+#: The value reached the page's DOM as *text* — it landed, but escaped or
+#: text-node'd, where markup cannot be parsed. A lead-shaped fact (like a
+#: reflected comment), never "safe": which sink produced it is what a memory
+#: layer generalises over.
+CONTEXT_DOM_TEXT = "dom_text"
+#: Our value did not reach the page's DOM at all. A *fact* the run records with
+#: its reason (encoded away, dropped by the framework, or our instrument could
+#: not tell) — never a silent "safe".
+CONTEXT_DOM_ABSENT = "dom_absent"
+#: The DOM questions could not be answered (the page never settled, the marker
+#: expression itself failed). Honest ignorance, distinct from "absent": absent
+#: means the instrument looked and the value was not there; unknown means the
+#: instrument could not look.
+CONTEXT_DOM_UNKNOWN = "dom_unknown"
+
+DOM_ONLY_CONTEXTS: frozenset[str] = frozenset(
+    {
+        CONTEXT_DOM_TEXT,
+        CONTEXT_DOM_ATTRIBUTE,
+        CONTEXT_DOM_URL_ATTRIBUTE,
+        CONTEXT_DOM_ABSENT,
+        CONTEXT_DOM_UNKNOWN,
+    }
+)
 
 REFLECTION_CONTEXTS: tuple[str, ...] = (
     CONTEXT_DOUBLE_QUOTED_ATTRIBUTE,
@@ -87,6 +127,10 @@ REFLECTION_CONTEXTS: tuple[str, ...] = (
 #: here (not in the technique) because two techniques and the verifier all need
 #: the same answer, and a technique that disagreed with the verifier about what
 #: "executable" means would be a bug with no test that could catch it.
+#: Deliberately absent: ``dom_url_attribute`` — a ``javascript:`` value in a
+#: page-parsed URL attribute executes only *on user interaction*, which the
+#: verifier does not simulate, so a payload family for it does not exist yet and
+#: the context cannot honestly sit in the auto-executable set.
 SCRIPT_EXECUTABLE_CONTEXTS: frozenset[str] = frozenset(
     {
         CONTEXT_DOUBLE_QUOTED_ATTRIBUTE,
@@ -181,6 +225,11 @@ class Observation:
 __all__ = [
     "CONTEXT_COMMENT",
     "CONTEXT_CSS",
+    "CONTEXT_DOM_ABSENT",
+    "CONTEXT_DOM_ATTRIBUTE",
+    "CONTEXT_DOM_TEXT",
+    "CONTEXT_DOM_UNKNOWN",
+    "CONTEXT_DOM_URL_ATTRIBUTE",
     "CONTEXT_DOUBLE_QUOTED_ATTRIBUTE",
     "CONTEXT_IN_TAG",
     "CONTEXT_JS_CODE",
@@ -194,6 +243,7 @@ __all__ = [
     "OBSERVATION_KINDS",
     "OBS_BROWSER",
     "OBS_DIALOG",
+    "OBS_DOM_PLACEMENT",
     "OBS_HTTP_RESPONSE",
     "OBS_OOB_INTERACTION",
     "OBS_REFLECTION",

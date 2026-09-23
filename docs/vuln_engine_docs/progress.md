@@ -18,10 +18,10 @@ this document is the evidence.
 
 | Metric | Value |
 |---|---|
-| Tests | **280 passed** (`pytest tests/vuln_engine/`), mypy clean (53 files) |
+| Tests | **300 passed** (`pytest tests/vuln_engine/`), mypy clean (58 files) |
 | Live e2e | **12/12** Phase 1 exit criteria against the compose fixture |
 | Live campaign | 3 rounds → **3 findings, one per evidence class** |
-| Techniques | 3 (`xss_reflected`, `oob_fetch`, `sqli_blind_time`) |
+| Techniques | 4 (`xss_reflected`, `oob_fetch`, `sqli_blind_time`, `xss_dom`) |
 | Verifiers | 3 (`execution`, `oob`, `differential`) |
 | LLM junctions | **3** (rank, synthesize, write) — advisory, typed, logged, keyless-degradable; no key needed for any test |
 
@@ -218,6 +218,55 @@ measurement, not a failure.** What the run actually established:
 
 Both are exactly the class of bug the breadth test exists to surface: code that
 only the fixture path had ever run.
+
+---
+
+## Phase 4 begins: the DOM lens (`xss_dom`) — the first finding the wire lens cannot see ✅
+
+The Juice Shop gap, answered. Full design record in
+[`xss_dom_sketch.md`](./xss_dom_sketch.md); what actually happened:
+
+- **Kernel**: `observation.dom_placement` joined the observation kinds, with a
+  DOM-only context family (`dom_text`, `dom_attribute`, `dom_url_attribute`,
+  `dom_absent`, `dom_unknown`) beside the reflection contexts. Placement rows
+  share the reflection vocabulary so every downstream consumer — verifier,
+  scheduler, one-day memory — reads one set of words.
+- **The instrument**: the placement probe is a browser run whose markers are
+  boolean DOM predicates (presence, text node, URL-parsed attribute, **markup —
+  a custom element that exists only if the page parsed our bytes**, script
+  state). The observation layer maps true answers to placement rows; a `dom:`
+  marker is never an execution row, so a landed canary cannot masquerade as a
+  finding. A true `present` with no placement becomes a `dom_absent` recorded
+  negative.
+- **The technique** (`techniques/xss_dom/`): canary (does the value survive to
+  the client at all) → placement (where does the page put it) → payloads (only
+  where a placement established an executable context, reusing the sibling
+  grammar's marker/dialog arithmetic). `dom_url_attribute` placements are leads
+  by construction — a `javascript:` URL needs a user interaction no verifier
+  here simulates. Dedupe: a surface where the wire lens already found an
+  executable reflection is the same attack path, and the DOM technique claims
+  nothing there.
+- **Live**: against a new `/dom` fixture endpoint (client-rendered innerHTML
+  sink, server bytes parameter-independent), the campaign spent round 0 on the
+  wire lens (`none`, honestly), then round 1 produced the first finding the
+  engine has ever had that the wire lens structurally cannot see:
+  **`raw_html` placement → payload → browser execution observed, grade
+  execution**, with the text landing kept as a lead beside it.
+
+### Bugs the build and first run caught (in our own code)
+
+1. **`browser_observations` counted every marker as script execution** — a
+   placement marker answering true would have been logged as "the script ran".
+   The `dom:` prefix now excludes placement answers from the execution
+   mapping, pinned by test.
+2. **Candidate-id collision** — several candidates from one surface shared an
+   id, so the report resolved the proven verdict's summary to the wrong
+   candidate (the live run's own stdout showed the text lead's summary on the
+   execution verdict). Ids now carry the placement context.
+3. **The `ProbeRun.contexts` gate fed only reflections** — a DOM payload
+   probe's `requires_context` could never have been satisfied. Placement rows
+   now feed the same gate; lens-shaped contexts (`dom_absent`, `dom_unknown`)
+   are excluded from it by rule and by test.
 
 ---
 

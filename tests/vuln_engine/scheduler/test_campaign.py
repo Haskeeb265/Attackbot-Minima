@@ -18,16 +18,32 @@ are about the *seam*:
 from __future__ import annotations
 
 from service.recon_pipeline.platform.receipt import Receipt
+from service.vuln_engine.registry import TechniqueRegistry
 from service.vuln_engine.scheduler.campaign import Budget, Campaign, replay_round_order
 from service.vuln_engine.scheduler.ucb import arms_from_receipts, pick
 from service.vuln_engine.world.log import WorldLog
 
 
-def _campaign(build_gate, build_engine, receipt=None, clock=None) -> Campaign:
+def _phase1_registry() -> TechniqueRegistry:
+    """The Phase 1 technique pair, for tests that pin the arm count.
+
+    The round-order tests describe a two-arm world (one cheap arm, one loud);
+    the catalog itself is pinned by ``test_registry.py``. Pinning the registry
+    here keeps these assertions about the *seam* — UCB over receipts meeting
+    the engine — instead of about however many techniques exist today.
+    """
+    full = TechniqueRegistry.discover()
+    return TechniqueRegistry(
+        [reg for reg in full.all() if reg.name in ("xss_reflected", "oob_fetch")]
+    )
+
+
+def _campaign(build_gate, build_engine, receipt=None, clock=None, registry=None) -> Campaign:
     gate = build_gate()
     return Campaign(
         build_engine(gate=gate).seed,
         gate=gate,
+        registry=registry,
         log=gate.log,
         receipt=receipt,
         clock=clock,
@@ -54,7 +70,7 @@ def test_the_first_round_picks_the_cheapest_untried_arm(build_gate, build_engine
 def test_round_two_explores_the_arm_round_one_did_not_touch(
     build_gate, build_engine, clock
 ) -> None:
-    campaign = _campaign(build_gate, build_engine, clock=clock)
+    campaign = _campaign(build_gate, build_engine, clock=clock, registry=_phase1_registry())
     report = campaign.run(Budget(rounds=3))
     picks = campaign.log.events("scheduler.pick")
     # Round 1 explores arm A; round 2 explores the remaining untried arm B
@@ -94,6 +110,7 @@ def test_a_refused_round_is_free_and_its_arm_is_excluded(
     campaign = Campaign(
         build_engine(gate=gate).seed,
         gate=gate,
+        registry=_phase1_registry(),
         log=gate.log,
         clock=clock,
     )
@@ -107,7 +124,9 @@ def test_a_refused_round_is_free_and_its_arm_is_excluded(
 
 def test_a_settled_arm_is_never_re_picked(build_gate, build_engine, clock) -> None:
     receipt = Receipt()
-    campaign = _campaign(build_gate, build_engine, receipt=receipt, clock=clock)
+    campaign = _campaign(
+        build_gate, build_engine, receipt=receipt, clock=clock, registry=_phase1_registry()
+    )
     first = campaign.run(Budget(rounds=2))
     assert first.rounds_run == 2
     # A second campaign over the same ledger: both arms are conclusively settled,

@@ -15,6 +15,37 @@ from __future__ import annotations
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 
+# --------------------------------------------------------------------------- #
+# DOM placement markers (the xss_dom contract's shared spelling)
+# --------------------------------------------------------------------------- #
+
+#: Marker-name prefix that separates *placement* answers from *execution*
+#: markers on the browser transport's one boolean channel. A placement marker is
+#: named ``dom:<mark>:<question>`` and its answer is read as a **context name
+#: string**, not a boolean; every other marker stays a plain boolean predicate.
+#: The prefix exists so the observation layer can tell the two families apart by
+#: name — the transport stays deliberately dumb and coercing.
+DOM_MARKER_PREFIX = "dom:"
+
+#: The questions a placement probe asks the DOM, as marker-name suffixes. Every
+#: question is a **boolean predicate** — the transport's marker channel coerces
+#: answers to bool, so a placement is established by which questions answer
+#: true, never by a string the channel would have flattened. The probe grammar
+#: and the observation layer agree on these strings; a renamed question is a
+#: breaking change to both, which the invariant test pins.
+DOM_Q_PRESENT = "present"
+DOM_Q_TEXT = "text"
+DOM_Q_ATTR = "attr"
+DOM_Q_URLATTR = "urlattr"
+DOM_Q_HTML = "html"
+DOM_Q_SCRIPT = "script"
+
+
+def dom_marker(mark: str, question: str) -> str:
+    """The placement marker name for *mark*'s answer to *question*."""
+    return f"{DOM_MARKER_PREFIX}{mark}:{question}"
+
+
 def with_parameter(url: str, param: str, value: str) -> str:
     """*url* with *param* set to *value*, replacing any existing value.
 
@@ -35,4 +66,14 @@ def with_parameter(url: str, param: str, value: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
-__all__ = ["with_parameter"]
+__all__ = [
+    "DOM_MARKER_PREFIX",
+    "DOM_Q_ATTR",
+    "DOM_Q_HTML",
+    "DOM_Q_PRESENT",
+    "DOM_Q_SCRIPT",
+    "DOM_Q_TEXT",
+    "DOM_Q_URLATTR",
+    "dom_marker",
+    "with_parameter",
+]
