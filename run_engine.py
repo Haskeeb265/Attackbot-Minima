@@ -313,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--declare", action="append", default=[], help="extra declared domain/CIDR")
     parser.add_argument("--collaborator-url", default="", help="collaborator URL the TARGET must reach")
     parser.add_argument("--collaborator-local", default="", help="collaborator URL we read records from")
+    parser.add_argument("--chrome-path", default="", help="explicit chrome/chromium binary")
     parser.add_argument("--cookie", action="append", default=[], metavar="NAME=VALUE", help="session cookie for a login-walled target (repeatable; sent as one Cookie header on every request and page load)")
     parser.add_argument("--driver", default="auto", choices=("auto", "playwright", "cdp"))
     parser.add_argument("--output-dir", default="", help="where the run writes (default: per target)")

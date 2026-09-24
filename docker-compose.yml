@@ -87,6 +87,20 @@ services:
       retries: 12
       start_period: 30s
 
+  # ------------------------------------------------------------------ #
+  # The second breadth target: server-rendered PHP, the architecture the
+  # first lens was built for. Every response is real HTML with plain query
+  # params, so xss_reflected and sqli_blind_time map onto it directly; the
+  # one new requirement is the session shim (--cookie), because DVWA is
+  # login-walled and answers probes without a session with redirects.
+  # ------------------------------------------------------------------ #
+  dvwa:
+    image: vulnerables/web-dvwa
+    container_name: vuln_dvwa
+    restart: unless-stopped
+    ports:
+      - "4280:80"
+
   oob_collaborator:
     build: ./service/oob_collaborator
     container_name: vuln_oob_collaborator

@@ -55,7 +55,14 @@ skip reflection parsing when Content-Type is not HTML-ish (keep the
 `classify_context` a JSON-string context that is non-executable by construction.
 The *fuel* is Juice Shop's JSON API; the *rule* is general.
 
-### F2 — `sqli_blind_time` ships one payload, and it is the fixture's (real; timing-only today)
+### F2 — `sqli_blind_time` ships one payload, and it is the fixture's (real; timing-only today) — **RESOLVED 2026-09-24**
+
+> **Resolution:** replaced by a four-shape interpolation family (numeric,
+> quote_closed, quote_paren, comment) of real `SLEEP(n)` payloads, one injected
+> population per shape, winner picked by the interpreter and carried in the
+> confirmation spec so the verifier re-measures the same SQL. First live firing:
+> DVWA Low `sqli_blind`, `quote_closed` separated 4.00s vs 0.00s, verified
+> `grade=differential` on fresh measurement. See `progress.md`.
 
 `SLEEP_PAYLOAD = "ve-sleep"` is a bare substring with no SQL semantics; its only
 meaning is that the fixture's `/delay` endpoint sleeps on it. The module

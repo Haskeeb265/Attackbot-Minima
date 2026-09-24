@@ -364,6 +364,48 @@ stays parked until a second hash-route target demands it — n=2 before grammar.
 
 ---
 
+## The second breadth target: DVWA (2026-09-24) — **the first findings on a target we did not plant bugs in**
+
+F2 landed first, then the engine hit DVWA 1.15 (Low) in compose. Outcome:
+**2 findings, each on its own evidence class, in a 3-round campaign** — the
+milestone every prior section was building toward:
+
+| Round | Arm | Outcome | Evidence |
+|---|---|---|---|
+| 0 | `xss_reflected` on `xss_r?name=` | **finding** | `grade=execution` — "the payload's script ran in the browser" |
+| 1 | `xss_dom` on the same surface | honest `none` | dedupe rule: the wire lens found it first; no candidate claimed |
+| 2 | `sqli_blind_time` on `sqli_blind?id=` | **finding** | `grade=differential` — fresh re-measure separated 4.00s vs 0.00s (margin 0.50s) |
+
+What it took, operator-side (none of it engine code): the session shim
+(`--cookie PHPSESSID=… --cookie security=low`, new in this change), a bootstrap
+script (`docker/dvwa_bootstrap.py`) that performs the browser steps a pentester
+would — including DVWA's CSRF `user_token` on **every** form, the missing piece
+that silently aborts database setup — and declaring `Submit=Submit` as a fixed
+part of the sqli_blind surface URL, because DVWA's low page only runs its query
+when the form's submit param is present. That last fact was found by black-box
+preflight (baseline 0.02s vs injected 4.00s with it; 0.00s without) and lives in
+the declared surface, not in any technique.
+
+What the engine did with no target knowledge: the `name` canary reflected into
+`<pre>` element text → `raw_html` → executable candidate → browser-proven
+execution; the `id` population separated only for the `quote_closed` shape —
+the other three interpolation shapes returned fast and stand in the evidence as
+the control that makes the separation mean "this shape was parsed". F2's family
+fired on its first real target exactly as designed, and the verifier re-measured
+the same SQL the proposer selected.
+
+### What the run also caught (in our own wiring)
+
+- The `--chrome-path` argparse flag had been clobbered by the cookie-flag edit
+  (AttributeError on any `--target` run) — caught immediately by the live run,
+  the same class of CLI bug the first breadth test caught, and the same
+  argument for field-testing over fixture-only confidence.
+- The `sqli_blind_time` candidate id double-counts the host
+  (`sqli_blind_time:127.0.0.1:127.0.0.1:4280/...`) — cosmetic, ids stay unique;
+  noted for a later tidy.
+
+---
+
 ## The honest assessment: how far from finding real bugs
 
 **The instrument is built and calibrated; it has not yet been used.** Every
@@ -404,10 +446,14 @@ Two-and-a-half vuln classes is a narrow lens.
 
 ## Open items deliberately left open
 
-- `techniques/sqli_blind_time/probes.measurement_probes()` is written but
-  unused: the verifier re-derives its own populations by design, pinned to the
-  grammar by a test. Wire it or delete it when a second differential technique
-  exists.
+- `techniques/sqli_blind_time/probes.measurement_probes()` was written but
+  unused: **removed (2026-09-24)** when F2 landed — the verifier's confirmation
+  payloads now travel on the candidate's confirmation spec, so a duplicated
+  grammar has nothing left to duplicate.
+- **Audit finding F1 (JSON responses classify as `raw_html`) remains open** —
+  the observation layer still assumes every response is HTML. Untouched by the
+  DVWA work because DVWA is server-rendered HTML; it bites on JSON APIs.
+- `where=fragment` stays parked until a second hash-route target demands it.
 - Playwright is installed and now the answering driver (previously CDP only);
   the capability report names whichever answered, so no action needed.
 - Redis remains absent from compose by design; `cache.py`/`queueing.py` degrade.
