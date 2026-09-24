@@ -23,13 +23,15 @@ Two vulnerabilities, one per Phase 1 technique, and one per Phase 2's:
     reflection instead of an actual fetch.
 
 ``GET /delay?q=``
-    Phase 2's blind SQLi stand-in: sleeps *SLEEP_MARKER* seconds when the
-    parameter's value contains the marker substring. A stand-in on purpose — the
-    technique's probe grammar is pure data and does not care whether the server
-    slept because of SQL ``pg_sleep`` or a fixture branch; what it tests is the
-    differential: the same surface answering on two populations, with the margin
-    the verifier requires. The sleep is capped so a hostile value cannot pin a
-    worker.
+    Phase 2's blind SQLi stand-in: simulates an injectable backend by *parsing*
+    the parameter for a ``SLEEP(n)`` expression and sleeping ``n`` seconds
+    (capped). The delay travels in the payload — the way a real SQL engine's
+    ``SLEEP()`` works — so the endpoint answers a payload *family* rather than
+    a magic substring: whatever SQL-shaped value arrives is interpreted on its
+    own terms, and a value with no parseable expression returns fast. What the
+    technique tests is the differential: the same surface answering on two
+    populations, with the margin the verifier requires. The sleep is capped so
+    a hostile value cannot pin a worker.
 
 ``GET /dom?q=``
     Phase 4's client-render fixture: the server reflects *nothing* (the wire
@@ -60,12 +62,11 @@ PORT = int(os.getenv("FIXTURE_PORT", "8080"))
 #: collaborator is a slow failure rather than a hang.
 FETCH_TIMEOUT = float(os.getenv("FIXTURE_FETCH_TIMEOUT", "10"))
 
-#: The ``/delay`` endpoint's marker and its ceiling.  The marker is deliberately
-#: trivial to pass (a substring test, like a naive ``LIKE`` clause) and the sleep
-#: is capped like a real target's statement timeout would be.
-SLEEP_MARKER = os.getenv("FIXTURE_SLEEP_MARKER", "ve-sleep")
-SLEEP_SECONDS = float(os.getenv("FIXTURE_SLEEP_SECONDS", "2.0"))
-SLEEP_CEILING = 5.0
+#: The ``/delay`` endpoint's ceiling. The delay itself comes from the payload
+#: (a ``SLEEP(n)`` expression, parsed like a backend would parse one), so a
+#: heavier family does not need fixture changes — only the cap, which a real
+#: target's statement timeout would impose too.
+SLEEP_CEILING = float(os.getenv("FIXTURE_SLEEP_CEILING", "6.0"))
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("fixture_app")
@@ -163,17 +164,21 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self._send(status, body, "text/plain; charset=utf-8")
 
     def _delay(self, params: dict[str, list[str]]) -> None:
-        """Sleep when *q* carries the marker; answer fast when it does not.
+        """Sleep when *q* carries a parseable ``SLEEP(n)`` expression.
 
-        The two populations the timing differential compares, in one endpoint.
-        The sleep happens *before* the response so the measured elapsed covers it
-        exactly the way a slow query would.
+        The two populations the timing differential compares, in one endpoint:
+        a value whose SQL the simulated backend parses delays the response by
+        the delay *it asks for*; a value with no parseable expression returns
+        fast. The delay travels in the payload, so this endpoint exercises the
+        technique's payload family rather than a marker it was handed.
         """
+        import re as _re
         import time as _time
 
         value = params.get("q", [""])[0]
-        if SLEEP_MARKER in value:
-            _time.sleep(min(SLEEP_SECONDS, SLEEP_CEILING))
+        match = _re.search(r"SLEEP\((\d+(?:\.\d+)?)\)", value)
+        if match:
+            _time.sleep(min(float(match.group(1)), SLEEP_CEILING))
         log.info("delay q=%r", value[:64])
         self._send(200, b"delayed-or-not", "text/plain; charset=utf-8")
 

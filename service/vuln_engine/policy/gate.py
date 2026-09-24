@@ -394,6 +394,7 @@ def default_effects(
     oob_local_base: str = "",
     chrome_path: str = "",
     driver: str = "auto",
+    cookies: str = "",
 ) -> dict:
     """Build the standard set of transports, lazily.
 
@@ -402,6 +403,12 @@ def default_effects(
     the import invariant hold. Overrides arrive as plain values (a base URL, a
     driver name) rather than as transport objects, so a caller outside ``policy/``
     never has to name a transport class.
+
+    ``cookies`` is the engagement's session shim: a raw ``Cookie`` header value
+    applied to every HTTP request and every browser page load. Targets that sit
+    behind a login answer probes and plain navigation identically once the
+    session is declared; without it, every response is the login page and the
+    run measures a redirect, not the target.
     """
     from ..transports.browser import BrowserEffect
     from ..transports.http1 import Http1Effect
@@ -415,12 +422,21 @@ def default_effects(
         if oob_local_base:
             defaults["local_base"] = oob_local_base
         resolved_oob = OobEffect(**defaults)
+    http_headers = {"Cookie": cookies} if cookies else {}
     return {
-        "http": http if http is not None else Http1Effect(),
+        "http": (
+            http
+            if http is not None
+            else Http1Effect(default_headers=http_headers)
+        ),
         "browser": (
             browser
             if browser is not None
-            else BrowserEffect(chrome_path=chrome_path, driver=driver)
+            else BrowserEffect(
+                chrome_path=chrome_path,
+                driver=driver,
+                cookies=cookies,
+            )
         ),
         "oob": resolved_oob,
     }

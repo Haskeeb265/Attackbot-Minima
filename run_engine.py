@@ -79,6 +79,9 @@ class Profile:
     collaborator_local: str
     chrome_path: str = ""
     browser_driver: str = "auto"
+    #: Raw ``Cookie`` header value for every request and page load — the session
+    #: shim a login-walled target needs. Empty means no header at all.
+    cookies: str = ""
     #: Per-host action budget.  The fixture profile is generous because the count
     #: is a *policy* number, not a safety one: the interesting refusal in Phase 1
     #: is scope, and a budget DEFER would only make the log harder to read.
@@ -207,6 +210,7 @@ def run(
         oob_local_base=profile.collaborator_local,
         chrome_path=profile.chrome_path,
         driver=profile.browser_driver,
+        cookies=profile.cookies,
     )
     gate = PolicyGate(dispatcher, log=log, **effects)
     engine = Engine(
@@ -250,6 +254,7 @@ def campaign_run(
         oob_local_base=profile.collaborator_local,
         chrome_path=profile.chrome_path,
         driver=profile.browser_driver,
+        cookies=profile.cookies,
     )
     gate = PolicyGate(dispatcher, log=log, **effects)
     campaign = Campaign(
@@ -308,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--declare", action="append", default=[], help="extra declared domain/CIDR")
     parser.add_argument("--collaborator-url", default="", help="collaborator URL the TARGET must reach")
     parser.add_argument("--collaborator-local", default="", help="collaborator URL we read records from")
-    parser.add_argument("--chrome-path", default="", help="explicit chrome/chromium binary")
+    parser.add_argument("--cookie", action="append", default=[], metavar="NAME=VALUE", help="session cookie for a login-walled target (repeatable; sent as one Cookie header on every request and page load)")
     parser.add_argument("--driver", default="auto", choices=("auto", "playwright", "cdp"))
     parser.add_argument("--output-dir", default="", help="where the run writes (default: per target)")
     parser.add_argument("--force", action="store_true", help="ignore the receipts ledger")
@@ -360,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         profile = fixture_profile(chrome_path=args.chrome_path)
     profile.browser_driver = args.driver
+    profile.cookies = "; ".join(args.cookie)
 
     advisory = Advisory.from_env() if args.llm_draft else None
     output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_ROOT / profile.target.replace(":", "_")

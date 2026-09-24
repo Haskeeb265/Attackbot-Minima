@@ -155,6 +155,7 @@ def _run_playwright(
     headless: bool,
     timeout: float,
     settle: float,
+    cookies: str = "",
 ) -> RawBrowserRun:
     """Load *url* in Playwright's Chromium and read the three facts."""
     from playwright.sync_api import sync_playwright
@@ -165,7 +166,11 @@ def _run_playwright(
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=headless)
         try:
-            page = browser.new_page()
+            context_kwargs: dict[str, Any] = {}
+            if cookies:
+                context_kwargs["extra_http_headers"] = {"Cookie": cookies}
+            context = browser.new_context(**context_kwargs)
+            page = context.new_page()
             page.add_init_script(_MUTATION_INIT)
             page.on("dialog", _playwright_dialog(dialogs))
             page.on("pageerror", lambda error: console_errors.append(str(error)))
@@ -385,6 +390,7 @@ def _run_cdp(
     headless: bool,
     timeout: float,
     settle: float,
+    cookies: str = "",
 ) -> RawBrowserRun:
     """Load *url* in the system Chrome and read the three facts over CDP."""
     started = time.monotonic()
@@ -414,6 +420,13 @@ def _run_cdp(
         connection = _CdpConnection(endpoint, timeout)
         connection.send("Page.enable")
         connection.send("Runtime.enable")
+        if cookies:
+            # The same header the HTTP transport carries: session identity for
+            # a login-walled target, applied before the first navigation.
+            connection.send("Network.enable")
+            connection.send(
+                "Network.setExtraHTTPHeaders", {"headers": {"Cookie": cookies}}
+            )
         connection.send("Page.addScriptToEvaluateOnNewDocument", {"source": _MUTATION_INIT})
         navigate = connection.send("Page.navigate", {"url": url})
         # The page's own inline script runs during parse, so dialogs and markers
@@ -534,13 +547,21 @@ def _evaluate_number(connection: _CdpConnection, expression: str) -> int:
 
 @dataclass
 class BrowserEffect:
-    """The browser transport.  ``driver`` is ``auto`` | ``playwright`` | ``cdp``."""
+    """The browser transport.  ``driver`` is ``auto`` | ``playwright`` | ``cdp``.
+
+    ``cookies`` is a raw ``Cookie`` header value (``name=value; name2=value2``)
+    applied to every request the page makes — the session shim a login-walled
+    target needs. It is transport identity, not probe logic: the gate sees no
+    difference between a cookie-carrying run and a plain one, and an empty
+    string (the default) sends no header at all.
+    """
 
     driver: str = "auto"
     chrome_path: str = ""
     headless: bool = True
     timeout: float = DEFAULT_TIMEOUT
     settle: float = DEFAULT_SETTLE
+    cookies: str = ""
     _capabilities: BrowserCapabilities | None = None
 
     # ------------------------------------------------------------------ #
@@ -618,6 +639,7 @@ class BrowserEffect:
                 headless=self.headless,
                 timeout=self.timeout,
                 settle=self.settle,
+                cookies=self.cookies,
             )
         return _run_cdp(
             url=url,
@@ -626,6 +648,7 @@ class BrowserEffect:
             headless=self.headless,
             timeout=self.timeout,
             settle=self.settle,
+            cookies=self.cookies,
         )
 
     def close(self) -> None:

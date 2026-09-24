@@ -3,9 +3,19 @@
 A timing claim is the easiest claim in security to half-prove: the proposer's own
 numbers, re-examined, always look the same. This verifier never sees them. Its
 whole input from the candidate is the confirmation spec — which surface, which
-parameter, what margin — and it re-runs both populations through the policy gate
-itself, alternating baseline and injected exactly like the technique's grammar,
-then compares the fresh medians.
+parameter, what margin, and *which payloads* — and it re-runs both populations
+through the policy gate itself, alternating baseline and injected exactly like
+the technique's grammar, then compares the fresh medians.
+
+Reading the payloads from the spec is not a leak. The independence that makes
+``differential`` its own evidence class is that every *measurement* here is
+fresh — the spec's numbers are unread, its medians unverifiable by themselves.
+What travels on the spec is what to inject, not what to conclude; re-deriving
+the injection text independently would mean re-deriving the technique's whole
+interpolation-shape table, and a verifier that owned a second copy of the
+grammar could not be pinned to it except by convention. The pin still exists:
+the fallback table below (for specs that name no payloads) is held against the
+technique's by the test suite, so neither side can drift silently.
 
 Three answers, in the order the code checks them:
 
@@ -39,12 +49,12 @@ CONFIRM_KIND = "timing.differential"
 #: the floor that survives one outlier; the margin does the rest.
 SAMPLES = 2
 
-#: Payload spellings.  Duplicated from the technique's grammar deliberately:
-#: the verifier is independent of the proposer by construction, and sharing a
-#: module would let the proposer's reasoning leak into the confirmation. The two
-#: tables are pinned against each other by the test suite.
+#: Fallback payload spellings, duplicated from the technique's grammar
+#: deliberately: only for a confirmation spec that names no payloads of its own.
+#: The two tables are pinned against each other by the test suite, so a grammar
+#: change that forgets this fallback fails a test instead of confirming nothing.
 _BASELINE_PAYLOAD = "ve-noop0"
-_INJECTED_PAYLOAD = "ve-sleep"
+_INJECTED_PAYLOAD = "1 AND SLEEP(4.0)"
 
 
 @dataclass
@@ -68,8 +78,11 @@ class TimingVerifier:
         if not url or not param:
             return refuse(candidate, "the confirmation spec names no surface or parameter")
 
-        baseline = self._measure(url, param, _BASELINE_PAYLOAD, candidate.id)
-        injected = self._measure(url, param, _INJECTED_PAYLOAD, candidate.id)
+        baseline_payload = str(confirm.get("baseline_payload") or _BASELINE_PAYLOAD)
+        injected_payload = str(confirm.get("injected_payload") or _INJECTED_PAYLOAD)
+
+        baseline = self._measure(url, param, baseline_payload, candidate.id)
+        injected = self._measure(url, param, injected_payload, candidate.id)
         if baseline is None or injected is None:
             return refuse(
                 candidate,
@@ -90,6 +103,9 @@ class TimingVerifier:
                 "margin": margin,
                 "baseline_samples": len(baseline),
                 "injected_samples": len(injected),
+                "baseline_payload": baseline_payload,
+                "injected_payload": injected_payload,
+                "variant": str(confirm.get("variant") or ""),
                 "reason": "fresh differential measurement through the policy gate",
             },
         )

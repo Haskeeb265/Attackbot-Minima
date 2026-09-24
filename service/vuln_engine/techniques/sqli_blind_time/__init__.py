@@ -1,11 +1,12 @@
 """``sqli_blind_time`` — the technique folder, and therefore the registration.
 
 Same shape as the Phase 1 techniques: four pure modules and this thin adapter.
-The one Phase 2 addition is :func:`measurement_probes` — the confirmation
-population the *verifier* executes, exposed as module data so the differential
-verifier can read the grammar without importing anything impure. The driver
-still defers every ``purpose="confirm"`` spec, so the engine never measures the
-verifier's population twice.
+The confirmation population the *verifier* executes is derived from the
+candidate's confirmation spec — which carries the winning variant's payloads —
+so the grammar stays the one definition of the family and the verifier re-
+measures the same SQL it was handed. The driver still defers every
+``purpose="confirm"`` spec, so the engine never measures the verifier's
+population twice.
 """
 
 from __future__ import annotations
