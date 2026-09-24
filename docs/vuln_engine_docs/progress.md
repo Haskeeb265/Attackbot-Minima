@@ -533,12 +533,24 @@ file. `seeded_cookies` merges literal pairs (DVWA pins `security=low`), and
 the declared `cookies` names become a pre-flight check: a bootstrap that
 produced nothing the case expected fails before the engine wastes a run.
 
+### First live pass (2026-09-25): the corpus' first row
+
+`python benchmarks/run_benchmark.py dvwa-low` against the live container:
+the runner bootstrapped a fresh session (parsed the bootstrap's cookie
+header, merged the pinned `security=low`), ran the 6-round campaign in 30s,
+and the scorer produced exactly the predicted scorecard —
+**2 TP / 2 declared GT, `recall_declared` 1.0, empty unadjudicated queue**,
+with evidence classes matching the bout (`xss_r/name` → execution,
+`sqli_blind/id` → differential). The four undeclared T2 entries scored
+`miss` without touching the recall number, which is the operator gap
+visible-by-design. Pass artifacts under
+`benchmarks/results/dvwa-low/078da65-fast/`; corpus row 1 appended.
+
 ### Not yet done
 
-No live validation pass yet: the skeleton is test-verified (320 tests, mypy
-clean) but `python benchmarks/run_benchmark.py dvwa-low` against an up
-container, scored, should show 2 TP + `recall_declared` 1.0 — that is the
-next act, and the first corpus row.
+The Juice Shop live pass — the correct-negative (`/api/Products` settling
+none scores as a pass, not a miss) and the honest SPA miss have never run
+through the scorer on real artifacts.
 
 ---
 
