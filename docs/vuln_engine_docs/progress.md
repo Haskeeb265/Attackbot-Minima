@@ -546,11 +546,27 @@ with evidence classes matching the bout (`xss_r/name` → execution,
 visible-by-design. Pass artifacts under
 `benchmarks/results/dvwa-low/078da65-fast/`; corpus row 1 appended.
 
+### Second live pass (2026-09-25): the honest zero, scored
+
+`juice-shop` through the same pipeline, corpus row 2. The declared JSON API
+surface was probed by two techniques (`xss_reflected`, `xss_dom`) — both
+settled **none** (the F1 gate at work on real traffic: JSON content-type,
+non-executable `json_value`, no false lead), the campaign stopped early at
+2/6 rounds with no unsettled eligible arm, and the scorer produced the
+by-design scorecard: `/api/Products/q` → **correct-negative** (a pass —
+settling none is what correctness looks like there), tiered T1 `{tp: 1}`;
+the undeclared SPA search entry → `miss` in the operator gap, excluded from
+recall; `recall_declared` `null` (no declared positive exists to recall);
+unadjudicated empty. The pass proves the scorer distinguishes *probed and
+honestly negative* from *never probed*: an empty log would have scored the
+same entry `fp-or-miss`.
+
 ### Not yet done
 
-The Juice Shop live pass — the correct-negative (`/api/Products` settling
-none scores as a pass, not a miss) and the honest SPA miss have never run
-through the scorer on real artifacts.
+Nothing pending in the skeleton. Next measurement acts when they earn their
+place: the `llm-ab` tier on an existing case (does the advisory move recall
+or only noise?), and a third case once a second breadth target with known
+ground truth enters rotation.
 
 ---
 
