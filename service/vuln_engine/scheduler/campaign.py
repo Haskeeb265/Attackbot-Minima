@@ -113,6 +113,7 @@ class Campaign:
         receipt: object | None = None,
         clock: Callable[[], float] | None = None,
         advisory: "Advisory | None" = None,
+        force: bool = False,
     ) -> None:
         self.seed = seed
         self.gate = gate
@@ -120,6 +121,10 @@ class Campaign:
         self.log = log if log is not None else gate.log
         self.receipt = receipt
         self.clock = clock or _wall_clock
+        #: Ignore the receipts ledger when picking arms (an operator's flag, and
+        #: the only way to re-ask a question whose answer is stale). Each round's
+        #: engine still gets the flag too, so previously-settled arms re-probe.
+        self.force = force
         #: Phase 3's advisory junctions, or ``None``. When wired and available,
         #: the rank junction supplies each technique's prior *once, before round
         #: 1* — after that the receipts ledger is the ranking signal, and the
@@ -189,6 +194,12 @@ class Campaign:
                 excluded.add(arm.surface)
                 continue
             report.rounds_run += 1
+            # One conclusive round per arm per campaign, even under ``force``:
+            # force means "ignore what the ledger already knew", not "re-prove
+            # the same bug every round". Without the ledger's settled-arm rule
+            # (which force suspends), this exclusion is what keeps a forced
+            # campaign from spending every round on the arm that finds first.
+            excluded.add(arm.surface)
         return report
 
     # ------------------------------------------------------------------ #
@@ -222,7 +233,7 @@ class Campaign:
             arm
             for arm in arms_from_receipts(eligible, receipts, priors=priors)
             if arm.surface not in (excluded or set())
-            and not _settled(receipts.get(arm.surface, {}))
+            and (self.force or not _settled(receipts.get(arm.surface, {})))
         ]
         outcome = pick(arms, noise=noise)
         if outcome is None:
@@ -286,6 +297,8 @@ class Campaign:
             log=self.log,
             receipt=self.receipt,
             clock=self.clock,
+            force=self.force,
+            advisory=self.advisory,
         )
         return engine.run()
 

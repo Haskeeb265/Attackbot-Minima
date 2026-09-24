@@ -439,6 +439,47 @@ Three threads closed in one pass:
 
 ---
 
+## Control campaign with the AI advisory on (2026-09-24) — all three junctions live, four wiring bugs found
+
+The keyless DVWA campaign re-run with `--llm-draft`: **same 3 rounds, same 2
+findings on the same evidence classes** — the advisory changed nothing it should
+not, which is the contract holding. What the model actually did: the rank
+junction's priors entered UCB (visible in every pick reason: `+ advisory prior
+0.4`), the synthesize junction fired for the first time on a live campaign (one
+validated call → one `candidate.junction` row — a model-proposed probe through
+the grammar, gate-checked like any other), and the write junction produced two
+validated drafts in `report.draft.json`, every sentence traceable to a typed
+finding field. The run's `llm.junction` rows make all of it replayable offline.
+
+Getting there caught **four real defects the keyless tests could never see**:
+
+1. **write's system prompt contradicted its own client** — "Output is plain
+   prose, nothing else" while `ask()` demands one JSON object. No honest model
+   could ever pass; Phase 3's injected-caller tests fed JSON directly and never
+   exercised the prompt. The prompt now asks for `{"prose": ...}`.
+2. **synthesize was structurally unreachable on campaigns** —
+   `Campaign._run_round` never passed the advisory to the round Engine, so no
+   campaign since Phase 3 could ever consult it (driver-level tests did, and
+   passed; the composition was broken, not the parts).
+3. **`--force` never reached the campaign** — `campaign_run` did not forward
+   it, and the pick excluded settled arms regardless, so a second run in the
+   same directory re-probed nothing (0 rounds, exit 1). Fixed in the pick, the
+   round Engine, and the CLI; forced campaigns also now exclude an arm after
+   its first conclusive round, so force cannot spend every round re-proving
+   the same bug.
+4. **degraded `llm.junction` rows poisoned the cache** — `_cached` replayed a
+   failure as if it were an opinion, contradicting the receipts philosophy
+   that an error is not an answer. Degraded rows are now skipped; a keyed
+   re-run re-asks what once failed.
+
+Also hardened against a real model (`openai/gpt-oss-20b`): the rank prompt now
+states the 1.0 prior-mass rule (the first live answer summed to 2.10 and was
+correctly refused), and the write validator's sentence splitter no longer
+chops `127.0.0.1` into three phantom sentences — sentences split on
+punctuation-followed-by-whitespace, so reproduction URLs survive intact.
+
+---
+
 ## The honest assessment: how far from finding real bugs
 
 **The instrument is built and calibrated; it has not yet been used.** Every

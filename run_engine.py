@@ -105,6 +105,23 @@ def _out(line: str) -> None:
         print(line.encode(encoding, "replace").decode(encoding, "replace"))
 
 
+def _wire_grammars(advisory: Advisory | None, registry: TechniqueRegistry) -> None:
+    """Collect the techniques' synthesis grammars into the advisory, once.
+
+    Lives here (the composition root) rather than in ``llm/``: the llm layer's
+    import rule keeps it kernel- and world-side only, and which techniques'
+    grammars the model may shape is a composition decision, not a junction
+    behavior. A technique without ``synthesis_grammar()`` simply contributes
+    nothing — the synthesize junction stays silent for it.
+    """
+    if advisory is None:
+        return
+    for registration in registry.all():
+        grammar = getattr(registration.technique, "synthesis_grammar", None)
+        if callable(grammar):
+            advisory.grammars[registration.name] = grammar()
+
+
 def load_env_file(path: Path | None = None) -> dict[str, str]:
     """Load ``KEY=VALUE`` lines from *path* (default: the repo root ``.env``).
 
@@ -247,11 +264,13 @@ def run(
         driver=profile.browser_driver,
         cookies=profile.cookies,
     )
+    registry = TechniqueRegistry.discover(strict=False)
+    _wire_grammars(advisory, registry)
     gate = PolicyGate(dispatcher, log=log, **effects)
     engine = Engine(
         profile.seed,
         gate=gate,
-        registry=TechniqueRegistry.discover(strict=False),
+        registry=registry,
         log=log,
         receipt=receipt,
         force=force,
@@ -291,14 +310,17 @@ def campaign_run(
         driver=profile.browser_driver,
         cookies=profile.cookies,
     )
+    registry = TechniqueRegistry.discover(strict=False)
+    _wire_grammars(advisory, registry)
     gate = PolicyGate(dispatcher, log=log, **effects)
     campaign = Campaign(
         profile.seed,
         gate=gate,
-        registry=TechniqueRegistry.discover(strict=False),
+        registry=registry,
         log=log,
         receipt=receipt,
         advisory=advisory,
+        force=force,
     )
     return campaign.run(Budget(rounds=rounds))
 
@@ -434,10 +456,21 @@ def main(argv: list[str] | None = None) -> int:
             _out(f"    {finding.get('summary', finding.get('vuln_class', '?'))}")
         if campaign_report.problems:
             _out(f"  notes:      {'; '.join(campaign_report.problems)}")
+        write_drafts(
+            campaign_report.to_dict(),
+            output_dir,
+            advisory,
+            log_handle=WorldLog(output_dir / "world.jsonl"),
+        )
         return 0 if campaign_report.findings else 1
 
     report = run(profile, output_dir=output_dir, force=args.force, advisory=advisory)
-    write_drafts(report.to_dict(), output_dir, advisory)
+    write_drafts(
+        report.to_dict(),
+        output_dir,
+        advisory,
+        log_handle=WorldLog(output_dir / "world.jsonl"),
+    )
 
     if args.json:
         _out(json.dumps(report.to_dict(), indent=2))
@@ -469,20 +502,28 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if report.findings else 1
 
 
-def write_drafts(report_dict: dict, output_dir: Path, advisory: Advisory | None) -> None:
+def write_drafts(
+    report_dict: dict,
+    output_dir: Path,
+    advisory: Advisory | None,
+    *,
+    log_handle: WorldLog | None = None,
+) -> None:
     """Advisory prose beside the canonical lines, when the junction is available.
 
     Written as ``report.draft.json`` next to ``report.json`` — never into it.
     The canonical report remains a pure derivation of the log; the draft is an
     overlay an operator reads beside it, flagged with the model and the
-    validation outcome per finding.
+    validation outcome per finding. ``log_handle`` is the world log: every
+    junction call is appended there like every other junction's, so the
+    model's prose is as replayable as its ranking.
     """
     if advisory is None or not advisory.available:
         return
     findings = list(report_dict.get("findings") or [])
     if not findings:
         return
-    drafts = advisory.draft_report(findings)
+    drafts = advisory.draft_report(findings, log_handle=log_handle)
     (output_dir / "report.draft.json").write_text(
         json.dumps({"drafts": drafts, "advisory": advisory.to_dict()}, indent=2),
         encoding="utf-8",

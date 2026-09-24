@@ -136,6 +136,9 @@ def build_prompt(input: dict) -> tuple[str, str]:
         "Answer with JSON only: {\"priors\": {\"<technique name>\": 0.0-1.0, ...}}."
         " Include every technique listed; use lower values for noisier techniques"
         " and classes that look unlikely for these surfaces."
+        " The values must sum to at most 1.0 in total: a prior is a share of one"
+        " unit of attention across techniques, so a typical answer sums well"
+        " below it."
     )
     system = (
         "You are an advisory ranking module inside an authorized vulnerability-scanning"

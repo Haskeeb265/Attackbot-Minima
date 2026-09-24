@@ -324,19 +324,20 @@ class LLMClient:
         )(prompt, system)
 
     def _cached(self, log: Any, junction: str, digest: str) -> Opinion | None:
-        """The replayed opinion for *digest*, from the log's ``llm.junction`` rows."""
+        """The replayed opinion for *digest*, from the log's ``llm.junction`` rows.
+
+        A *degraded* row is skipped rather than replayed: a failure is a fact
+        about that call, not an answer to the question — the same rule that
+        keeps ``failed`` out of the receipts ledger's conclusive outcomes. A
+        keyed re-run therefore re-asks what once failed (and pays for it); a
+        keyless replay never reaches here anyway, because health gates first.
+        """
         for row in log.events(EVENT_LLM_JUNCTION):
+
             if row.get("digest") != digest or row.get("junction") != junction:
                 continue
             if row.get("degraded"):
-                return Opinion(
-                    junction=junction,
-                    digest=digest,
-                    degraded=True,
-                    reason=str(row.get("reason", "degraded call on record")),
-                    model=str(row.get("model", "")),
-                    source="cached",
-                )
+                continue
             return Opinion(
                 junction=junction,
                 digest=digest,
