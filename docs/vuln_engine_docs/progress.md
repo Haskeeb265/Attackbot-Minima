@@ -270,6 +270,65 @@ The Juice Shop gap, answered. Full design record in
 
 ---
 
+## The first SPA finding attempt: `xss_dom` vs Juice Shop's search (2026-09-24) — an honest zero, and one measured capability gap
+
+The Phase 4 lens aimed at its first target whose bug lives entirely client-side.
+Outcome: **0 findings, and this run measured exactly why in log rows.**
+
+### What source reading established before any run
+
+Juice Shop 20.2.0's search XSS is fully client-side: `search-result.component.ts`
+reads `route.snapshot.queryParams.q`, pipes it through
+`bypassSecurityTrustHtml`, and the template renders `<span id="searchValue"
+[innerHTML]="searchValue">` — an unescaped `innerHTML` sink, the exact shape the
+`raw_html` placement exists to catch. The app routes with `useHash: true`, so
+Angular's *route* query params live **inside the fragment** (`#/search?q=...`).
+
+### The A/B measurement (the engine's own browser transport, before the campaign)
+
+| URL shape | SPA reads the param | `#searchValue` populated | custom element materialised |
+|---|---|---|---|
+| `?q=…#/search` (what `with_parameter` builds) | no | no | no |
+| `#/search?q=…` (param inside the fragment) | **yes** | **yes** | **yes** — markup parsed |
+
+Two facts: the DOM lens *would* see a raw_html placement if the value reached the
+SPA, and the default 0.6 s settle is enough for Angular to render (1132 DOM
+mutations, markers answered after settle). The instrument is ready; the URL
+arithmetic is not.
+
+### The campaign run (what the log shows)
+
+Declared surface: `url=http://127.0.0.1:3000/#/search;param=q` — the only
+fragment-bearing URL the grammar accepts. `--campaign 6 --force`, fresh dir
+(`output/vuln_engine/juice_dom/`):
+
+- round 0: `xss_reflected` — canary in the real query string, the SPA fallback
+  page returns the same bytes for everything; settled `none` (2 of its 5 probes
+  deferred to the verifier, never triggered — no reflection, no candidate).
+- round 1: `xss_dom` — canary HTTP probe (settled, no echo), then the placement
+  browser probe **ran anyway** (it carries no `requires_context`), loaded the
+  page with 1132 mutations, and every `dom:` question answered false: the SPA
+  never read `?q=` from the real query string. Zero placement rows, zero
+  candidates, **no invented `dom_absent` row** (that row requires a true
+  `present` — the honest-ignorance rule held), receipt `none`.
+- campaign stopped early: no unsettled arm remained. 300 tests still green.
+
+### The capability gap, now a measurement
+
+`with_parameter` writes parameters into the **real query string** and preserves
+the fragment; a hash-route SPA keeps its route params **inside the fragment**.
+An operator can *declare* a hash-route surface, and the browser lens loads it
+faithfully — but the engine cannot yet aim a parameter at the inside of a
+fragment. The finding was one URL-arithmetic rule away, and the run's log is the
+evidence rather than a guess.
+
+Documented, not hacked around: the fix is a declared `where=fragment` placement
+(a `with_parameter` variant that writes into the fragment's query part), which
+changes the surface vocabulary and needs its own tests — a deliberate next step,
+not a silent grammar edit.
+
+---
+
 ## The honest assessment: how far from finding real bugs
 
 **The instrument is built and calibrated; it has not yet been used.** Every
@@ -287,10 +346,16 @@ Two-and-a-half vuln classes is a narrow lens.
 
 ## Suggested next steps (in order)
 
-1. **Second breadth target: DVWA (recommended next).** Server-rendered PHP maps
-   directly onto the current lens: `xss_r` → execution-class, `sqli_blind` →
-   differential-class. Needs the small session shim (cookies for http + browser
-   contexts) — designed, not built.
+1. **Fragment-parameter support (`where=fragment`) — the smallest path to the
+   first real finding.** The Juice Shop SPA attempt ended one URL rule short: the
+   placement lens is ready, the sink is confirmed, and the measured gap is only
+   that `with_parameter` cannot write a param into a hash route. Add the
+   fragment variant to the common grammar (with its own invariant tests),
+   re-declare the surface, re-run the campaign.
+2. **Second breadth target: DVWA.** Server-rendered PHP maps directly onto the
+   current lens: `xss_r` → execution-class, `sqli_blind` → differential-class.
+   Needs the small session shim (cookies for http + browser contexts) —
+   designed, not built.
 2. ~~Wire the campaign into the CLI~~ **Done (2026-09-24)** — `run_engine.py
    --campaign ROUNDS`.
 3. **Second browser-context technique** (e.g. stored XSS or DOM injection)
