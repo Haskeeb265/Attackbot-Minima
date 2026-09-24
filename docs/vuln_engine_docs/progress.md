@@ -329,6 +329,41 @@ not a silent grammar edit.
 
 ---
 
+## Target-assumptions audit (2026-09-24) — is the engine being molded around Juice Shop?
+
+Full record in [`target_assumptions_audit.md`](./target_assumptions_audit.md).
+Method: grep sweeps for target identity, read-throughs of every grammar,
+observation, verifier and scheduler constant, plus one empirical probe. The
+falsifiable test: *delete the fixture and Juice Shop; no engine code may change
+meaning.*
+
+**Verdict: the engine is clean of target identity — zero names, zero param
+special-cases, no cross-target memory — but the audit surfaced two real
+generalization debts, both measured, not guessed:**
+
+1. **F1 — the wire lens assumes every response is HTML.** A canary echoed inside
+   a JSON string classifies as `raw_html` (an *executable* context, measured
+   directly), so on any echoing JSON API `xss_reflected` proposes an executable
+   candidate from fiction and the verifier burns a loud browser run that
+   structurally cannot succeed. The general fix is a response-shape gate in the
+   observation layer — the fuel is Juice Shop's JSON API, but the rule is
+   class-shaped.
+2. **F2 — `sqli_blind_time` ships one payload and it is the fixture's.**
+   `SLEEP_PAYLOAD = "ve-sleep"` has no SQL semantics; the technique currently
+   measures "does this param change response time," not "injected SQL causes a
+   delay." Honest evidence bar, but a coverage claim dressed as a technique name.
+   The general fix is an interpolation-shape payload family, verifier unchanged.
+
+Also declared: calibration constants (settle window, timing margins, sample
+counts) were set by first-target experience and are untested against heavy apps
+— benign, visible in the log, worth a re-look on the second SPA.
+
+Order re-justified: DVWA first (target diversity beats grammar growth), then F1
+(the most common real-world echo shape is a JSON API), then F2. `where=fragment`
+stays parked until a second hash-route target demands it — n=2 before grammar.
+
+---
+
 ## The honest assessment: how far from finding real bugs
 
 **The instrument is built and calibrated; it has not yet been used.** Every
@@ -346,16 +381,16 @@ Two-and-a-half vuln classes is a narrow lens.
 
 ## Suggested next steps (in order)
 
-1. **Fragment-parameter support (`where=fragment`) — the smallest path to the
-   first real finding.** The Juice Shop SPA attempt ended one URL rule short: the
-   placement lens is ready, the sink is confirmed, and the measured gap is only
-   that `with_parameter` cannot write a param into a hash route. Add the
-   fragment variant to the common grammar (with its own invariant tests),
-   re-declare the surface, re-run the campaign.
-2. **Second breadth target: DVWA.** Server-rendered PHP maps directly onto the
+1. **Second breadth target: DVWA.** Server-rendered PHP maps directly onto the
    current lens: `xss_r` → execution-class, `sqli_blind` → differential-class.
    Needs the small session shim (cookies for http + browser contexts) —
    designed, not built.
+2. **F1: response-shape gate in the observation layer** — the audit's finding;
+   small, general, removes a measured false-lead cost on JSON APIs.
+3. **F2: a general time-delay payload family in `sqli_blind_time`** — the
+   audit's finding; turns a fixture-only technique into a class-shaped one.
+4. **Fragment-parameter support (`where=fragment`)** — stays parked until a
+   second hash-route target demands it; the Juice Shop attempt alone is n=1.
 2. ~~Wire the campaign into the CLI~~ **Done (2026-09-24)** — `run_engine.py
    --campaign ROUNDS`.
 3. **Second browser-context technique** (e.g. stored XSS or DOM injection)
