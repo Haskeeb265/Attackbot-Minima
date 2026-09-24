@@ -71,6 +71,16 @@ CONTEXT_JS_CODE = "js_code"
 CONTEXT_CSS = "css"
 CONTEXT_RAW_HTML = "raw_html"
 CONTEXT_COMMENT = "comment"
+#: The value came back inside a **JSON (or JSON-family) response** — a string
+#: value in an API document, not markup. Classified from the response's declared
+#: Content-Type, *never* by sniffing bytes: sniffing is how a JSON document that
+#: happens to contain ``<script>`` ends up mislabelled. The context is
+#: deliberately NOT executable: the wire lens cannot know which client-side sink
+#: the value reaches (the DOM lens exists for that question), so claiming
+#: ``raw_html`` here was the engine claiming markup parsing it had not observed.
+#: The reflection itself stays a fact (an API echo is a real lead for client-side
+#: classes); the fiction was only the context name.
+CONTEXT_JSON_VALUE = "json_value"
 #: Reflected, but the parse could not place it (a broken document, an encoding
 #: we do not walk).  Honest, and distinct from "not reflected".
 CONTEXT_UNKNOWN = "unknown"
@@ -120,6 +130,7 @@ REFLECTION_CONTEXTS: tuple[str, ...] = (
     CONTEXT_CSS,
     CONTEXT_RAW_HTML,
     CONTEXT_COMMENT,
+    CONTEXT_JSON_VALUE,
     CONTEXT_UNKNOWN,
 )
 
@@ -152,6 +163,37 @@ DANGEROUS_UNKNOWN = CONTEXT_UNKNOWN
 def is_reflection_context(value: str) -> bool:
     """True when *value* is one of the context names this engine recognises."""
     return value in REFLECTION_CONTEXTS
+
+
+#: Content-Type families. Markup goes to the HTML context classifier; the JSON
+#: family to the non-executable ``json_value`` context; everything else is
+#: honest ``unknown`` (the lens only understands markup). An absent header is
+#: deliberately NOT "other": too many real servers omit it on HTML responses,
+#: and refusing to classify those would regress the fixture and DVWA for no
+#: safety gain.
+MARKUP_TYPES = ("text/html", "application/xhtml", "text/xml", "application/xml")
+JSON_TYPES = ("application/json", "application/ld+json", "text/json")
+
+
+def context_for_content_type(content_type: str) -> str | None:
+    """The reflection context *content_type* forces, or ``None`` when the HTML
+    classifier should decide.
+
+    The gate is **declared type, not sniffed bytes**: a JSON document that
+    happens to contain ``<script>`` must stay ``json_value`` because its
+    producer promised JSON, and an HTML document with no header must still be
+    classified because its producer merely said nothing. ``None`` means "the
+    HTML state machine may run"; a string return is the forced context for
+    *every* reflection found in the body.
+    """
+    value = (content_type or "").split(";", 1)[0].strip().lower()
+    if not value:
+        return None
+    if value.startswith(MARKUP_TYPES):
+        return None
+    if value.startswith(JSON_TYPES):
+        return CONTEXT_JSON_VALUE
+    return CONTEXT_UNKNOWN
 
 
 def is_executable_context(value: str) -> bool:

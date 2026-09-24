@@ -23,6 +23,7 @@ from service.vuln_engine.kernel.observation import (
     CONTEXT_IN_TAG,
     CONTEXT_JS_CODE,
     CONTEXT_JS_STRING,
+    CONTEXT_JSON_VALUE,
     CONTEXT_RAW_HTML,
     CONTEXT_SINGLE_QUOTED_ATTRIBUTE,
     CONTEXT_UNKNOWN,
@@ -33,6 +34,7 @@ from service.vuln_engine.kernel.observation import (
     OBS_OOB_INTERACTION,
     OBS_REFLECTION,
     OBS_SCRIPT_EXECUTION,
+    context_for_content_type,
 )
 from service.vuln_engine.world.observe import (
     browser_observations,
@@ -107,6 +109,85 @@ def test_a_document_the_scanner_cannot_walk_is_unknown_rather_than_safe() -> Non
 
 def test_an_ordinary_unclosed_document_still_has_a_context() -> None:
     assert _context_of("<div>{x}") == CONTEXT_RAW_HTML
+
+
+# --------------------------------------------------------------------------- #
+# the response-shape gate (F1): declared Content-Type, never sniffed bytes
+# --------------------------------------------------------------------------- #
+
+
+def test_the_content_type_gate_sends_markup_to_the_html_classifier() -> None:
+    for value in ("text/html", "text/html; charset=utf-8", "application/xhtml+xml",
+                  "text/xml", "application/xml"):
+        assert context_for_content_type(value) is None, value
+
+
+def test_the_content_type_gate_forces_the_json_context_on_the_json_family() -> None:
+    for value in ("application/json", "application/json; charset=utf-8",
+                  "application/ld+json", "text/json"):
+        assert context_for_content_type(value) == CONTEXT_JSON_VALUE, value
+
+
+def test_the_content_type_gate_marks_other_declared_types_unknown() -> None:
+    for value in ("text/plain", "image/png", "application/octet-stream"):
+        assert context_for_content_type(value) == CONTEXT_UNKNOWN, value
+
+
+def test_an_absent_content_type_leaves_the_legacy_path_open() -> None:
+    # No header is NOT "other": real servers omit it on HTML responses, and
+    # refusing to classify those would regress the fixture and DVWA for nothing.
+    assert context_for_content_type("") is None
+
+
+def test_a_json_echo_is_never_classified_by_the_html_state_machine() -> None:
+    # The F1 fiction, stated exactly: a JSON body containing <script> was being
+    # labelled raw_html (executable) from bytes the producer promised would not
+    # be parsed as markup.
+    body = b'{"items": [{"q": "ab1c2d3<script>x</script>"}]}'
+    observations = http_observations(
+        RawHttpExchange(
+            url="http://h/api?q=ab1c2d3<script>x</script>",
+            status=200,
+            body=body,
+            headers={"content-type": "application/json"},
+        ),
+        probe="p",
+        canary='ab1c2d3<script>x</script>',
+        mark="ab1c2d3",
+    )
+    reflection = next(item for item in observations if item.kind == OBS_REFLECTION)
+    assert reflection.payload["context"] == CONTEXT_JSON_VALUE
+    assert reflection.payload["content_type_gate"] == CONTEXT_JSON_VALUE
+    assert reflection.payload["reflected"] is True
+
+
+def test_a_markup_response_still_uses_the_html_classifier() -> None:
+    body = b'<input value="ab1c2d3">'
+    observations = http_observations(
+        RawHttpExchange(
+            url="http://h/",
+            status=200,
+            body=body,
+            headers={"content-type": "text/html; charset=utf-8"},
+        ),
+        probe="p",
+        canary="ab1c2d3",
+        mark="ab1c2d3",
+    )
+    reflection = next(item for item in observations if item.kind == OBS_REFLECTION)
+    assert reflection.payload["context"] == CONTEXT_DOUBLE_QUOTED_ATTRIBUTE
+    assert "content_type_gate" not in reflection.payload
+
+
+def test_a_json_echo_still_counts_as_a_reflection_fact() -> None:
+    # The gate removes the fiction, not the fact: an API echo is a real lead for
+    # client-side classes.
+    found = find_reflection(
+        '{"q": "ab1c2d3"}', "ab1c2d3", mark="ab1c2d3", forced_context=CONTEXT_JSON_VALUE
+    )
+    assert found.reflected and found.occurrences == 1
+    assert found.context == CONTEXT_JSON_VALUE
+    assert not found.executable_context
 
 
 # --------------------------------------------------------------------------- #

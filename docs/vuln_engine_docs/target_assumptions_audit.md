@@ -28,7 +28,18 @@ compose; nothing in `service/vuln_engine/` may change meaning.*
 
 ## Findings
 
-### F1 — the wire lens assumes every response is HTML (real, general; the JSON-API cost is measured)
+### F1 — the wire lens assumes every response is HTML (real, general; the JSON-API cost is measured) — **RESOLVED 2026-09-24**
+
+> **Resolution:** the response-shape gate. `context_for_content_type()` in the
+> kernel maps the *declared* Content-Type (never sniffed bytes) to a forced
+> reflection context: markup → the HTML classifier, JSON family → the new
+> non-executable `json_value` context, other declared types → honest `unknown`,
+> no header → legacy path (real servers omit it on HTML). `http_observations`
+> applies the gate; the reflection stays a fact (an API echo is a genuine lead
+> for client-side classes — `xss_reflected` now says so explicitly and defers
+> to the DOM lens), while the fiction of `raw_html`-from-JSON is gone. Measured
+> before: `'{"q": "<script>"}'` classified `raw_html`; after: `json_value`,
+> `executable_context` false. 313 tests, mypy clean, fixture e2e untouched.
 
 `http_observations` runs `find_reflection` on `exchange.text` unconditionally —
 there is no Content-Type gate. `classify_context`'s state machine begins in

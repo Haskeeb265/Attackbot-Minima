@@ -23,7 +23,7 @@ by ``verdict.check_independence``.
 from __future__ import annotations
 
 from ...kernel.evidence import EVIDENCE_REFLECTION, EVIDENCE_SEMANTIC, Evidence
-from ...kernel.observation import CONTEXT_UNKNOWN, OBS_REFLECTION, Observation
+from ...kernel.observation import CONTEXT_JSON_VALUE, CONTEXT_UNKNOWN, OBS_REFLECTION, Observation
 from ...kernel.technique import Hypothesis
 from ...kernel.verdict import Candidate
 from ..common import surface_id_prefix, with_parameter
@@ -74,17 +74,29 @@ def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[
     # attributes) is a *lead*, not a candidate and not a silence.
     spec = probe_grammar.execution_spec_for(hypothesis, context)
     if spec is None:
+        if context == CONTEXT_JSON_VALUE:
+            # The response-shape gate (F1): an API echo is a real fact — JSON
+            # values feed client-side sinks all the time — but the *wire* lens
+            # cannot see which sink. The lead says exactly that, and the DOM
+            # lens (xss_dom) is the instrument that can follow it up.
+            summary = (
+                f"parameter {surface.param!r} is reflected {occurrences} time(s) in a "
+                "JSON response; the value may reach a client-side sink, which is a "
+                "question for the DOM lens, not the wire lens"
+            )
+        else:
+            summary = (
+                f"parameter {surface.param!r} is reflected {occurrences} time(s) in a "
+                f"{context.replace('_', ' ')} context, and Phase 1 has no confirmation "
+                "payload for that context"
+            )
         return [
             Candidate(
                 id=candidate_id,
                 technique=NAME,
                 vuln_class="xss",
                 surface=surface_dict,
-                summary=(
-                    f"parameter {surface.param!r} is reflected {occurrences} time(s) in a "
-                    f"{context.replace('_', ' ')} context, and Phase 1 has no confirmation "
-                    "payload for that context"
-                ),
+                summary=summary,
                 evidence=Evidence(
                     kind=OBS_REFLECTION,
                     grade=grade,

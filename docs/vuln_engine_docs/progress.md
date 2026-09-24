@@ -524,9 +524,15 @@ Two-and-a-half vuln classes is a narrow lens.
   unused: **removed (2026-09-24)** when F2 landed — the verifier's confirmation
   payloads now travel on the candidate's confirmation spec, so a duplicated
   grammar has nothing left to duplicate.
-- **Audit finding F1 (JSON responses classify as `raw_html`) remains open** —
-  the observation layer still assumes every response is HTML. Untouched by the
-  DVWA work because DVWA is server-rendered HTML; it bites on JSON APIs.
+- **Audit finding F1 (JSON responses classify as `raw_html`) — RESOLVED
+  (2026-09-24).** The response-shape gate is in: `context_for_content_type()`
+  maps the declared Content-Type to a forced reflection context (markup → HTML
+  classifier, JSON family → non-executable `json_value`, other → honest
+  `unknown`, no header → legacy path), applied in `http_observations`. An API
+  echo is now an honest lead that names the DOM lens as the follow-up
+  instrument, instead of an executable candidate from fiction. 313 tests
+  (7 new), mypy clean. The benchmark proposal's prediction stands ready: bout
+  3 (WebGoat, JSON-heavy) should no longer produce F1-classified failures.
 - `where=fragment` stays parked until a second hash-route target demands it.
 - Playwright is installed and now the answering driver (previously CDP only);
   the capability report names whichever answered, so no action needed.

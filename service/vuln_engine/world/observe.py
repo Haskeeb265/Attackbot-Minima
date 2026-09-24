@@ -41,10 +41,12 @@ from ..kernel.observation import (
     CONTEXT_IN_TAG,
     CONTEXT_JS_CODE,
     CONTEXT_JS_STRING,
+    CONTEXT_JSON_VALUE,
     CONTEXT_RAW_HTML,
     CONTEXT_SINGLE_QUOTED_ATTRIBUTE,
     CONTEXT_UNKNOWN,
     CONTEXT_UNQUOTED_ATTRIBUTE,
+    context_for_content_type,
     OBS_BROWSER,
     OBS_DIALOG,
     OBS_DOM_PLACEMENT,
@@ -301,13 +303,23 @@ def _walk(html: str, index: int) -> str:
 _NEIGHBOURHOOD = 40
 
 
-def find_reflection(html: str, canary: str, *, mark: str = "") -> Reflection:
+def find_reflection(
+    html: str, canary: str, *, mark: str = "", forced_context: str = ""
+) -> Reflection:
     """Locate *canary* in *html* and place it structurally.
 
     *mark* is a short distinctive substring of the canary (e.g. a random token
     with no markup characters) used to detect the *transformed* case: the mark is
     present, the canary is not, so the target altered our bytes rather than
     dropping them.
+
+    *forced_context* is the response-shape gate (F1): when the exchange's
+    declared Content-Type is not markup, the HTML state machine must not speak
+    about the body at all — a JSON document that happens to contain ``<script>``
+    would otherwise be classified ``raw_html`` (executable) from bytes the
+    producer promised would never be parsed as markup. Every occurrence in a
+    gated response shares the one forced context; the DOM lens remains free to
+    ask where a JSON-fed value actually lands in a rendered page.
     """
     if not canary:
         return Reflection()
@@ -319,7 +331,7 @@ def find_reflection(html: str, canary: str, *, mark: str = "") -> Reflection:
         return Reflection(transformed=transformed)
     contexts: list[str] = []
     for offset in offsets:
-        context = classify_context(html, offset)
+        context = forced_context or classify_context(html, offset)
         if context not in contexts:
             contexts.append(context)
     first = offsets[0]
@@ -399,11 +411,21 @@ def http_observations(
     if not canary or not exchange.ok:
         return observations
     html = exchange.text
-    reflection = find_reflection(html, canary, mark=mark)
+    # The response-shape gate (F1): the declared Content-Type decides which
+    # classifier may speak. Markup -> the HTML state machine; JSON family ->
+    # the non-executable ``json_value`` context; anything else declared ->
+    # honest ``unknown``; no header -> the legacy path (too many real servers
+    # omit the header on HTML for the absence to mean "not markup").
+    forced = context_for_content_type(
+        str((exchange.headers or {}).get("content-type", ""))
+    )
+    reflection = find_reflection(html, canary, mark=mark, forced_context=forced or "")
     if reflection.reflected or reflection.transformed or is_escaped_verbatim(html, canary):
         payload = reflection.to_payload()
         if is_escaped_verbatim(html, canary):
             payload["escaped_verbatim"] = True
+        if forced:
+            payload["content_type_gate"] = forced
         observations.append(
             Observation(kind=OBS_REFLECTION, probe=probe, at=at, payload=payload)
         )
