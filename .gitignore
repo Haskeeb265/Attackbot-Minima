@@ -203,6 +203,13 @@ service/recon_pipeline/pipelines/cloud_resource/output/
 # pipelines' curated inputs stay tracked.
 /output/
 
+# VWA benchmark run artifacts: one pass directory per (case, git-sha, tier)
+# holding world.jsonl, pass.json, stdout/stderr, plus the accumulated
+# corpus.jsonl scorecards. All of it is state, not source — reproduced by
+# re-running the pass (`python benchmarks/run_benchmark.py <case>`), so none of
+# it is tracked. The cases themselves (benchmarks/vwas/) are source and stay in.
+/benchmarks/results/
+
 # `run_recon.py --until-converged` artifacts, written next to the combined report:
 # the round-by-round account and the per-engagement frontier ledger. State, not
 # source, and reproduced by re-running the loop.

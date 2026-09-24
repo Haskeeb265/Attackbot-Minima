@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "juice-shop",
+  "target": {
+    "compose_service": "juice_shop",
+    "image": "bkimminich/juice-shop@sha256:73c53fbf442e8337b3ea3d98c7e8550308854701ebdfce4cc39768f36b75430e",
+    "host": "127.0.0.1",
+    "port": 3000,
+    "health_path": "/"
+  },
+  "session": {"cookies": [], "csrf": false},
+  "declared_surfaces": [
+    {
+      "url": "http://127.0.0.1:3000/api/Products",
+      "param": "q",
+      "where": "query",
+      "capability": "public_param",
+      "label": "API product search filter (JSON API)"
+    }
+  ],
+  "campaign_rounds": 6,
+  "ground_truth_coverage": "partial",
+  "notes": "The SPA search surface (hash-route fragment param) is deliberately NOT declared: the with_parameter fragment gap is the measured capability this case keeps visible. The JSON API exercises the F1 gate path."
+}

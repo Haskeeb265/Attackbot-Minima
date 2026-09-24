@@ -169,8 +169,8 @@ def is_reflection_context(value: str) -> bool:
 #: family to the non-executable ``json_value`` context; everything else is
 #: honest ``unknown`` (the lens only understands markup). An absent header is
 #: deliberately NOT "other": too many real servers omit it on HTML responses,
-#: and refusing to classify those would regress the fixture and DVWA for no
-#: safety gain.
+#: and refusing to classify those would regress the server-rendered targets
+#: for no safety gain.
 MARKUP_TYPES = ("text/html", "application/xhtml", "text/xml", "application/xml")
 JSON_TYPES = ("application/json", "application/ld+json", "text/json")
 

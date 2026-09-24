@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "id": "dvwa-low",
+  "target": {
+    "compose_service": "dvwa",
+    "image": "vulnerables/web-dvwa@sha256:dae203fe11646a86937bf04db0079adef295f426da68a92b40e3b181f337daa7",
+    "host": "127.0.0.1",
+    "port": 4280,
+    "health_path": "/login.php"
+  },
+  "session": {
+    "cookies": ["PHPSESSID", "security"],
+    "seeded_cookies": ["security=low"],
+    "csrf": true,
+    "bootstrap": "docker/dvwa_bootstrap.py"
+  },
+  "declared_surfaces": [
+    {
+      "url": "http://127.0.0.1:4280/vulnerabilities/xss_r/",
+      "param": "name",
+      "where": "query",
+      "capability": "public_param",
+      "label": "DVWA reflected XSS name parameter"
+    },
+    {
+      "url": "http://127.0.0.1:4280/vulnerabilities/sqli_blind/?Submit=Submit",
+      "param": "id",
+      "where": "query",
+      "capability": "delayed_response",
+      "label": "DVWA blind SQLi id parameter (Submit=Submit fixed in URL)"
+    }
+  ],
+  "campaign_rounds": 6,
+  "ground_truth_coverage": "partial",
+  "notes": "Surfaces transcribed from the completed bout (commit cf006da). Submit=Submit is a black-box fact: DVWA's low sqli_blind page only runs its query when the form submit param is present. Session: the runner runs the bootstrap fresh per pass and parses its 'cookie header:' line (PHPSESSID is per-boot, so it is never stored here); seeded_cookies pins the security level, and 'cookies' names the pair the bootstrap must produce."
+}

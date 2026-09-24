@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "case_id": "juice-shop",
+  "vulns": [
+    {
+      "id": "juice-shop/search/searchValue",
+      "vuln_class": "xss",
+      "surface": {"path": "/#/search", "param": "q", "in": "fragment"},
+      "tier": "T1",
+      "expected_evidence": "execution",
+      "reachable_by_declaration": false,
+      "source": "reproduced by hand with the engine's own browser transport: bypassSecurityTrustHtml into span#searchValue innerHTML; requires a fragment parameter (with_parameter gap)"
+    },
+    {
+      "id": "juice-shop/api/Products/q",
+      "vuln_class": "none",
+      "surface": {"path": "/api/Products", "param": "q", "in": "query"},
+      "tier": "T1",
+      "expected_evidence": "none",
+      "reachable_by_declaration": true,
+      "source": "hand-verified negative: the endpoint returns JSON and does not echo the parameter into executable markup; the engine settling none here is correct behavior, not a miss"
+    }
+  ]
+}

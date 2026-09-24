@@ -480,6 +480,68 @@ punctuation-followed-by-whitespace, so reproduction URLs survive intact.
 
 ---
 
+## The benchmark skeleton: two cases, a runner, a scorer (2026-09-25)
+
+The [benchmark proposal](./vwa_benchmark_proposal.md) v2 became the smallest
+real thing: not a harness, a skeleton. Two transcribed cases, a runner that
+invokes the engine like an operator would, a scorer that joins the artifacts
+against ground truth, the attribution convention, and the isolation tests —
+the parts that make measurement possible, with nothing speculative around
+them.
+
+### Built
+
+- `benchmarks/vwas/dvwa-low/` and `benchmarks/vwas/juice-shop/` — the two
+  transcribed cases: `case.json` (schema 1, digest-pinned images, declared
+  surfaces) and tiered `ground-truth.json` with `reachable_by_declaration`
+  flags and a deliberate `vuln_class: "none"` correct-negative (Juice Shop's
+  JSON API). The undeclared T2 entries are the point: they measure the
+  operator gap instead of flattering the engine.
+- `benchmarks/run_benchmark.py` — the runner: schema gate, loopback guard
+  (refuses any non-loopback target), pass id = git SHA + tier, one subprocess
+  per case through `run_engine.py`, artifacts archived under
+  `benchmarks/results/`. Ground truth is never in argv, environment, or
+  output path — the engine physically cannot consult it.
+- `benchmarks/score.py` — the scorer: joins findings to GT on
+  **(host, path, param, vuln_class)** (never the payload), TP/partial/miss per
+  entry, correct-negative handling, `recall_declared` vs `recall_total`, and
+  an unadjudicated queue for findings matching no GT entry — never a silent
+  false positive. Scorecards append to `benchmarks/results/corpus.jsonl`.
+- `benchmarks/ATTRIBUTION.md` — the pinned convention with three worked
+  examples (Juice Shop's SPA miss = SURFACE, pre-F2 sqli = TECHNIQUE,
+  pre-F1 JSON = OBSERVATION).
+
+### The isolation tests (7, all passing)
+
+`tests/vuln_engine/benchmarks/test_benchmark_skeleton.py` pins the one-way
+door mechanically: no engine module mentions the benchmark, and no engine
+module names a VWA target (dvwa/juice/webgoat/mutillidae/bwapp — the sweep
+caught one of our own comments in `kernel/observation.py` and it was reworded;
+the engine speaks of "server-rendered targets", never of a benchmark case).
+Further: every case passes the schema gate and loopback guard, the guard
+refuses a real host, the scorer reproduces the DVWA bout's scorecard from a
+synthetic log (2 TPs, `recall_declared` 1.0), the scorer surfaces an
+unadjudicated finding instead of scoring it, and Juice Shop's correct-negative
+case is honored as a pass.
+
+### The session question, resolved
+
+The runner runs a case's declared bootstrap (`docker/dvwa_bootstrap.py`)
+fresh per pass and parses its printed `cookie header:` line — a pass never
+reuses another pass's session id, and the id is never stored in the case
+file. `seeded_cookies` merges literal pairs (DVWA pins `security=low`), and
+the declared `cookies` names become a pre-flight check: a bootstrap that
+produced nothing the case expected fails before the engine wastes a run.
+
+### Not yet done
+
+No live validation pass yet: the skeleton is test-verified (320 tests, mypy
+clean) but `python benchmarks/run_benchmark.py dvwa-low` against an up
+container, scored, should show 2 TP + `recall_declared` 1.0 — that is the
+next act, and the first corpus row.
+
+---
+
 ## The honest assessment: how far from finding real bugs
 
 **The instrument is built and calibrated; it has not yet been used.** Every

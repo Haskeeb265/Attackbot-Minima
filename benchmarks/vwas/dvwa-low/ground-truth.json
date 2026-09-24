@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "case_id": "dvwa-low",
+  "vulns": [
+    {
+      "id": "dvwa-low/xss_r/name",
+      "vuln_class": "xss",
+      "surface": {"path": "/vulnerabilities/xss_r/", "param": "name", "in": "query"},
+      "tier": "T1",
+      "expected_evidence": "execution",
+      "reachable_by_declaration": true,
+      "source": "reproduced by hand in this image: reflected into <pre> element text, browser-confirmed by the engine (commit cf006da)"
+    },
+    {
+      "id": "dvwa-low/sqli_blind/id",
+      "vuln_class": "sqli",
+      "surface": {"path": "/vulnerabilities/sqli_blind/", "param": "id", "in": "query"},
+      "tier": "T1",
+      "expected_evidence": "differential",
+      "requires": "param-gating: Submit=Submit in the URL",
+      "reachable_by_declaration": true,
+      "source": "reproduced by hand in this image: quote_closed SLEEP(4.0) separated 4.00s vs 0.00s (commit cf006da)"
+    },
+    {
+      "id": "dvwa-low/xss_s/message",
+      "vuln_class": "xss",
+      "surface": {"path": "/vulnerabilities/xss_s/", "param": "txtName", "in": "body"},
+      "tier": "T2",
+      "expected_evidence": "execution",
+      "reachable_by_declaration": false,
+      "source": "DVWA documentation: stored XSS via guestbook POST; needs a body-form surface and a session-scoped read-back page"
+    },
+    {
+      "id": "dvwa-low/commandi/ip",
+      "vuln_class": "commandi",
+      "surface": {"path": "/vulnerabilities/exec/", "param": "ip", "in": "body"},
+      "tier": "T2",
+      "expected_evidence": "execution",
+      "reachable_by_declaration": false,
+      "source": "DVWA documentation: shell_exec ping; no command-injection technique exists in Phase 1 (a miss-list entry by design)"
+    },
+    {
+      "id": "dvwa-low/sqli/id",
+      "vuln_class": "sqli",
+      "surface": {"path": "/vulnerabilities/sqli/?Submit=Submit", "param": "id", "in": "query"},
+      "tier": "T2",
+      "expected_evidence": "execution",
+      "requires": "union/error-based echo, not timing",
+      "reachable_by_declaration": false,
+      "source": "DVWA documentation: the non-blind page echoes rows; the timing technique cannot see it, and no echo-differential technique exists yet"
+    },
+    {
+      "id": "dvwa-low/captcha/step",
+      "vuln_class": "captcha",
+      "surface": {"path": "/vulnerabilities/captcha/", "param": "step", "in": "body"},
+      "tier": "T2",
+      "expected_evidence": "oob",
+      "reachable_by_declaration": false,
+      "source": "DVWA documentation: insecure CAPTCHA flow bypass; out of scope for every current technique"
+    }
+  ]
+}
