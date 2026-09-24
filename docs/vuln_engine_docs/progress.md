@@ -561,12 +561,37 @@ unadjudicated empty. The pass proves the scorer distinguishes *probed and
 honestly negative* from *never probed*: an empty log would have scored the
 same entry `fp-or-miss`.
 
+### Third live pass (2026-09-25): the llm-ab A/B — the advisory, measured
+
+The benchmark's first controlled experiment: same case (`dvwa-low`), same
+SHA (`78e26e3`), same code — fast tier vs `llm-ab` tier, two fresh passes,
+two corpus rows. Validity check from the logs: fast has zero `llm.junction`
+rows; llm-ab has four (rank, synthesize, write ×2), all
+`degraded=False validated=True` on `openai/gpt-oss-20b` — the advisory was
+live, not silently off.
+
+**Result: identical scorecards and identical campaigns.** 2/2 TP,
+`recall_declared` 1.0, same evidence classes, empty unadjudicated queue;
+round-by-round, both passes ran the same 3/6 rounds in the same order with
+the same "quiet first" reasons. The measurable deltas: +5s wall time (model
+latency), and the llm-ab stdout carries the write junction's drafted prose
+per finding. The rank junction ran but could not matter: with three arms,
+all unattempted, the noise-cost ordering already fixes the schedule, so its
+answer had nothing to reorder.
+
+That is the honest finding, and exactly what the benchmark exists to say:
+**no recall delta, no noise delta** on a small arm pool. The rank junction's
+hypothesis — spending budget better — needs an arm pool big enough for
+ordering to be a real choice: more declared surfaces, or a technique
+registry deep enough that picking *which next* is a decision. Until such a
+case exists, `llm-ab` buys prose, not performance.
+
 ### Not yet done
 
-Nothing pending in the skeleton. Next measurement acts when they earn their
-place: the `llm-ab` tier on an existing case (does the advisory move recall
-or only noise?), and a third case once a second breadth target with known
-ground truth enters rotation.
+A case whose arm pool gives the rank junction something to reorder (more
+declared surfaces, more techniques) — that is where the advisory can first
+show a measurable delta. A third breadth case with known ground truth,
+when rotation earns it.
 
 ---
 
