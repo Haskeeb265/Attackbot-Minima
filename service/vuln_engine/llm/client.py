@@ -25,7 +25,11 @@ answer that drifts from the shape is a degraded opinion, not an exception.
 The transport is deliberately the same idiom the recon side's
 ``platform/enrich.py`` set: a plain POST, hard timeout, no SDK. ``ENV_KEY``
 (``VULN_ENGINE_LLM_API_KEY``) plus ``VULN_ENGINE_LLM_API_URL`` gates the
-network path; an injectable ``caller`` replaces it in tests.
+network path; an injectable ``caller`` replaces it in tests. The URL has a
+default (Groq's OpenAI-shaped endpoint — every junction question is a small
+structured ask, so the default model is the fast/cheap one); setting
+``VULN_ENGINE_LLM_API_URL`` / ``VULN_ENGINE_LLM_MODEL`` overrides it without
+ touching this file.
 """
 
 from __future__ import annotations
@@ -47,7 +51,18 @@ ENV_KEY = "VULN_ENGINE_LLM_API_KEY"
 ENV_URL = "VULN_ENGINE_LLM_API_URL"
 ENV_MODEL = "VULN_ENGINE_LLM_MODEL"
 DEFAULT_TIMEOUT = 20.0
-DEFAULT_MODEL = "general"
+#: The default endpoint: Groq's OpenAI-shaped chat completions. The caller's
+#: wire format is exactly this shape, so the default and the override differ
+#: only in the URL string. Override with ``VULN_ENGINE_LLM_API_URL``.
+DEFAULT_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+#: The default model: the junctions ask small, structured, temperature-0
+#: questions (a ranking over four techniques; three multiple-choice payload
+#: questions), so the fast/cheap tier is the right default, and the questions
+#: are engineered so a weaker model degrades into a *refused* opinion rather
+#: than a wrong one — validation is the bar, not eloquence. Chosen from the
+#: live roster (2026-09-24): the older llama-instant ids are retired, and
+#: ``openai/gpt-oss-20b`` is the small end of the text-capable chat models.
+DEFAULT_MODEL = "openai/gpt-oss-20b"
 
 #: The world-log row type every junction call is recorded as.
 EVENT_LLM_JUNCTION = "llm.junction"
@@ -180,7 +195,7 @@ class LLMClient:
         ).strip()
         self._api_url = (
             api_url if api_url is not None else os.getenv(ENV_URL, "")
-        ).strip()
+        ).strip() or DEFAULT_API_URL
         self._model = (
             (model if model is not None else os.getenv(ENV_MODEL, "")).strip()
             or DEFAULT_MODEL
@@ -189,14 +204,10 @@ class LLMClient:
         self._caller = caller
         if self._caller is not None:
             self._health = Health(available=True, model="injected")
-        elif self._api_key and self._api_url:
+        elif self._api_key:
             self._health = Health(available=True, model=self._model)
-        elif not self._api_key:
-            self._health = Health(available=False, reason=NO_KEY_REASON)
         else:
-            self._health = Health(
-                available=False, reason=f"{ENV_URL} not set (key present, url missing)"
-            )
+            self._health = Health(available=False, reason=NO_KEY_REASON)
 
     @property
     def health(self) -> Health:

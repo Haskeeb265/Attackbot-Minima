@@ -406,6 +406,39 @@ the same SQL the proposer selected.
 
 ---
 
+## AI integration live, VWA training program defined, engine cleanup (2026-09-24)
+
+Three threads closed in one pass:
+
+- **AI junctions are live with a real key.** The engine now loads the repo
+  root `.env` itself (`load_env_file()` — ten lines, no dotenv dependency, real
+  environment wins, values never echoed), and the LLM client defaults to
+  Groq's OpenAI-shaped endpoint (`https://api.groq.com/openai/v1/chat/completions`)
+  with `openai/gpt-oss-20b` (chosen from the live roster — the llama-instant ids
+  are retired; a retired model signals as a 404). `--llm-draft` now works with
+  no URL config at all. One-shot smoke test (`docker/llm_smoke_test.py`): key
+  loaded, one rank-junction call validated with sane priors, wiring proven —
+  deliberately *not* a campaign re-run; the DVWA run already proved the engine,
+  this proved the wiring at one-call cost. `requests` joined requirements.txt
+  (the caller's only import, lazy). The no-key degraded path is untouched:
+  306 tests still pass keyless.
+- **The VWA training program is defined** (`vwa_training_rnd.md`): the
+  Juice Shop/DVWA bouts generalized into a repeatable per-target protocol with
+  five anti-coupling rules (operator layer owns target knowledge; n=2 before
+  grammar; the answer key is consulted *after* the run; honest zeros are
+  results; per-bout artifacts never enter `techniques/`). An
+  architecture-first roster of nine bouts (WebGoat, Security Shepherd,
+  Mutillidae, bWAPP, Railsgoat, DVWA Medium/High as the defense axis, and the
+  parked Juice Shop fragment re-run), each with the axis it stresses and its
+  predicted honest gaps.
+- **Cleanup:** the candidate-id host duplication fixed once, in one place —
+  `techniques/common.surface_id_prefix()` (`xss_reflected:127.0.0.1:/search:q`)
+  replacing five copies of the f-string spelling across the techniques. Ids
+  from *before* this change will not match on offline replay (old logs keep
+  their old ids; new runs are self-consistent). 306 tests, mypy clean.
+
+---
+
 ## The honest assessment: how far from finding real bugs
 
 **The instrument is built and calibrated; it has not yet been used.** Every

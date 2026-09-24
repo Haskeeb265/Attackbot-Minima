@@ -39,7 +39,7 @@ from ...kernel.evidence import EVIDENCE_SEMANTIC, Evidence
 from ...kernel.observation import OBS_HTTP_RESPONSE, Observation
 from ...kernel.technique import Hypothesis
 from ...kernel.verdict import Candidate
-from ..common import with_parameter
+from ..common import surface_id_prefix, with_parameter
 from . import probes as probe_grammar
 
 NAME = "sqli_blind_time"
@@ -134,7 +134,7 @@ def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[
     difference = winner_median - baseline
     return [
         Candidate(
-            id=f"{NAME}:{surface.host}:{surface.url.split('//')[-1]}:{surface.param}",
+            id=f"{surface_id_prefix(NAME, surface)}",
             technique=NAME,
             vuln_class="sqli",
             surface={

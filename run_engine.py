@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,6 +103,40 @@ def _out(line: str) -> None:
     except UnicodeEncodeError:
         encoding = sys.stdout.encoding or "utf-8"
         print(line.encode(encoding, "replace").decode(encoding, "replace"))
+
+
+def load_env_file(path: Path | None = None) -> dict[str, str]:
+    """Load ``KEY=VALUE`` lines from *path* (default: the repo root ``.env``).
+
+    The engine's only secrets mechanism, deliberately ten lines: the LLM
+    junctions need a key, the key already sits in the operator's ``.env`` (the
+    same file compose reads), and adding a dotenv dependency to parse one
+    format we fully control would be a supply chain for a config file. Rules:
+    blank lines and ``#`` comments are skipped, an ``export `` prefix is
+    tolerated, surrounding quotes are stripped, and **the real environment
+    wins** — a variable already set is never overwritten, so an operator's
+    shell overrides the file, which is the only precedence worth having.
+    Values are never logged and never echoed; the return value is for tests.
+    """
+    env_path = path or ROOT / ".env"
+    if not env_path.is_file():
+        return {}
+    loaded: dict[str, str] = {}
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line.startswith("export "):
+            line = line[len("export "):]
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not key:
+            continue
+        if key not in os.environ:
+            os.environ[key] = value
+        loaded[key] = value
+    return loaded
 
 
 def fixture_profile(*, chrome_path: str = "") -> Profile:
@@ -323,6 +358,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--replay", default="", metavar="LOG", help="recompute a finished run offline")
     parser.add_argument("--json", action="store_true", help="print the machine report only")
     args = parser.parse_args(argv)
+    # Secrets before anything that could want them: the advisory junctions read
+    # the environment lazily at client construction, which happens inside run().
+    load_env_file()
 
     if args.replay:
         log = WorldLog(args.replay)
@@ -410,8 +448,10 @@ def main(argv: list[str] | None = None) -> int:
     _out(f"  techniques: {', '.join(item['name'] for item in report.techniques) or '(none)'}")
     if getattr(report, "advisory", None):
         health = report.advisory
+        llm = health.get("llm", {})
         state = "available" if health.get("available") else "degraded"
-        _out(f"  advisory:   {state} ({health.get('llm', {}).get('reason', '')})")
+        detail = llm.get("model") or llm.get("reason", "")
+        _out(f"  advisory:   {state} ({detail})")
     gate = report.gate
     _out(
         f"  gate:       {gate['decisions']} decision(s) {gate['by_verb']}; "

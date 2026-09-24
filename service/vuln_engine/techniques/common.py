@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
+from ..kernel.technique import Surface
+
 
 # --------------------------------------------------------------------------- #
 # DOM placement markers (the xss_dom contract's shared spelling)
@@ -46,6 +48,23 @@ def dom_marker(mark: str, question: str) -> str:
     return f"{DOM_MARKER_PREFIX}{mark}:{question}"
 
 
+def surface_id_prefix(name: str, surface: Surface) -> str:
+    """The candidate/hypothesis id prefix for *name* on *surface*.
+
+    ``name`` + host + path (+ query, when the surface carries a fixed one) +
+    param — the host appears exactly once, so an id reads
+    ``xss_reflected:127.0.0.1:/search:q`` instead of spelling the host twice.
+    Every technique derives its ids through this one helper: a spelling this
+    widespread is one drift away from two candidates sharing an id, which is
+    the bug class the per-context suffixes already caught once.
+    """
+    parts = urlsplit(surface.url)
+    tail = parts.path or "/"
+    if parts.query:
+        tail = f"{tail}?{parts.query}"
+    return f"{name}:{surface.host}:{tail}:{surface.param}"
+
+
 def with_parameter(url: str, param: str, value: str) -> str:
     """*url* with *param* set to *value*, replacing any existing value.
 
@@ -75,5 +94,6 @@ __all__ = [
     "DOM_Q_TEXT",
     "DOM_Q_URLATTR",
     "dom_marker",
+    "surface_id_prefix",
     "with_parameter",
 ]

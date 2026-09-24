@@ -26,7 +26,7 @@ from ...kernel.evidence import EVIDENCE_REFLECTION, EVIDENCE_SEMANTIC, Evidence
 from ...kernel.observation import CONTEXT_UNKNOWN, OBS_REFLECTION, Observation
 from ...kernel.technique import Hypothesis
 from ...kernel.verdict import Candidate
-from ..common import with_parameter
+from ..common import surface_id_prefix, with_parameter
 from . import probes as probe_grammar
 
 NAME = "xss_reflected"
@@ -66,7 +66,7 @@ def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[
         "where": surface.where,
         "host": surface.host,
     }
-    candidate_id = f"{NAME}:{surface.host}:{surface.url.split('//')[-1]}:{surface.param}"
+    candidate_id = surface_id_prefix(NAME, surface)
 
     # The question is not "is this context dangerous?" but "do we have a payload
     # that breaks out of it?" — and the honest answer for a context we can reason

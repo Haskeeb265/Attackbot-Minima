@@ -14,8 +14,11 @@
 #             download: `python -m playwright install chromium`.
 #             transports/browser.py degrades to the system-Chrome CDP driver
 #             and reports `available: false` with a reason when it is absent.
+# requests    llm/client.py's plain-POST transport (imported lazily, only when
+#             a key is configured — the degraded path never needs it).
 httpx
 playwright
+requests
 
 # --- tests / typing --------------------------------------------------------
 pytest

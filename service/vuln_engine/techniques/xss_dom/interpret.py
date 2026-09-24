@@ -37,6 +37,7 @@ from ...kernel.observation import (
 )
 from ...kernel.technique import Hypothesis
 from ...kernel.verdict import Candidate
+from ..common import surface_id_prefix
 from . import probes as probe_grammar
 
 NAME = "xss_dom"
@@ -84,10 +85,7 @@ def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[
     # summary under another's verdict, which is exactly the bug the first live
     # run caught.
     def _id(context: str) -> str:
-        return (
-            f"{NAME}:{surface.host}:{surface.url.split('//')[-1]}:"
-            f"{surface.param}:{context}"
-        )
+        return f"{surface_id_prefix(NAME, surface)}:{context}"
 
     if not placements:
         return []
