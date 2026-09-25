@@ -809,6 +809,37 @@ capability misspelled in a `--surface` claim (`influence_remote_fetch` instead
 of the kernel's `can_influence_remote_fetch`) simply produced no arm — the
 technique never fires on a claim the operator did not actually make.
 
+### The first full field run (2026-09-26): try.discourse.org, etiquette on
+
+The complete pipeline against the live sandbox target: 11 operator-declared
+surfaces, hypothesize widening with campaign memory (+8 recon-observed
+surfaces), 6-round UCB campaign, all junctions wired, `--remember`. Two
+operational lessons landed as code and one as a triage fact:
+
+- **The first attempt starved silently.** With no `--surface` flags and both
+  junction calls rate-limited, the seed was empty → 0 arms → "no unsettled
+  eligible arm remains" — the campaign reported 0/6 rounds with nothing but
+  degraded-junction rows to explain why. An empty-but-valid result should be
+  loud. The second attempt declared the operator seed explicitly.
+- **The host budget was the real constraint.** 19 arms × interleaved probe
+  families blew through the default budget of 50 in round 1; 120 DEFERs and 12
+  free rounds followed. `run_engine.py` now takes `--host-budget` — a policy
+  number the operator owns, like every other budget. With 400, all 6 rounds
+  spent, one free round, 64 gate decisions, zero out-of-scope.
+- **The triage fact: this target's zero is 90% a redirect.** Probe statuses:
+  50×301, 13×200 (the https surfaces and one 42 KB real page), 1×404. Every
+  reflect recheck (21 of them, live 50/degraded 2) reasons about the same
+  thing — "redirect hides content", "redirect without body", "unexpected
+  301". The measured zero is honest but *transport-shaped*: follow-redirects
+  is off by design (the final URL is part of the observation), so an
+  http→https canonicalizing target looks unmeasured exactly where the
+  operator declared http URLs. The next-surface move is an operator one:
+  declare the https spelling of those surfaces (recon's `_url_key` already
+  treats the schemes as the same endpoint).
+
+Memory for this engagement: 7 runs distilled, 19 arms, full status
+coverage — the next `--memory-file` run inherits the redirect shape too.
+
 ---
 
 ## Open items deliberately left open

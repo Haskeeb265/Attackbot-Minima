@@ -142,12 +142,16 @@ The six techniques today:
 
 | Technique | Class | Fires on claim | Confirmed by |
 | --- | --- | --- | --- |
-| `xss_reflected` | reflected XSS | `response_reflects_input` / `public_param` | browser |
+| `xss_reflected` | reflected XSS | `http_response_reflects_input` / `public_param` | browser |
 | `xss_dom` | DOM XSS | `public_param` (client-render lens) | browser |
 | `xss_stored` | stored XSS | `persistent_storage` | stored runner (re-inject + browser) |
 | `sqli_blind_time` | blind SQLi | `delayed_response` (query or JSON body) | timing (fresh differential) |
 | `oob_fetch` | SSRF | `can_influence_remote_fetch` (query or JSON body) | oob (collaborator) |
 | `idor_differential` | IDOR | `access_differs_by_session` | authorization (flipped sessions) |
+
+The capability strings are the kernel's exact spellings (`kernel/technique.py`):
+an operator claim that misspells one simply produces no arm — the technique
+never fires on a claim the operator did not actually make.
 
 A surface's `where` decides how the parameter travels: `query` (default) puts
 the payload in the URL; `body` carries it as `{param: payload}` in a JSON

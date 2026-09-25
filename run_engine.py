@@ -415,6 +415,13 @@ def main(argv: list[str] | None = None) -> int:
             "--session-b-cookie the low-privilege identity)"
         ),
     )
+    parser.add_argument(
+        "--host-budget",
+        type=int,
+        default=0,
+        metavar="N",
+        help="per-host action budget (default 50; raise it for wide surface sets - a policy number, not a safety one)",
+    )
     parser.add_argument("--driver", default="auto", choices=("auto", "playwright", "cdp"))
     parser.add_argument("--output-dir", default="", help="where the run writes (default: per target)")
     parser.add_argument("--force", action="store_true", help="ignore the receipts ledger")
@@ -498,6 +505,8 @@ def main(argv: list[str] | None = None) -> int:
     profile.browser_driver = args.driver
     profile.cookies = "; ".join(args.cookie)
     profile.session_b_cookie = "; ".join(args.session_b_cookie)
+    if args.host_budget > 0:
+        profile.host_budget = args.host_budget
 
     advisory = Advisory.from_env() if (args.llm_draft or args.hypothesize_from_recon) else None
     output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_ROOT / profile.target.replace(":", "_")
