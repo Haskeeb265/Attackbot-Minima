@@ -10,10 +10,15 @@ confirm its own candidate. ``tests/vuln_engine/test_invariants.py`` enforces the
 first two mechanically; ``kernel/verdict.py`` enforces the last one at the moment a
 verdict is built.
 
-Two techniques exist in Phase 1, and they were chosen to be different in kind:
+The techniques, and why they are different in kind:
 
 ``xss_reflected``
     a reflection is *measured*, then a browser confirms it.  A reflected class.
+``xss_stored``
+    input is *injected* by POST, then a read-back page's reflection is
+    measured; confirmed by a two-step verifier (re-inject, then browser).
+    The capability claim (``server_stores_input``) separates its territory
+    from the reflected lens's.
 ``oob_fetch``
     a capability is *claimed*, then our own collaborator confirms it.  A blind
     class, and the case with no other evidence strong enough for a finding.

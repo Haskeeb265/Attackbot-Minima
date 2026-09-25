@@ -595,6 +595,67 @@ when rotation earns it.
 
 ---
 
+## The stored lens: `xss_stored` — the XSS family completed (2026-09-25)
+
+The second browser-context technique the roadmap asked for — and the first
+finding class whose *proposal itself* is two pages. Stored XSS cannot be seen
+by the wire lens: the payload arrives by POST, the reflection lives on a
+page nobody GETs with the payload in the URL, and no single request carries
+both halves of the bug.
+
+### Built
+
+- **Kernel**: `CAP_PERSISTENT_STORAGE` (`server_stores_input`) — the operator's
+  persistence claim, the stored lens's territory marker; `Surface.companions`
+  (fixed form fields every body submission must carry — a guestbook's submit
+  button is the surface's protocol, not a payload) and `Surface.read_back`
+  (where stored input renders, defaulting to the surface itself).
+- **`techniques/xss_stored/`** — the four-module contract, same as every
+  technique: propose = HTTP **inject** (POST canary + companions) then HTTP
+  **read-back** (quiet GET of the rendering page, reflection oracle); interpret
+  maps the stored reflection's context exactly as the wire lens does, because
+  *the context decides the payload, not the transport that delivered it*. The
+  surface filter takes only surfaces **declared as storing** — the complement
+  of `xss_reflected`'s filter, so the two techniques never double-probe a body
+  parameter.
+- **The fourth verifier** (`verification/stored_xss_runner.py`) — a stored
+  candidate's confirmation spec is a **sequence**, `xss_stored.execute`:
+  re-inject the payload through the gate (HTTP POST, companions included),
+  then run the read-back page in a browser and require the payload's own
+  execution signal. Independence is structural: the proposal rested on a
+  reflection, the proof rests on execution.
+- **Fixture**: `POST /comment` (stores `text` raw, ignores submissions without
+  the `sign` field — the companion trap, planted) + `GET /comments` (renders
+  every entry unescaped). The store and the rendering are distinct pages, the
+  way the bug actually is.
+
+### Verified
+
+36 new tests (technique 13, verifier 11, plus registry and coverage), 349
+passing, mypy clean. The target-name sweep caught one of the new module
+comments naming a benchmark target — the engine says "a real guestbook", not
+a case name — and it was reworded before landing.
+
+**Live: the third DVWA finding, end to end.** One declared surface (the
+guestbook, body param, `server_stores_input`, `companions=btnSign=Sign
+Guestbook`), one round: `xss_stored` injected the canary, read the reflection
+back in a `double_quoted_attribute` context, proposed, and the verifier
+re-injected and proved execution — `proven=True, grade=execution, reason=
+"the re-injected payload's script ran on the read-back page"`. The benchmark's
+`dvwa-low/xss_s/message` operator-gap entry is now reachable-by-technique;
+declaring it in the case is the next benchmark act.
+
+### What the two-step design bought
+
+The confirmation spec carries the *whole second inject* — payload as the
+param, the form's companions, the read-back URL — so the verifier is a
+courier, not a re-builder: the payload travels verbatim from proposal to
+proof, and a log reader can replay both steps without re-deriving anything.
+And because the inject runs through the gate like every effect, the loud half
+of a stored confirmation stays in the audit exactly like a browser run.
+
+---
+
 ## The honest assessment: how far from finding real bugs
 
 **The instrument is built and calibrated; it has not yet been used.** Every

@@ -346,6 +346,14 @@ def parse_surface(token: str) -> Surface:
         fields[key.strip().lower()] = value.strip()
     url = fields.get("url", "")
     param = fields.get("param", "")
+    # ``companions`` declares the fixed form fields every body submission must
+    # carry (``companions=key1=value1,key2=value2``) — a guestbook's submit
+    # button is part of the surface's protocol, not part of any payload.
+    companions: dict[str, str] = {}
+    for pair in fields.get("companions", "").split(","):
+        if "=" in pair:
+            name, _, value = pair.partition("=")
+            companions[name.strip()] = value.strip()
     return Surface(
         url=url,
         host=(urlsplit(url).hostname or "").lower(),
@@ -353,6 +361,8 @@ def parse_surface(token: str) -> Surface:
         where=fields.get("where", "query"),
         capability=fields.get("capability", "public_param" if param else ""),
         label=fields.get("label", ""),
+        companions=companions,
+        read_back=fields.get("read_back", ""),
     )
 
 

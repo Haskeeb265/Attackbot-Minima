@@ -42,6 +42,18 @@ Two vulnerabilities, one per Phase 1 technique, and one per Phase 2's:
     DOM placement lens (``techniques/xss_dom``) can propose, and only a browser
     run can confirm, a finding here.
 
+``POST /comment`` + ``GET /comments``
+    The stored-XSS pair, one shape per phase of a stored technique's life: the
+    POST *stores* ``text`` (ignoring the submission entirely when the form's
+    ``sign`` companion field is absent — the way DVWA's guestbook ignores a
+    POST without its submit button, which is why ``companions`` exists as a
+    declared surface field); the GET *renders* every stored comment raw. The
+    vulnerability is the two pages together: the store accepts anything, the
+    read-back escapes nothing, and neither page alone is the bug. The store is
+    in memory and dies with the process, which is correct for a fixture: each
+    run starts empty, so a stale entry can never impersonate this round's
+    evidence.
+
 The app is only ever reachable from the compose network and the host. It is
 scoped like any other target — see ``tests/vuln_engine/eval/test_phase1.py`` and
 the note in ``docs/vuln_engine_docs/phase1_checklist.md`` item 12: the fixture is
@@ -61,6 +73,11 @@ PORT = int(os.getenv("FIXTURE_PORT", "8080"))
 #: How long the fixture waits on a caller-supplied URL.  Real, so an unreachable
 #: collaborator is a slow failure rather than a hang.
 FETCH_TIMEOUT = float(os.getenv("FIXTURE_FETCH_TIMEOUT", "10"))
+
+#: The ``/comment`` store's capacity ceiling. A fixture that accepted unbounded
+#: submissions would let one noisy run pin its memory; a real target's storage
+#: quota imposes the same shape of limit.
+COMMENT_CAP = 64
 
 #: The ``/delay`` endpoint's ceiling. The delay itself comes from the payload
 #: (a ``SLEEP(n)`` expression, parsed like a backend would parse one), so a
@@ -90,6 +107,19 @@ DOM_PAGE = """<!doctype html>
 </html>
 """
 
+#: The read-back page for stored comments. ``{entries}`` is substituted with
+#: the raw concatenation of every stored comment — no escaping anywhere, which
+#: is the vulnerability the stored technique proves.
+COMMENTS_PAGE = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture comments</title></head>
+<body>
+  <h1>Comments</h1>
+  <ul id="comments">{entries}</ul>
+</body>
+</html>
+"""
+
 #: The search page.  ``{q}`` is substituted with the raw parameter — this is the
 #: whole vulnerability, and it is one line so nobody has to go looking for it.
 PAGE = """<!doctype html>
@@ -108,10 +138,14 @@ PAGE = """<!doctype html>
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
-    """The two vulnerable endpoints plus a health check."""
+    """The vulnerable endpoints plus a health check."""
 
     server_version = "fixture_app/0.1"
     protocol_version = "HTTP/1.1"
+
+    #: The stored comments. In memory, per process — see the module docstring
+    #: for why per-process state is correct for a fixture.
+    comments: list[str] = []
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
         parts = urlsplit(self.path)
@@ -130,6 +164,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
             return
         if parts.path == "/dom":
             self._dom()
+            return
+        if parts.path == "/comments":
+            self._comments()
+            return
+        self._send(404, b"not found", "text/plain; charset=utf-8")
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
+        parts = urlsplit(self.path)
+        if parts.path == "/comment":
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
+            self._comment(parse_qs(body, keep_blank_values=True))
             return
         self._send(404, b"not found", "text/plain; charset=utf-8")
 
@@ -193,6 +239,40 @@ class FixtureHandler(BaseHTTPRequestHandler):
         """
         log.info("dom page (parameter-independent response)")
         self._send(200, DOM_PAGE.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _comment(self, params: dict[str, list[str]]) -> None:
+        """Store *text* when the submission speaks the form's protocol.
+
+        The ``sign`` field is the form's submit button: a POST without it is
+        ignored, exactly as DVWA's guestbook ignores one without ``btnSign``.
+        That is the trap ``Surface.companions`` exists for — a technique that
+        posted only its payload would read the silence as "nothing stored"
+        when the truth is "nothing submitted". Stored raw, capped, no escaping:
+        the escaping absence on the read-back page is the vulnerability.
+        """
+        if "sign" not in params:
+            log.info("comment ignored (no sign field)")
+            self._send(400, b"submission lacks the form's sign field", "text/plain; charset=utf-8")
+            return
+        text = params.get("text", [""])[0]
+        if text:
+            FixtureHandler.comments.append(text)
+            del FixtureHandler.comments[:-COMMENT_CAP]
+        log.info("comment stored (%d total)", len(FixtureHandler.comments))
+        self._comments()
+
+    def _comments(self) -> None:
+        """Render every stored comment raw — the read-back half of the bug.
+
+        One page, every entry, no escaping: the store is not the vulnerability,
+        this rendering is, and keeping the two endpoints distinct is what makes
+        the technique's two-page shape exercisable at all.
+        """
+        entries = "".join(
+            f"<li>{comment}</li>" for comment in FixtureHandler.comments
+        )
+        body = COMMENTS_PAGE.replace("{entries}", entries).encode("utf-8", errors="replace")
+        self._send(200, body, "text/html; charset=utf-8")
 
     def _send(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)

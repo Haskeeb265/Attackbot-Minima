@@ -74,6 +74,13 @@ ORACLES: tuple[str, ...] = (
     ORACLE_TIMING_DIFFERENTIAL,
 )
 
+#: Confirmation-spec kinds. ``browser.run``/``oob.read``/``timing.differential``
+#: are spelled where their transports are named; this one is a *sequence* (an
+#: HTTP inject followed by a browser run of the read-back page), so it lives
+#: here with the other cross-layer vocabulary — the technique proposes it and
+#: the verifier answers it, and neither imports the other's layer.
+CONFIRM_STORED_EXECUTE = "xss_stored.execute"
+
 # --------------------------------------------------------------------------- #
 # Claimed capabilities — what a surface says it is
 # --------------------------------------------------------------------------- #
@@ -92,6 +99,10 @@ CAP_INFLUENCE_REMOTE_FETCH = "can_influence_remote_fetch"
 #: the engine lets verification do the proving, and the differential verifier is
 #: what turns the claim into a finding or a lead.
 CAP_DELAYED_RESPONSE = "delayed_response"
+#: The surface *stores* what is submitted to it and serves it back later — the
+#: guestbook/comment/review shape a stored technique needs. Claimed only, like
+#: every capability: the read-back reflection is what measures the claim.
+CAP_PERSISTENT_STORAGE = "server_stores_input"
 #: The surface establishes script execution when it succeeds — a postcondition,
 #: not a capability, but the same vocabulary so chaining is a plain lookup.
 CAP_SCRIPT_EXECUTION = "script_execution"
@@ -101,6 +112,7 @@ CAPABILITIES: tuple[str, ...] = (
     CAP_RESPONSE_REFLECTS_INPUT,
     CAP_INFLUENCE_REMOTE_FETCH,
     CAP_DELAYED_RESPONSE,
+    CAP_PERSISTENT_STORAGE,
     CAP_SCRIPT_EXECUTION,
 )
 
@@ -146,13 +158,22 @@ class Surface:
     capability: str = ""
     #: Free-form surface label used in the log and in report lines.
     label: str = ""
+    #: Fixed form fields every body submission to this surface must carry for the
+    #: server to accept it (a guestbook's submit button, a CSRF token's *shape*).
+    #: Declared by the operator because they are part of the surface's protocol,
+    #: not part of any payload. Empty for query/path surfaces.
+    companions: dict[str, str] = field(default_factory=dict)
+    #: Where stored input renders back (a stored technique is two-page by nature:
+    #: the store endpoint and the page that serves what was stored). Empty means
+    #: the surface's own URL — the common "post and the list re-renders" shape.
+    read_back: str = ""
 
     @property
     def key(self) -> str:
         return f"{self.url}#{self.param}" if self.param else self.url
 
     def to_dict(self) -> dict:
-        return {
+        data: dict[str, object] = {
             "url": self.url,
             "host": self.host,
             "param": self.param,
@@ -160,6 +181,11 @@ class Surface:
             "capability": self.capability,
             "label": self.label,
         }
+        if self.companions:
+            data["companions"] = dict(self.companions)
+        if self.read_back:
+            data["read_back"] = self.read_back
+        return data
 
 
 @dataclass(frozen=True)
@@ -323,9 +349,12 @@ class Technique(Protocol):
 __all__ = [
     "CAPABILITIES",
     "CAP_INFLUENCE_REMOTE_FETCH",
+    "CAP_DELAYED_RESPONSE",
+    "CAP_PERSISTENT_STORAGE",
     "CAP_PUBLIC_PARAM",
     "CAP_RESPONSE_REFLECTS_INPUT",
     "CAP_SCRIPT_EXECUTION",
+    "CONFIRM_STORED_EXECUTE",
     "EngagementSeed",
     "ProbeGrammar",
     "Hypothesis",
