@@ -50,7 +50,16 @@ log = logging.getLogger("vuln_engine.llm")
 ENV_KEY = "VULN_ENGINE_LLM_API_KEY"
 ENV_URL = "VULN_ENGINE_LLM_API_URL"
 ENV_MODEL = "VULN_ENGINE_LLM_MODEL"
+ENV_MAX_COMPLETION_TOKENS = "VULN_ENGINE_LLM_MAX_COMPLETION_TOKENS"
 DEFAULT_TIMEOUT = 20.0
+#: Completion-token headroom per call. The default models are reasoning models:
+#: their chain-of-thought spends completion tokens before the answer's first
+#: character, and at the provider's default cap (2048) a long question can spend
+#: the entire budget thinking and answer with *nothing* — observed live as
+#: ``finish_reason: length`` with an empty ``content``. The cap is generous
+#: because every junction's question is small and temperature-0: an answer stops
+#: at its own end, the cap only bounds the reasoning, never shapes the answer.
+DEFAULT_MAX_COMPLETION_TOKENS = 8192
 #: The default endpoint: Groq's OpenAI-shaped chat completions. The caller's
 #: wire format is exactly this shape, so the default and the override differ
 #: only in the URL string. Override with ``VULN_ENGINE_LLM_API_URL``.
@@ -148,32 +157,66 @@ class Opinion:
 ModelCaller = Callable[[str, str], str]
 
 
-def _default_caller(url: str, api_key: str, model: str, timeout: float) -> ModelCaller:
+def _default_caller(
+    url: str,
+    api_key: str,
+    model: str,
+    timeout: float,
+    max_completion_tokens: int,
+) -> ModelCaller:
     """Build the plain-POST caller.  OpenAI-shaped because the recon side's
     ``enrich.py`` already speaks that shape and one idiom is one review."""
 
     def call(prompt: str, system: str) -> str:
+        import time  # call time: the degraded path must not need it either
         import requests  # imported at call time: the degraded path must not need it
 
-        response = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0,
-            },
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        body = response.json()
-        return str(body["choices"][0]["message"]["content"])
+        #: Three attempts: a rate-limited (429) call backs off per the server's
+        #: ``Retry-After`` (or an escalating wait), an intermittent 413 is
+        #: retried as-is (Groq's edge returns it sporadically for payloads well
+        #: under its documented limit — observed live, same body succeeding on
+        #: the next attempt), and a 200 whose content is empty is retried too —
+        #: the observed failure is a reasoning model spending its completion
+        #: budget on chain-of-thought (``finish_reason: length``, empty
+        #: ``content``), which is server-side variance rather than an answer. A
+        #: persistent 429 still raises (the caller degrades with the status),
+        #: as does any other HTTP error.
+        content = ""
+        delay = 2.0
+        for attempt in range(3):
+            response = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0,
+                    "max_completion_tokens": max_completion_tokens,
+                },
+                timeout=timeout,
+            )
+            if response.status_code in (429, 413) and attempt < 2:
+                retry_after = response.headers.get("retry-after", "")
+                try:
+                    time.sleep(min(float(retry_after), 8.0))
+                except ValueError:
+                    time.sleep(delay)
+                    delay *= 2
+                continue
+            response.raise_for_status()
+            body = response.json()
+            content = str(body["choices"][0]["message"]["content"] or "")
+            if content.strip() or attempt == 2:
+                return content
+            time.sleep(delay)
+            delay *= 2
+        return content
 
     return call
 
@@ -188,6 +231,7 @@ class LLMClient:
         api_url: str | None = None,
         model: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        max_completion_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
         caller: ModelCaller | None = None,
     ) -> None:
         self._api_key = (
@@ -201,6 +245,11 @@ class LLMClient:
             or DEFAULT_MODEL
         )
         self._timeout = timeout
+        raw_max = os.getenv(ENV_MAX_COMPLETION_TOKENS, "").strip()
+        try:
+            self._max_completion_tokens = int(raw_max) if raw_max else max_completion_tokens
+        except ValueError:
+            self._max_completion_tokens = max_completion_tokens
         self._caller = caller
         if self._caller is not None:
             self._health = Health(available=True, model="injected")
@@ -320,7 +369,11 @@ class LLMClient:
         if not self._api_url:
             raise RuntimeError("no API URL configured")
         return _default_caller(
-            self._api_url, self._api_key, self._model, self._timeout
+            self._api_url,
+            self._api_key,
+            self._model,
+            self._timeout,
+            self._max_completion_tokens,
         )(prompt, system)
 
     def _cached(self, log: Any, junction: str, digest: str) -> Opinion | None:
@@ -368,9 +421,11 @@ def _extract_json(text: str) -> dict:
 
 
 __all__ = [
+    "DEFAULT_MAX_COMPLETION_TOKENS",
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
     "ENV_KEY",
+    "ENV_MAX_COMPLETION_TOKENS",
     "ENV_MODEL",
     "ENV_URL",
     "EVENT_LLM_JUNCTION",

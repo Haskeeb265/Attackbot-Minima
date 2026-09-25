@@ -1,12 +1,13 @@
 """Verification: independent confirmation, by a class the proposer did not use.
 
-Four verifiers, one per confirmation shape a finding may rest on:
+Five verifiers, one per confirmation shape a finding may rest on:
 
-``browser_runner``      execution — a script ran in a browser
-``oob_verifier``        oob — our own collaborator saw the interaction
-``timing_verifier``     differential — two populations re-measured fresh (Phase 2)
-``stored_xss_runner``   execution — a stored payload re-injected, then a browser
-                        proved the script ran on the read-back page
+``browser_runner``           execution — a script ran in a browser
+``oob_verifier``             oob — our own collaborator saw the interaction
+``timing_verifier``          differential — two populations re-measured fresh
+``stored_xss_runner``        execution — a stored payload re-injected, then a
+                             browser proved the script ran on the read-back page
+``authorization_verifier``   differential — both sessions re-asked, flipped order
 
 :class:`VerificationLayer` picks between them from the candidate's *confirmation
 spec*, which is the only thing a verifier is allowed to read from a candidate. It
@@ -32,6 +33,8 @@ from __future__ import annotations
 from ..kernel.technique import CONFIRM_STORED_EXECUTE
 from ..kernel.verdict import Candidate, Verdict, refuse
 from ..policy.gate import KIND_BROWSER_RUN, KIND_OOB_READ, PolicyGate
+from .authorization_verifier import CONFIRM_KIND as AUTHORIZATION_CONFIRM_KIND
+from .authorization_verifier import AuthorizationVerifier
 from .browser_runner import BrowserVerifier
 from .oob_verifier import CONFIRM_KIND as OOB_CONFIRM_KIND
 from .oob_verifier import OobVerifier
@@ -45,6 +48,7 @@ CONFIRM_VERIFIERS: dict[str, str] = {
     OOB_CONFIRM_KIND: "oob",
     TIMING_CONFIRM_KIND: "timing",
     CONFIRM_STORED_EXECUTE: "stored",
+    AUTHORIZATION_CONFIRM_KIND: "authorization",
 }
 
 
@@ -53,11 +57,15 @@ class VerificationLayer:
 
     def __init__(self, gate: PolicyGate, *, oob_wait: bool = True) -> None:
         self.gate = gate
-        self.verifiers: dict[str, BrowserVerifier | OobVerifier | TimingVerifier | StoredXssVerifier] = {
+        self.verifiers: dict[
+            str,
+            AuthorizationVerifier | BrowserVerifier | OobVerifier | TimingVerifier | StoredXssVerifier,
+        ] = {
             "browser": BrowserVerifier(gate),
             "oob": OobVerifier(gate, wait=oob_wait),
             "timing": TimingVerifier(gate),
             "stored": StoredXssVerifier(gate),
+            "authorization": AuthorizationVerifier(gate),
         }
 
     def verify(self, candidate: Candidate) -> Verdict:
@@ -84,6 +92,7 @@ class VerificationLayer:
 
 __all__ = [
     "CONFIRM_VERIFIERS",
+    "AuthorizationVerifier",
     "BrowserVerifier",
     "OobVerifier",
     "StoredXssVerifier",

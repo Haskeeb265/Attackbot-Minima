@@ -71,6 +71,14 @@ from ..world.observe import browser_observations, http_observations
 if TYPE_CHECKING:
     from ..llm.wiring import Advisory
 
+#: The driver's bound on reflected rounds per hypothesis (junction 5). Duplicated
+#: from ``llm/reflect.py``'s ``MAX_REFLECT_ROUNDS`` deliberately — the driver
+#: cannot import the llm layer at module level (the import graph is one-way:
+#: llm → kernel/world, never kernel/scheduler → llm) — and the two are pinned
+#: to each other by a test, the same convention as the timing verifier's
+#: fallback payload table.
+REFLECT_ROUNDS = 2
+
 #: Attempt outcomes, mirroring ``platform.receipt``'s vocabulary.  ``none`` and
 #: ``found`` are conclusive; ``failed`` is not, so a later run tries again.
 OUTCOME_NONE = "none"
@@ -283,9 +291,94 @@ class Engine:
                 continue
             observations, failures, executed = self._run_probes(registration, hypothesis, counts)
             candidates = list(technique.interpret(hypothesis, observations))
+            # Junction 5 (reflect): when the pass measured something but the
+            # deterministic interpretation came back empty, the model may
+            # direct a bounded re-ask of a probe this pass already ran — a
+            # jitter check on an anomalous timing pair, a fresh sample after a
+            # flaky failure. Degraded (no advisory, no key, a refused answer,
+            # or "stop" every round) the loop never spins: the behavior is
+            # byte-for-byte the one-pass engine. A recheck names a probe id
+            # from *this pass's own grammar* — validated at the junction and
+            # re-checked here — and every re-executed probe goes through the
+            # ordinary gate with the ordinary receipt consequences.
+            if (
+                self.advisory is not None
+                and self.advisory.available
+                and not candidates
+                and observations
+            ):
+                specs = technique_probes(registration, hypothesis)
+                propose_specs = {
+                    spec.id: spec for spec in specs if spec.purpose != PURPOSE_CONFIRM
+                }
+                probe_rows = [
+                    {"id": spec.id, "purpose": spec.purpose, "oracle": spec.oracle}
+                    for spec in propose_specs.values()
+                ]
+                hypothesis_dict = hypothesis.to_dict()
+                for reflect_round in range(REFLECT_ROUNDS):
+                    decision = self.advisory.reflected_decision(
+                        hypothesis=hypothesis_dict,
+                        probe_rows=probe_rows,
+                        observations_summary=self._observation_summaries(observations),
+                        log_handle=self.log,
+                        now=self.clock(),
+                    )
+                    if not decision.recheck:
+                        break
+                    spec = propose_specs.get(decision.probe_id)
+                    if spec is None:
+                        # Defense in depth: the junction validated the id, and
+                        # the driver re-checks it. Either way the loop ends.
+                        break
+                    counts["probes"] += 1
+                    counts["probes_reflected"] = counts.get("probes_reflected", 0) + 1
+                    self.log.append(
+                        EVENT_NOTE,
+                        at=self.clock(),
+                        stage="reflect.recheck",
+                        arm=arm,
+                        probe=spec.id,
+                        round=reflect_round + 1,
+                        reason=decision.reason,
+                        source=decision.source,
+                    )
+                    run = self._execute(registration, spec)
+                    if run.outcome == OUTCOME_REFUSED:
+                        counts["probes_refused"] += 1
+                        break  # the gate said no: the loop stops here
+                    counts["probes_run"] += 1
+                    executed += 1
+                    if run.outcome == OUTCOME_FAILED:
+                        counts["probes_failed"] += 1
+                        failures += 1
+                    observations.extend(run.observations)
+                    candidates = list(technique.interpret(hypothesis, observations))
+                    if candidates:
+                        break  # the re-ask produced something to judge
             counts["candidates"] += len(candidates)
             self._judge(arm, registration.name, candidates, failures, counts, executed=executed)
             self._synthesize(arm, registration, hypothesis, observations, counts)
+
+    @staticmethod
+    def _observation_summaries(observations: list[Observation]) -> list[dict]:
+        """Typed, whitelisted summaries for the reflect junction's input.
+
+        The same fields ``reflect.OBSERVATION_FIELDS`` names — statuses, elapsed
+        times, timing classes, contexts — and nothing else. A response body is
+        never a summary field: the model reflects on measurements, not on what
+        the target said.
+        """
+        from ..llm.reflect import OBSERVATION_FIELDS
+
+        summaries: list[dict] = []
+        for item in observations:
+            summary: dict = {"probe": item.probe}
+            for field_name in OBSERVATION_FIELDS:
+                if field_name in item.payload:
+                    summary[field_name] = item.payload[field_name]
+            summaries.append(summary)
+        return summaries
 
     def _run_probes(
         self, registration: Registration, hypothesis: Hypothesis, counts: dict[str, int]

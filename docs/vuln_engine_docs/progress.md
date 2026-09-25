@@ -689,8 +689,71 @@ Two-and-a-half vuln classes is a narrow lens.
    to exercise the tree's AND edges for real.
 4. ~~Phase 3 — LLM junctions~~ **Done (2026-09-24)** — see the Phase 3 section
    above and [`phase3_checklist.md`](./phase3_checklist.md).
-5. **Case memory** (post-Phase 3 per the roadmap) — cross-engagement
-   (target-feature → technique → success rate), retrieval-first, human-promoted.
+5. ~~**Case memory** (post-Phase 3 per the roadmap)~~ **First slice done
+   (2026-09-26)** — `--remember`/`--memory-file` distills and feeds back arms,
+   probe contexts/statuses, timing medians and leads. What remains of the
+   roadmap item is the cross-*target* aggregate (target-feature → technique →
+   success rate) and human-promoted retrieval.
+
+---
+
+## M1 + M2 + M3: the reflect loop, the IDOR technique, memory (2026-09-26) ✅
+
+All three builds from [`RnD_2026-09-25_smarter.md`](./RnD_2026-09-25_smarter.md)
+landed together and were verified live the same day. 398 tests (one new wiring
+pin), mypy clean across 73 files.
+
+**M1 — the reflect loop (junction 5, `llm/reflect.py` + driver).** When an arm
+measures but its deterministic interpretation finds nothing, the model gets the
+typed observation summaries (statuses, elapsed times, timing classes — never a
+body) and answers one question: settle, or re-ask one probe *the pass already
+ran*? The recheck is validated against the pass's own grammar twice (junction
+and driver), bounded at two rounds, logged as `reflect.recheck`, and every
+re-executed probe pays the ordinary gate. Degraded in any direction (no key,
+refused answer, invented id, `stop`), the engine is byte-for-byte the one-pass
+engine it was before. Live on the fixture run: the one empty arm consulted the
+junction once, the model said `stop`, the run settled honestly.
+
+**M2 — `idor_differential`, the authorization class (technique + verifier +
+gate shim).** One surface, one object URL, two declared sessions: the proposer
+asks both identities for the same object and compares status codes; the
+verifier (`verification/authorization_verifier.py`) re-asks **flipped** — B
+first, A second, fresh requests through the gate — and proves only when both
+flipped measurements say the boundary the operator declared is absent. The
+gate grew the session-B shim (`--session-b-cookie`): a request marked
+`_session="b"` without a second session wired is *refused*, not guessed. Live
+e2e on the fixture app's new `/api/invoices/<id>` endpoint (session cookie →
+role, authorization check simply missing — unknown sessions fail closed so a
+typo'd cookie can never fabricate the differential): proposer pair (A=200,
+B=200) → candidate → flipped verifier (B=200, A=200) → finding, evidence class
+`differential`. DVWA has no IDOR module, so the fixture endpoint completes the
+fixture's one-endpoint-per-technique pattern instead.
+
+**M3 — memory (`llm/wiring.py: remember/load_memory` + hypothesize).**
+`--remember` distills the world log after a run — runs, per-arm receipt
+outcomes, per-probe contexts and statuses, timing medians keyed
+`probe:timing_class`, unresolved leads — into `memory.json`; `--memory-file`
+feeds a previous record into the hypothesize junction's prompt (whitelisted,
+capped at 30 rows, digest-visible). Live round-trip: `remember()` on the real
+discourse campaign log (15 arms), then a fresh engagement with
+`--hypothesize-from-recon --memory-file` — the junction went live, proposed 12
+surfaces, all validated against recon's 1096 known URLs, seed widened, engine
+ran. On DVWA, `remember()` recorded the full timing table (baselines ~0.02 s
+vs injected ~4.0 s per probe) for the next engagement.
+
+Two live-run findings folded back in:
+
+- **Intermittent Groq 413s.** Twice, a ~13 KB junction prompt was refused with
+  `413 Payload Too Large` — by Groq's edge, not by size (the same body
+  succeeded on retry, and a 19.6 KB probe request succeeded directly). The
+  client now retries a 413 exactly like a 429 (bounded, backoff, still degrades
+  on a persistent one). The degradation path itself proved out both times:
+  logged, seed unchanged, run continued.
+- **The reflect test's wiring lesson.** `Advisory(client=...)` does *not* build
+  the reflect junction (only `from_env` does) — a scripted-advisory test that
+  forgot `reflect=ReflectJunction(client)` degraded silently to stop. The fixed
+  test pins the wiring; the junction's silent-degrade contract is what made the
+  mistake survivable.
 
 ---
 

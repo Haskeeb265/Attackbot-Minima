@@ -33,7 +33,7 @@ from ..kernel.manifest import TechniqueManifest
 from ..kernel.technique import EngagementSeed
 from ..policy.gate import PolicyGate
 from ..registry import TechniqueRegistry
-from ..world.log import WorldLog, read_rows
+from ..world.log import EVENT_NOTE, WorldLog, read_rows
 from .driver import Engine, RunReport
 from .ucb import Arm, arms_from_receipts, pick
 
@@ -55,6 +55,12 @@ class CampaignReport:
     #: Round indices that were refused or conclusive — no budget spent on refusals.
     free_rounds: list[int] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
+    #: The hypothesize junction's provenance, when the operator widened this
+    #: campaign's seed with ``--hypothesize-from-recon``. Recorded here (and
+    #: logged once as a ``campaign.widening`` row) so a report can say which
+    #: arms exist *because* the model proposed them — the round rows carry the
+    #: surface keys; this carries the why. ``None`` means a plain operator seed.
+    widening: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -66,6 +72,7 @@ class CampaignReport:
             "leads": self.leads,
             "free_rounds": self.free_rounds,
             "problems": self.problems,
+            "widening": self.widening,
         }
 
 
@@ -114,6 +121,7 @@ class Campaign:
         clock: Callable[[], float] | None = None,
         advisory: "Advisory | None" = None,
         force: bool = False,
+        widening: dict | None = None,
     ) -> None:
         self.seed = seed
         self.gate = gate
@@ -121,6 +129,10 @@ class Campaign:
         self.log = log if log is not None else gate.log
         self.receipt = receipt
         self.clock = clock or _wall_clock
+        #: The hypothesize junction's provenance (``HypothesizeResult.to_dict()``
+        #: shape) or ``None``. Accepted as plain data on purpose: the campaign
+        #: records what it was told, it does not import the llm layer — the same
+        #: TYPE_CHECKING discipline the advisory itself follows.
         #: Ignore the receipts ledger when picking arms (an operator's flag, and
         #: the only way to re-ask a question whose answer is stale). Each round's
         #: engine still gets the flag too, so previously-settled arms re-probe.
@@ -130,6 +142,7 @@ class Campaign:
         #: 1* — after that the receipts ledger is the ranking signal, and the
         #: model's static opinion cools exactly the way UCB cools everything.
         self.advisory = advisory
+        self.widening = widening
         self._priors: dict[str, float] | None = None
 
     def run(self, budget: Budget) -> CampaignReport:
@@ -148,6 +161,19 @@ class Campaign:
           iteration cap stops a refuse-loop from spinning forever.
         """
         report = CampaignReport(target=self.seed.target, rounds_planned=budget.rounds)
+        report.widening = dict(self.widening) if self.widening else None
+        # The provenance is a campaign fact, so it is logged once, before the
+        # first pick: a replay reads it back from the log rather than trusting
+        # the report's say-so. ``stage=campaign.widening`` rides the ordinary
+        # note row — no new row type, no new reader — and carries the junction's
+        # own fields verbatim (source, added, surfaces) for the report to embed.
+        if report.widening:
+            self.log.append(
+                EVENT_NOTE,
+                at=self.clock(),
+                stage="campaign.widening",
+                **report.widening,
+            )
         started = self.clock()
         budget = Budget(
             rounds=budget.rounds,

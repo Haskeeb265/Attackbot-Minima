@@ -1000,8 +1000,15 @@ def _engage(
         )
         exit_codes.extend(round_codes)
     else:
+        # ``extra_env`` is per-engagement ADDITIONS to the operator's environment,
+        # never a replacement: ``_child_env`` treats a non-None env as the complete
+        # child environment, so passing the two scope variables bare sent every
+        # child out with no PATH (external tools unspawnable) and no PYTHONPATH
+        # (imports that live outside the interpreter's default site resolve to
+        # ModuleNotFoundError). Merge over os.environ, like the converged path does.
+        child_env = {**os.environ, **extra_env} if extra_env else None
         for _label, command, log_path in first_round_jobs:
-            exit_codes.append(_run_streamed(command, log_path, env=extra_env))
+            exit_codes.append(_run_streamed(command, log_path, env=child_env))
 
     report_path = assemble(
         apex, ran_subdomain=ran_subdomain, ran_ports=ran_ports, ran_url=ran_url,

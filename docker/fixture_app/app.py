@@ -3,10 +3,10 @@
 
 Standard library only, on purpose: this is a *measuring instrument*, not a
 product. It has no dependencies to drift, no framework to configure, and nothing
-to explain beyond the two endpoints below. A fixture with a supply chain would be
+to explain beyond the endpoints below. A fixture with a supply chain would be
 a fixture that can fail for reasons unrelated to the engine.
 
-Two vulnerabilities, one per Phase 1 technique, and one per Phase 2's:
+One endpoint per technique, each the way a real target ships the bug:
 
 ``GET /search?q=``
     Reflects *q* unescaped into a **double-quoted attribute** value:
@@ -43,16 +43,26 @@ Two vulnerabilities, one per Phase 1 technique, and one per Phase 2's:
     run can confirm, a finding here.
 
 ``POST /comment`` + ``GET /comments``
-    The stored-XSS pair, one shape per phase of a stored technique's life: the
-    POST *stores* ``text`` (ignoring the submission entirely when the form's
-    ``sign`` companion field is absent — the way DVWA's guestbook ignores a
-    POST without its submit button, which is why ``companions`` exists as a
-    declared surface field); the GET *renders* every stored comment raw. The
+    The stored-XSS pair: the POST *stores* ``text`` (ignoring the submission entirely when the form's
+    ``sign`` companion field is absent — the way DVWA's guestbook ignores a POST without its submit button, which is why ``companions`` exists as a declared surface field); the GET *renders* every stored comment raw. The
     vulnerability is the two pages together: the store accepts anything, the
     read-back escapes nothing, and neither page alone is the bug. The store is
     in memory and dies with the process, which is correct for a fixture: each
     run starts empty, so a stale entry can never impersonate this round's
     evidence.
+
+``GET /api/invoices/<id>``
+    The IDOR fixture: an object whose access *should* depend on the session's
+    role, and does not. Identity travels exactly as it does on a real target —
+    the ``session`` cookie, resolved against a session store with two seeded
+    identities (``a1b2c3d4e5f6`` = admin, ``9f8e7d6c5b4a`` = user). The access
+    check verifies **authentication** only — it never asks whether the role
+    may read an invoice — so the known low-privilege session reads the object
+    it must not, the canonical confusion real authorization bugs ship with.
+    Unknown sessions fail closed, so only a genuinely authenticated low-priv
+    session can produce the differential. No body differences, no markers —
+    the status code is the only signal, which is exactly the measurement
+    ``idor_differential`` compares.
 
 The app is only ever reachable from the compose network and the host. It is
 scoped like any other target — see ``tests/vuln_engine/eval/test_phase1.py`` and
@@ -147,6 +157,14 @@ class FixtureHandler(BaseHTTPRequestHandler):
     #: for why per-process state is correct for a fixture.
     comments: list[str] = []
 
+    #: The session store: session id -> role. Seeded with two identities, the
+    #: way a demo deployment ships with its two test accounts. The "sessions"
+    #: live here; the client carries only ``session=<id>``.
+    sessions: dict[str, str] = {
+        "a1b2c3d4e5f6": "admin",
+        "9f8e7d6c5b4a": "user",
+    }
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
         parts = urlsplit(self.path)
         params = parse_qs(parts.query, keep_blank_values=True)
@@ -167,6 +185,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
             return
         if parts.path == "/comments":
             self._comments()
+            return
+        if parts.path.startswith("/api/invoices/"):
+            self._invoice(parts.path)
             return
         self._send(404, b"not found", "text/plain; charset=utf-8")
 
@@ -273,6 +294,38 @@ class FixtureHandler(BaseHTTPRequestHandler):
         )
         body = COMMENTS_PAGE.replace("{entries}", entries).encode("utf-8", errors="replace")
         self._send(200, body, "text/html; charset=utf-8")
+
+    def _invoice(self, path: str) -> None:
+        """Answer an invoice read under the caller session's role.
+
+        The identity travels the way it does on a real target — the ``session``
+        cookie, resolved against the session store — and the check is broken
+        the way real checks break: it verifies **authentication** (is the
+        session known?) and never asks the **authorization** question (is this
+        role allowed to read an invoice?). Both seeded identities pass, so the
+        low-privilege session reads the object it must not. Unknown sessions
+        fail closed (403), deliberately: a missing or typo'd session cookie
+        can never fabricate the differential — only a genuinely authenticated
+        low-priv session reading the object produces it. No body differences,
+        no markers: the status code is the only signal, which is exactly the
+        measurement ``idor_differential`` compares.
+        """
+        cookies: dict[str, str] = {}
+        for pair in (self.headers.get("Cookie") or "").split(";"):
+            name, _, value = pair.partition("=")
+            if name.strip():
+                cookies[name.strip()] = value.strip()
+        invoice_id = path.rsplit("/", 1)[-1]
+        role = self.sessions.get(cookies.get("session", ""))
+        if role is not None:  # the bug: authenticated was mistaken for authorized
+            log.info("invoice %s served to role=%r", invoice_id, role)
+            body = (
+                '{"invoice": "' + invoice_id + '", "owner": "alice", "total": 412.50}'
+            ).encode("utf-8")
+            self._send(200, body, "application/json")
+            return
+        log.info("invoice %s denied (role=%r)", invoice_id, role)
+        self._send(403, b"{\"error\": \"forbidden\"}", "application/json")
 
     def _send(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)

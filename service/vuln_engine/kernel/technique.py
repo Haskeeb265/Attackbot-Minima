@@ -103,9 +103,20 @@ CAP_DELAYED_RESPONSE = "delayed_response"
 #: guestbook/comment/review shape a stored technique needs. Claimed only, like
 #: every capability: the read-back reflection is what measures the claim.
 CAP_PERSISTENT_STORAGE = "server_stores_input"
+#: The surface returns different content depending on *who is asking* — the
+#: claim an authorization technique tests. Claimed only: the differential
+#: verifier re-measures both sessions fresh, which is what turns the claim
+#: into a finding or a lead. The operator declaring two sessions is what makes
+#: the claim meaningful; with one session the technique cannot fire at all.
+CAP_ACCESS_DIFFERS_BY_SESSION = "access_differs_by_session"
 #: The surface establishes script execution when it succeeds — a postcondition,
 #: not a capability, but the same vocabulary so chaining is a plain lookup.
 CAP_SCRIPT_EXECUTION = "script_execution"
+#: The authorization technique's postcondition: when it succeeds, an object is
+#: served across the access boundary the operator declared. Same shape as the
+#: script-execution postcondition — a chain query asks "what did this arm
+#: establish?" and gets an answer in the same vocabulary as every claim.
+CAP_CROSS_ACCOUNT_READ = "cross_account_readable"
 
 CAPABILITIES: tuple[str, ...] = (
     CAP_PUBLIC_PARAM,
@@ -113,6 +124,8 @@ CAPABILITIES: tuple[str, ...] = (
     CAP_INFLUENCE_REMOTE_FETCH,
     CAP_DELAYED_RESPONSE,
     CAP_PERSISTENT_STORAGE,
+    CAP_ACCESS_DIFFERS_BY_SESSION,
+    CAP_CROSS_ACCOUNT_READ,
     CAP_SCRIPT_EXECUTION,
 )
 
@@ -348,6 +361,8 @@ class Technique(Protocol):
 
 __all__ = [
     "CAPABILITIES",
+    "CAP_ACCESS_DIFFERS_BY_SESSION",
+    "CAP_CROSS_ACCOUNT_READ",
     "CAP_INFLUENCE_REMOTE_FETCH",
     "CAP_DELAYED_RESPONSE",
     "CAP_PERSISTENT_STORAGE",

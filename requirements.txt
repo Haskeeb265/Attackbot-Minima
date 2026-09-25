@@ -20,6 +20,13 @@ httpx
 playwright
 requests
 
+# --- scraper / recon platform ----------------------------------------------
+# python-dotenv  config.py (root) and service/recon_pipeline/platform/common/config.py
+#                load .env at import time. Was installed out of band with the other
+#                recon deps; declared here so a fresh interpreter that does not see
+#                user site-packages can still import it.
+python-dotenv
+
 # --- tests / typing --------------------------------------------------------
 pytest
 mypy

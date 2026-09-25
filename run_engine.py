@@ -45,7 +45,13 @@ from service.vuln_engine.kernel.technique import (  # noqa: E402
     EngagementSeed,
     Surface,
 )
-from service.vuln_engine.llm.wiring import Advisory  # noqa: E402
+from service.vuln_engine.llm.wiring import (
+    Advisory,
+    hypothesized_seed_advisory,
+    load_memory,
+    load_recon_artifacts,
+    remember,
+)
 from service.vuln_engine.policy.gate import PolicyGate, default_effects  # noqa: E402
 from service.vuln_engine.registry import TechniqueRegistry  # noqa: E402
 from service.vuln_engine.scheduler.campaign import Budget, Campaign, CampaignReport  # noqa: E402
@@ -61,6 +67,10 @@ DEFAULT_OUTPUT_ROOT = ROOT / "output" / "vuln_engine"
 #: ``docker-compose.yml``.
 FIXTURE_PORT = 8080
 COLLABORATOR_PORT = 9009
+
+#: Where ``--hypothesize-from-recon`` looks for recon artifacts by default: the
+#: url_endpoint pipeline's own directory, exactly as ``run_recon.py`` leaves it.
+DEFAULT_RECON_DIR = ROOT / "service/recon_pipeline/pipelines/url_endpoint"
 
 #: The collaborator URL the *target* must be able to reach.  The compose service
 #: name rather than ``host.docker.internal``: it works identically on Docker
@@ -83,6 +93,11 @@ class Profile:
     #: Raw ``Cookie`` header value for every request and page load — the session
     #: shim a login-walled target needs. Empty means no header at all.
     cookies: str = ""
+    #: The second session's raw ``Cookie`` header value — the authorization
+    #: technique's other identity (session A is ``cookies``). Empty means no
+    #: second session: the gate refuses any request asking for session B, and
+    #: ``idor_differential`` never fires.
+    session_b_cookie: str = ""
     #: Per-host action budget.  The fixture profile is generous because the count
     #: is a *policy* number, not a safety one: the interesting refusal in Phase 1
     #: is scope, and a budget DEFER would only make the log harder to read.
@@ -208,13 +223,16 @@ def target_profile(
 ) -> Profile:
     """An engagement against a declared target, with operator-declared surfaces."""
     scope = ScopeEngine()
-    if target.count(".") == 3 and not target.replace(".", "").isdigit():
+    if target.count(".") == 3 and target.replace(".", "").isdigit():
         # A dotted-quad target is an address, not a domain: routing it to
         # ``add_declared_domain`` would authorize a name that never answers and
         # leave the address itself refused (``check_address`` rejects
         # non-routable space before consulting declared *networks*, so an IP
         # literal must land in ``declared_addresses`` — exactly what the fixture
-        # profile does for the same reason).
+        # profile does for the same reason). The digits-and-dots test is what
+        # makes a dotted quad take THIS branch; the inverse sent every IP
+        # literal to the domain branch, where the gate then refused it as
+        # "not globally routable".
         scope.add_declared_address(target)
     else:
         scope.add_declared_domain(target)
@@ -263,6 +281,7 @@ def run(
         chrome_path=profile.chrome_path,
         driver=profile.browser_driver,
         cookies=profile.cookies,
+        session_b_cookie=profile.session_b_cookie,
     )
     registry = TechniqueRegistry.discover(strict=False)
     _wire_grammars(advisory, registry)
@@ -290,6 +309,7 @@ def campaign_run(
     rounds: int,
     force: bool = False,
     advisory: Advisory | None = None,
+    widening: dict | None = None,
 ) -> CampaignReport:
     """Wire the campaign and spend its round budget.  Phase 2's runner, CLI-exposed."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -309,6 +329,7 @@ def campaign_run(
         chrome_path=profile.chrome_path,
         driver=profile.browser_driver,
         cookies=profile.cookies,
+        session_b_cookie=profile.session_b_cookie,
     )
     registry = TechniqueRegistry.discover(strict=False)
     _wire_grammars(advisory, registry)
@@ -321,6 +342,7 @@ def campaign_run(
         receipt=receipt,
         advisory=advisory,
         force=force,
+        widening=widening,
     )
     return campaign.run(Budget(rounds=rounds))
 
@@ -382,11 +404,49 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--collaborator-local", default="", help="collaborator URL we read records from")
     parser.add_argument("--chrome-path", default="", help="explicit chrome/chromium binary")
     parser.add_argument("--cookie", action="append", default=[], metavar="NAME=VALUE", help="session cookie for a login-walled target (repeatable; sent as one Cookie header on every request and page load)")
+    parser.add_argument(
+        "--session-b-cookie",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help=(
+            "the SECOND session's cookie, for the authorization technique "
+            "(repeatable; --cookie is session A — typically owner/admin, "
+            "--session-b-cookie the low-privilege identity)"
+        ),
+    )
     parser.add_argument("--driver", default="auto", choices=("auto", "playwright", "cdp"))
     parser.add_argument("--output-dir", default="", help="where the run writes (default: per target)")
     parser.add_argument("--force", action="store_true", help="ignore the receipts ledger")
     parser.add_argument("--campaign", type=int, default=0, metavar="ROUNDS", help="run the Phase 2 campaign for ROUNDS rounds instead of one pass")
     parser.add_argument("--llm-draft", action="store_true", help="draft advisory report prose via the LLM junctions (no-op without a key)")
+    parser.add_argument(
+        "--hypothesize-from-recon",
+        action="store_true",
+        help=(
+            "ask the hypothesize junction to widen the declared seed with surfaces "
+            "derived from recon artifacts (parameters.jsonl / url_validation.jsonl); "
+            "every proposed URL must be one recon observed, and the widened seed "
+            "then runs through the ordinary gate and verifier. No-op without a key."
+        ),
+    )
+    parser.add_argument(
+        "--recon-dir",
+        default="",
+        metavar="DIR",
+        help="the url_endpoint pipeline directory for --hypothesize-from-recon (default: auto-detect from the repo)",
+    )
+    parser.add_argument(
+        "--memory-file",
+        default="",
+        metavar="PATH",
+        help="a previous engagement's memory record (written by --remember) to inform --hypothesize-from-recon",
+    )
+    parser.add_argument(
+        "--remember",
+        action="store_true",
+        help="after the run, write a memory record (arms, contexts, timings, leads) beside the report for the next engagement",
+    )
     parser.add_argument("--replay", default="", metavar="LOG", help="recompute a finished run offline")
     parser.add_argument("--json", action="store_true", help="print the machine report only")
     args = parser.parse_args(argv)
@@ -437,9 +497,41 @@ def main(argv: list[str] | None = None) -> int:
         profile = fixture_profile(chrome_path=args.chrome_path)
     profile.browser_driver = args.driver
     profile.cookies = "; ".join(args.cookie)
+    profile.session_b_cookie = "; ".join(args.session_b_cookie)
 
-    advisory = Advisory.from_env() if args.llm_draft else None
+    advisory = Advisory.from_env() if (args.llm_draft or args.hypothesize_from_recon) else None
     output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_ROOT / profile.target.replace(":", "_")
+
+    widening: dict | None = None
+    if args.hypothesize_from_recon:
+        # Junction 4, on the operator's explicit request: widen the declared
+        # seed with surfaces derived from recon artifacts BEFORE the engine or
+        # campaign is built. The widened seed flows through the ordinary gate,
+        # the ordinary techniques and the ordinary verifier — the model widened
+        # the attention, it did not add a conclusion. The call is logged into
+        # the run's own world log (digest-keyed), so a replay reproduces the
+        # widening with the key removed; a degraded opinion (no key, invalid
+        # answer) leaves the seed exactly as the operator declared it.
+        recon_dir = Path(args.recon_dir) if args.recon_dir else DEFAULT_RECON_DIR
+        parameters_rows, alive_urls = load_recon_artifacts(recon_dir)
+        memory = load_memory(args.memory_file) if args.memory_file else None
+        widening_log = WorldLog(output_dir / "world.jsonl")
+        widening_result = hypothesized_seed_advisory(
+            advisory,
+            profile.seed,
+            parameters_rows=parameters_rows,
+            alive_urls=alive_urls,
+            memory=memory,
+            log_handle=widening_log,
+        )
+        profile.seed = widening_result.seed
+        widening = widening_result.to_dict()
+        _out(
+            f"hypothesize: {widening_result.source} - {widening_result.added} surface(s) added "
+            f"of {widening_result.proposed_raw} proposed (recon: {recon_dir})"
+        )
+        if widening_result.reason:
+            _out(f"  junction: {widening_result.reason}")
 
     if args.campaign > 0:
         campaign_report = campaign_run(
@@ -448,6 +540,7 @@ def main(argv: list[str] | None = None) -> int:
             rounds=args.campaign,
             force=args.force,
             advisory=advisory,
+            widening=widening,
         )
         if args.json:
             _out(json.dumps(campaign_report.to_dict(), indent=2))
@@ -466,6 +559,26 @@ def main(argv: list[str] | None = None) -> int:
             _out(f"    {finding.get('summary', finding.get('vuln_class', '?'))}")
         if campaign_report.problems:
             _out(f"  notes:      {'; '.join(campaign_report.problems)}")
+        if args.remember:
+            memory_path = output_dir / "memory.json"
+            record = remember(
+                output_dir / "world.jsonl", campaign_report.target
+            )
+            memory_path.write_text(
+                json.dumps(record, indent=2), encoding="utf-8", newline="\n"
+            )
+            _out(f"  memory:     {memory_path} (feed back with --memory-file)")
+        if campaign_report.widening:
+            _out(
+                f"  widened:    {campaign_report.widening.get('added', 0)} surface(s) "
+                f"of {campaign_report.widening.get('proposed_raw', 0)} proposed "
+                f"({campaign_report.widening.get('source', '?')}, hypothesize junction)"
+            )
+            for surface in campaign_report.widening.get("surfaces", []):
+                key = surface.get("url", "?")
+                if surface.get("param"):
+                    key = f"{key}#{surface['param']}"
+                _out(f"    + {key}")
         write_drafts(
             campaign_report.to_dict(),
             output_dir,
@@ -481,6 +594,13 @@ def main(argv: list[str] | None = None) -> int:
         advisory,
         log_handle=WorldLog(output_dir / "world.jsonl"),
     )
+    if args.remember:
+        memory_path = output_dir / "memory.json"
+        record = remember(output_dir / "world.jsonl", report.target)
+        memory_path.write_text(
+            json.dumps(record, indent=2), encoding="utf-8", newline="\n"
+        )
+        _out(f"  memory:     {memory_path} (feed back with --memory-file)")
 
     if args.json:
         _out(json.dumps(report.to_dict(), indent=2))

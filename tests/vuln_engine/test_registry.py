@@ -78,8 +78,10 @@ def fake_package(tmp_path: Path, monkeypatch):
 def test_the_real_technique_folders_are_discovered() -> None:
     registry = TechniqueRegistry.discover()
     # Phase 4 adds the DOM-lens technique; the stored lens completes the XSS
-    # family. Alphabetical discovery order.
+    # family; the authorization differential adds the first session-shaped
+    # technique. Alphabetical discovery order.
     assert registry.names() == [
+        "idor_differential",
         "oob_fetch",
         "sqli_blind_time",
         "xss_dom",
@@ -98,7 +100,7 @@ def test_the_manifest_table_is_what_a_report_embeds() -> None:
 
 def test_a_lookup_of_an_unknown_technique_says_what_is_known() -> None:
     with pytest.raises(
-        KeyError, match="known: oob_fetch, sqli_blind_time, xss_dom, xss_reflected, xss_stored"
+        KeyError, match="known: idor_differential, oob_fetch, sqli_blind_time, xss_dom, xss_reflected, xss_stored"
     ):
         TechniqueRegistry.discover().get("ssti")
 

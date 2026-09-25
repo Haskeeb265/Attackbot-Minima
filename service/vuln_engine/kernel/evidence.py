@@ -53,6 +53,11 @@ FINDING_GRADES: frozenset[str] = frozenset(
     {EVIDENCE_EXECUTION, EVIDENCE_OOB, EVIDENCE_DIFFERENTIAL}
 )
 
+#: The differential class's declared oracle: two sessions, one object. The
+#: authorization verifier and its technique share this spelling so a test can
+#: pin them together, exactly like every CONFIRM_KIND pin.
+DIFFERENTIAL_SESSIONS = "two_sessions_one_object"
+
 EVIDENCE_CLASSES: frozenset[str] = frozenset(EVIDENCE_ORDER)
 
 
@@ -135,6 +140,7 @@ class Evidence:
 
 
 __all__ = [
+    "DIFFERENTIAL_SESSIONS",
     "EVIDENCE_CLASSES",
     "EVIDENCE_DIFFERENTIAL",
     "EVIDENCE_EXECUTION",

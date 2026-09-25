@@ -140,6 +140,7 @@ class PolicyGate:
         oob: Any = None,
         log: WorldLog | None = None,
         clock: Callable[[], float] | None = None,
+        session_b_headers: dict[str, str] | None = None,
     ) -> None:
         self._dispatcher = dispatcher
         self._http = http
@@ -147,6 +148,13 @@ class PolicyGate:
         self._oob = oob
         self._log = log if log is not None else WorldLog()
         self._clock = clock or _wall_clock
+        #: The second session's identity, as headers (the operator's declared
+        #: ``Cookie`` value). A detail marked ``_session="b"`` runs under this
+        #: identity instead of the transport's default shim — the mechanism the
+        #: authorization technique's differential rests on. ``None`` means no
+        #: second session was declared, and any request asking for one is refused
+        #: by ``_validate`` before a dispatcher decision is even made.
+        self._session_b_headers = dict(session_b_headers) if session_b_headers else None
 
     # ------------------------------------------------------------------ #
     # reporting
@@ -216,6 +224,11 @@ class PolicyGate:
             technique=request.technique,
             probe=request.probe,
             detail=_loggable_detail(request.detail),
+            **(
+                {"session": str(request.detail["_session"])}
+                if str(request.detail.get("_session", ""))
+                else {}
+            ),
         )
 
         decision = self._dispatcher.decide(
@@ -244,7 +257,17 @@ class PolicyGate:
     def _execute(self, request: EffectRequest, now: float) -> Any:
         """Run the cleared effect and log its *metadata* (never its payload)."""
         if request.kind == KIND_HTTP_REQUEST:
-            result = self._http.perform(**request.detail)
+            detail = dict(request.detail)
+            session = str(detail.pop("_session", "") or "")
+            headers = dict(detail.pop("headers", {}) or {})
+            if session == "b":
+                # The differential's second identity: session-B headers win over
+                # any per-request header of the same name, exactly like httpx's
+                # own merge order — one authority for who the request is from.
+                headers = {**headers, **(self._session_b_headers or {})}
+            if headers:
+                detail["headers"] = headers
+            result = self._http.perform(**detail)
         elif request.kind == KIND_BROWSER_RUN:
             result = self._browser.run(**{**request.detail, "at": now})
         else:  # pragma: no cover - _validate rejects any other target kind
@@ -325,6 +348,15 @@ class PolicyGate:
             return "no http1 transport is wired"
         if request.kind == KIND_BROWSER_RUN and self._browser is None:
             return "no browser transport is wired"
+        if (
+            request.kind == KIND_HTTP_REQUEST
+            and str(request.detail.get("_session", "")) == "b"
+            and not self._session_b_headers
+        ):
+            return (
+                "the request asks for session B but no second session is wired "
+                "(declare it with --session-b-cookie)"
+            )
         url = request.url
         if not url:
             return "no url in the request detail"
@@ -395,6 +427,7 @@ def default_effects(
     chrome_path: str = "",
     driver: str = "auto",
     cookies: str = "",
+    session_b_cookie: str = "",
 ) -> dict:
     """Build the standard set of transports, lazily.
 
@@ -423,7 +456,7 @@ def default_effects(
             defaults["local_base"] = oob_local_base
         resolved_oob = OobEffect(**defaults)
     http_headers = {"Cookie": cookies} if cookies else {}
-    return {
+    effects: dict = {
         "http": (
             http
             if http is not None
@@ -440,6 +473,12 @@ def default_effects(
         ),
         "oob": resolved_oob,
     }
+    if session_b_cookie:
+        # The authorization technique's second identity. A plain value in, a
+        # plain dict entry out: PolicyGate(**effects) picks it up as its
+        # session-B header set, and nothing else in the gate changes.
+        effects["session_b_headers"] = {"Cookie": session_b_cookie}
+    return effects
 
 
 __all__ = [
