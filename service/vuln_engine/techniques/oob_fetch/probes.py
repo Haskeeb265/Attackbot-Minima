@@ -30,7 +30,7 @@ from ...kernel.technique import (
     ProbeSpec,
     oob_sentinel,
 )
-from ..common import with_parameter
+from ..common import json_body_request, with_parameter
 
 NAME = "oob_fetch"
 
@@ -60,15 +60,28 @@ def probes(hypothesis: Hypothesis) -> list[ProbeSpec]:
     surface = hypothesis.surface
     probe = probe_id(hypothesis)
     sentinel = oob_sentinel(probe)
+    if surface.where == "body":
+        # The API shape: the sentinel travels in the JSON body (the driver's
+        # substitution covers body content as well as URLs). Everything else —
+        # the canary, the oracle, the confirmation spec — is transport-blind.
+        url, headers, content = json_body_request(surface, surface.param, sentinel)
+        detail: dict = {
+            "url": url,
+            "method": "POST",
+            "headers": headers,
+            "content": content,
+        }
+    else:
+        detail = {
+            "url": with_parameter(surface.url, surface.param, sentinel),
+            "method": "GET",
+        }
     return [
         ProbeSpec(
             id=probe,
             kind=KIND_HTTP,
             host=surface.host,
-            detail={
-                "url": with_parameter(surface.url, surface.param, sentinel),
-                "method": "GET",
-            },
+            detail=detail,
             oracle=ORACLE_REFLECTION,
             # The canary is the collaborator's own answer: if it comes back in the
             # response, something on the far side spoke to our collaborator.

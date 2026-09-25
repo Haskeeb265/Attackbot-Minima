@@ -22,6 +22,8 @@ Two fixtures are worth reading before the tests that use them:
 
 from __future__ import annotations
 
+import inspect
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -81,9 +83,16 @@ class FakeHttpEffect:
         at: float = 0.0,
     ) -> RawHttpExchange:
         self.calls.append(url)
+        # ``respond`` callables predate JSON-body probing and take only the url;
+        # ones that accept ``content`` get it, so a body-shaped probe can be
+        # answered on what the body carried, the way the real API endpoint is.
         if self.respond is not None:
+            if "content" in inspect.signature(self.respond).parameters:
+                return self.respond(url, content=content)  # type: ignore[call-arg]
             return self.respond(url)
-        return fixture_exchange(url, collaborator_host=self.collaborator_host)
+        return fixture_exchange(
+            url, collaborator_host=self.collaborator_host, content=content
+        )
 
     @property
     def capabilities(self) -> Http1Capabilities:
@@ -92,8 +101,15 @@ class FakeHttpEffect:
         return Http1Capabilities()
 
 
-def fixture_exchange(url: str, *, collaborator_host: str = "collab.test") -> RawHttpExchange:
-    """The fixture app's answers: reflect ``q``, echo the collaborator for ``url``."""
+def fixture_exchange(
+    url: str, *, collaborator_host: str = "collab.test", content: bytes | None = None
+) -> RawHttpExchange:
+    """The fixture app's answers: reflect ``q``, echo the collaborator for ``url``.
+
+    The collaborator URL may also arrive inside a JSON request body (the
+    ``where="body"`` probing shape) — parsed the same way the real fixture's
+    API endpoint parses its body.
+    """
     parts = urlsplit(url)
     params = {key: values[0] for key, values in parse_qs(parts.query, keep_blank_values=True).items()}
     if parts.path.endswith("/search"):
@@ -102,6 +118,20 @@ def fixture_exchange(url: str, *, collaborator_host: str = "collab.test") -> Raw
             url=url, status=200, body=body, headers={"content-type": "text/html"}
         )
     target = params.get("url", "")
+    if not target and content:
+        # A body-shaped probe carries the collaborator URL as some parameter's
+        # value; find the first URL-looking value the way a real endpoint that
+        # fetches a caller-supplied field would.
+        try:
+            payload = json.loads(content)
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            for value in payload.values():
+                text = str(value)
+                if text.startswith("http://") or text.startswith("https://"):
+                    target = text
+                    break
     if target.startswith(f"http://{collaborator_host}/oob/"):
         probe = unquote(target.split("/oob/", 1)[1])
         return RawHttpExchange(

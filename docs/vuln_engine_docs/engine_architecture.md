@@ -145,9 +145,16 @@ The six techniques today:
 | `xss_reflected` | reflected XSS | `response_reflects_input` / `public_param` | browser |
 | `xss_dom` | DOM XSS | `public_param` (client-render lens) | browser |
 | `xss_stored` | stored XSS | `persistent_storage` | stored runner (re-inject + browser) |
-| `sqli_blind_time` | blind SQLi | `delayed_response` | timing (fresh differential) |
-| `oob_fetch` | SSRF | `influence_remote_fetch` | oob (collaborator) |
+| `sqli_blind_time` | blind SQLi | `delayed_response` (query or JSON body) | timing (fresh differential) |
+| `oob_fetch` | SSRF | `can_influence_remote_fetch` (query or JSON body) | oob (collaborator) |
 | `idor_differential` | IDOR | `access_differs_by_session` | authorization (flipped sessions) |
+
+A surface's `where` decides how the parameter travels: `query` (default) puts
+the payload in the URL; `body` carries it as `{param: payload}` in a JSON
+request body — the API-program shape, answered today by the two
+transport-blind classes. The gate's breaker is target etiquette, not policy:
+after 5 consecutive transport-level failures to one host the gate DEFERs
+instead of asking a host that has stopped answering.
 
 ---
 

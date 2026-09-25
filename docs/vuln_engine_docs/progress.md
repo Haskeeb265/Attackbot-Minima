@@ -757,6 +757,60 @@ Two live-run findings folded back in:
 
 ---
 
+## B1 + B2: target etiquette and JSON-body probing (2026-09-26) ✅
+
+The two gaps between the engine and a first real program, from the field-readiness
+assessment. 416 tests (18 new), mypy clean.
+
+**B1 — target etiquette, two layers.** The transport
+(`transports/http1.py`) now treats a 429 — or a 503 with no guidance — as the
+target saying *too fast*: bounded retries (2, GET-only), `Retry-After` honored
+with a hostile-value ceiling of 8s, and a persistent throttle is still returned
+as measured — the run continues, honestly degraded. The retry lives in the
+transport, not behind the gate, because it is not an authorization question:
+the gate decided the request should happen; the transport decides *when*. The
+gate (`policy/gate.py`) grew the second layer: after 5 **consecutive**
+transport-level failures (a host not answering at all) the gate stops sending
+to that host and DEFERs the rest of the run — logged like every decision — and
+one success resets the count, so a flaky-but-alive host is never cut off. A 5xx
+never opens the breaker: an app returning 500s is speaking, not silent.
+
+**B2 — `where="body"`: the API-program shape.** An operator may now declare a
+surface whose parameter travels in a JSON request body (`--surface
+...;param=filter;where=body;capability=...`). Two techniques answer it — the
+two whose physics are transport-blind:
+
+- `sqli_blind_time` posts the same interpolation-shape family as
+  `{param: payload}` (`BODY_VARIANTS`, the query table untouched and
+  unreachable from a query surface — digests of existing runs hold); the
+  timing verifier re-measures with the same body shape via the shared
+  `common.json_body_request` helper, so proposer and verifier build
+  byte-identical requests;
+- `oob_fetch` substitutes the collaborator sentinel into the body (the
+  driver's one substitution point now covers `content` as well as `url`); the
+  confirmation never touches the request anyway — the collaborator's record is
+  the proof.
+
+Deliberately absent: `xss_reflected` on bodies. The F1 response-shape gate
+classifies a JSON response as the non-executable `json_value` context, so an
+executable XSS claim from a JSON echo cannot even be proposed — pinned by a
+test as the design working.
+
+Live verification, both classes in one pass against the fixture app's new JSON
+API (`POST /api/delay` `{filter}`, `POST /api/fetch` `{url}`):
+
+- blind SQLi: `json_numeric` variant separated (medians 4.04s vs 0.03s),
+  timing verifier confirmed flipped — a finding with `surface.where = body`;
+- SSRF: the sentinel traveled in the JSON body, the fixture fetched it, and
+  the collaborator recorded `GET /oob/oob_fetch:127.0.0.1:url` — a finding.
+
+The demo also re-proved the declared-surface discipline the cheap way: a
+capability misspelled in a `--surface` claim (`influence_remote_fetch` instead
+of the kernel's `can_influence_remote_fetch`) simply produced no arm — the
+technique never fires on a claim the operator did not actually make.
+
+---
+
 ## Open items deliberately left open
 
 - `techniques/sqli_blind_time/probes.measurement_probes()` was written but

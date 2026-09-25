@@ -463,12 +463,19 @@ class Engine:
         """Send one cleared probe through the gate and parse what came back."""
         detail = dict(spec.detail)
         sentinel = oob_sentinel(spec.id)
-        if sentinel in str(detail.get("url", "")):
+        if sentinel in (
+            str(detail.get("url", "")) + str(detail.get("content", ""))
+        ):
             # A pure technique cannot ask the OOB transport for a URL, so it emits a
             # sentinel; this is the one place it becomes real, and the allocation is
-            # logged as an internal effect.
+            # logged as an internal effect. The substitution covers the JSON body
+            # too: a where="body" surface carries the sentinel in ``content``.
             collaborator = self.gate.allocate_oob(spec.id)
             detail["url"] = str(detail["url"]).replace(sentinel, collaborator)
+            if "content" in detail:
+                detail["content"] = str(detail["content"]).replace(
+                    sentinel, collaborator
+                )
 
         # ``timing_class`` is *metadata* — it labels the observation, it is not a
         # transport parameter — so it is read out of the detail here and never

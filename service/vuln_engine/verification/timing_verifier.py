@@ -80,9 +80,18 @@ class TimingVerifier:
 
         baseline_payload = str(confirm.get("baseline_payload") or _BASELINE_PAYLOAD)
         injected_payload = str(confirm.get("injected_payload") or _INJECTED_PAYLOAD)
+        # The transport shape travels with the claim: a body-shaped surface is
+        # re-measured with body-shaped requests — the same SQL, the same
+        # transport the proposal used, so the populations stay comparable.
+        where = str(confirm.get("where") or "query")
+        companions = dict(confirm.get("companions") or {})
 
-        baseline = self._measure(url, param, baseline_payload, candidate.id)
-        injected = self._measure(url, param, injected_payload, candidate.id)
+        baseline = self._measure(
+            url, param, baseline_payload, candidate.id, where=where, companions=companions
+        )
+        injected = self._measure(
+            url, param, injected_payload, candidate.id, where=where, companions=companions
+        )
         if baseline is None or injected is None:
             return refuse(
                 candidate,
@@ -134,17 +143,48 @@ class TimingVerifier:
     # ------------------------------------------------------------------ #
 
     def _measure(
-        self, url: str, param: str, payload: str, probe: str
+        self,
+        url: str,
+        param: str,
+        payload: str,
+        probe: str,
+        *,
+        where: str = "query",
+        companions: dict[str, str] | None = None,
     ) -> list[float] | None:
         """One population's fresh elapsed times, or ``None`` if any request failed."""
+        if where == "body":
+            # The API shape: the same helper the technique's grammar uses, so
+            # verifier and proposer build byte-identical requests. The spec's
+            # plain data becomes a minimal kernel Surface — the one vocabulary
+            # techniques and verifiers share.
+            from ..kernel.technique import Surface
+            from ..techniques.common import json_body_request
+
+            spec_surface = Surface(
+                url=url,
+                host=(urlsplit(url).hostname or "").lower(),
+                param=param,
+                companions=dict(companions or {}),
+            )
+            request_url, headers, content = json_body_request(
+                spec_surface, param, payload
+            )
+            detail: dict = {
+                "url": request_url,
+                "method": "POST",
+                "headers": headers,
+                "content": content,
+            }
+        else:
+            detail = {"url": with_parameter(url, param, payload), "method": "GET"}
         samples: list[float] = []
         for _ in range(SAMPLES):
-            request_url = with_parameter(url, param, payload)
             outcome = self.gate.run(
                 EffectRequest(
                     kind="http.request",
                     host=(urlsplit(url).hostname or "").lower(),
-                    detail={"url": request_url, "method": "GET"},
+                    detail=dict(detail),
                     technique="timing_verifier",
                     probe=probe,
                 )

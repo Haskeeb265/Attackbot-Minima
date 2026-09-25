@@ -39,6 +39,24 @@ DEFAULT_TIMEOUT = 15.0
 
 DEFAULT_USER_AGENT = "vuln-engine/0.1 (authorized engagement; phase 1)"
 
+#: Target-side etiquette. When a target answers ``429 Too Many Requests`` (or
+#: ``503 Service Unavailable`` with no ``Retry-After``), it is not a measurement
+#: — it is the target saying *too fast*. The transport honors that with a
+#: bounded wait, because hammering a throttling target is how a scanner gets a
+#: program's attention for the wrong reason, and because a 429 recorded as a
+#: timing sample would poison the differential. Two retries, on GETs only
+#: (a repeated POST is not idempotent), and a persistent throttle still returns
+#: the exchange as measured — the run continues, honestly degraded.
+DEFAULT_BACKOFF_RETRIES = 2
+
+#: Backoff ceiling per wait, in seconds. Honors the server's ``Retry-After``
+#: when it is sane; the cap exists so a hostile or broken ``Retry-After``
+#: cannot pin a run.
+DEFAULT_BACKOFF_CEILING = 8.0
+
+#: Fallback delay growth when the server sends no ``Retry-After``.
+_DEFAULT_BACKOFF_BASE = 1.0
+
 
 @dataclass(frozen=True)
 class Http1Capabilities:
@@ -92,6 +110,9 @@ class Http1Effect:
     verify: bool = True
     #: Extra headers every request carries (the engagement's traffic identity).
     default_headers: dict[str, str] = field(default_factory=dict)
+    #: Bounded 429/503 retries (target etiquette — see the constant's comment).
+    backoff_retries: int = DEFAULT_BACKOFF_RETRIES
+    backoff_ceiling: float = DEFAULT_BACKOFF_CEILING
     client: Any = None
     _owned_client: bool = False
 
@@ -136,6 +157,14 @@ class Http1Effect:
         transport — or any client that handed back an already-buffered response —
         raises instead of answering. The transport is reporting a measurement, not
         a library's bookkeeping, so it makes the measurement.
+
+        When the target throttles (429, or 503 without guidance), the send is
+        retried a bounded number of times after an honor-the-server wait — see
+        ``DEFAULT_BACKOFF_RETRIES``. The retry lives in the transport rather
+        than behind the gate because it is not an authorization question: the
+        gate decided this request should happen; the transport only decides
+        *when*, within a small declared budget, so the measurement it hands
+        back is of a target answering, not a target refusing.
         """
         started = time.monotonic()
         try:
@@ -146,6 +175,25 @@ class Http1Effect:
                 content=content,
                 params=params or None,
             )
+            for attempt in range(self.backoff_retries):
+                throttled = response.status_code == 429 or (
+                    response.status_code == 503 and not response.headers.get("retry-after")
+                )
+                if not throttled or method.upper() != "GET":
+                    break
+                delay = _retry_delay(
+                    response.headers.get("retry-after", ""),
+                    attempt,
+                    self.backoff_ceiling,
+                )
+                time.sleep(delay)
+                response = self.client.request(
+                    method,
+                    url,
+                    headers=headers or None,
+                    content=content,
+                    params=params or None,
+                )
         except Exception as exc:  # noqa: BLE001 - a failure is a fact, not a crash
             return RawHttpExchange(
                 url=url,
@@ -182,7 +230,24 @@ class Http1Effect:
         self.close()
 
 
+def _retry_delay(retry_after: str, attempt: int, ceiling: float) -> float:
+    """The wait a throttled response asks for, sane-capped.
+
+    ``Retry-After`` may be seconds or HTTP-date; seconds is what servers send in
+    practice, and an unparseable value falls back to the exponential default.
+    The ceiling is the hostile-value guard: our own politeness must not become
+    someone else's lever against the run.
+    """
+    try:
+        delay = min(float(retry_after.strip()), ceiling)
+    except ValueError:
+        delay = min(_DEFAULT_BACKOFF_BASE * (2**attempt), ceiling)
+    return max(delay, 0.0)
+
+
 __all__ = [
+    "DEFAULT_BACKOFF_CEILING",
+    "DEFAULT_BACKOFF_RETRIES",
     "DEFAULT_MAX_BYTES",
     "DEFAULT_TIMEOUT",
     "DEFAULT_USER_AGENT",

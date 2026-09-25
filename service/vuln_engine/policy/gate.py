@@ -65,6 +65,13 @@ KIND_OPERATIONS: dict[str, str] = {
     KIND_BROWSER_RUN: "url_validation",
 }
 
+#: Consecutive transport-level failures (a host not answering at all) after
+#: which the gate stops sending to that host for the rest of the run. The
+#: breaker is target etiquette, not scope: the host is telling us — by silence
+#: — that it cannot take more requests, and a scanner that keeps asking is one
+#: step from being the outage. Deliberately small; see ``_record_breaker``.
+CIRCUIT_FAILURE_LIMIT = 5
+
 
 @dataclass(frozen=True)
 class EffectRequest:
@@ -155,6 +162,17 @@ class PolicyGate:
         #: second session was declared, and any request asking for one is refused
         #: by ``_validate`` before a dispatcher decision is even made.
         self._session_b_headers = dict(session_b_headers) if session_b_headers else None
+        #: Per-host target-etiquette breaker. After ``CIRCUIT_FAILURE_LIMIT``
+        #: consecutive transport-level failures (timeouts, connection errors,
+        #: 5xx-with-no-retry-after families) to one host, the gate stops sending
+        #: and DEFERs the rest of the run's requests there: the host is not
+        #: answering *us*, and continuing turns "unreachable" into a scan the
+        #: host's operators see as an outage-adjacent flood. Consecutive, not
+        #: cumulative — one success resets the count, so a flaky-but-alive host
+        #: is never cut off. Reset by an explicit success, never by time, so a
+        #: frozen clock cannot silently reopen a breaker.
+        self._consecutive_failures: dict[str, int] = {}
+        self._breaker_open: dict[str, bool] = {}
 
     # ------------------------------------------------------------------ #
     # reporting
@@ -251,8 +269,47 @@ class PolicyGate:
         if not decision.allowed:
             return GateOutcome(decision.verb, decision.reason)
 
+        if self._breaker_open.get(request.host.lower(), False):
+            self._log.append(
+                EVENT_GATE_DECISION,
+                at=now,
+                host=request.host,
+                kind=request.kind,
+                technique=request.technique,
+                probe=request.probe,
+                verb="DEFER",
+                reason=(
+                    "circuit breaker: the host stopped answering our earlier "
+                    "requests, so this one is deferred rather than sent — "
+                    "target etiquette, not a scope decision"
+                ),
+            )
+            return GateOutcome(
+                "DEFER",
+                "circuit breaker open: the host stopped answering earlier requests",
+            )
+
         effect = self._execute(request, now)
+        self._record_breaker(request.host, effect)
         return GateOutcome(decision.verb, decision.reason, effect=effect)
+
+    def _record_breaker(self, host: str, result: Any) -> None:
+        """Update the per-host consecutive-failure count from a fresh result.
+
+        A transport-level failure (no response at all) is one count; an HTTP 5xx
+        is deliberately *not* — a 5xx is the server speaking, and apps return
+        500s for their own reasons. Only silence counts toward the breaker, and
+        any answered exchange resets it.
+        """
+        failed = isinstance(result, RawHttpExchange) and not result.ok
+        key = host.lower()
+        if failed:
+            self._consecutive_failures[key] = self._consecutive_failures.get(key, 0) + 1
+            if self._consecutive_failures[key] >= CIRCUIT_FAILURE_LIMIT:
+                self._breaker_open[key] = True
+        else:
+            self._consecutive_failures.pop(key, None)
+            self._breaker_open.pop(key, None)
 
     def _execute(self, request: EffectRequest, now: float) -> Any:
         """Run the cleared effect and log its *metadata* (never its payload)."""

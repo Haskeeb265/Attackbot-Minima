@@ -72,8 +72,10 @@ in scope **because it is declared**, never because the gate was bypassed.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re as _re
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -189,14 +191,32 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if parts.path.startswith("/api/invoices/"):
             self._invoice(parts.path)
             return
+        if parts.path == "/api/delay":
+            self._api_delay(params)
+            return
+        if parts.path == "/api/fetch":
+            self._api_fetch()
+            return
         self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
         parts = urlsplit(self.path)
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
         if parts.path == "/comment":
-            length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
             self._comment(parse_qs(body, keep_blank_values=True))
+            return
+        if parts.path in ("/api/delay", "/api/fetch"):
+            try:
+                payload = json.loads(body) if body else {}
+            except ValueError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            if parts.path == "/api/delay":
+                self._api_delay(payload)
+            else:
+                self._api_fetch(payload)
             return
         self._send(404, b"not found", "text/plain; charset=utf-8")
 
@@ -239,7 +259,6 @@ class FixtureHandler(BaseHTTPRequestHandler):
         fast. The delay travels in the payload, so this endpoint exercises the
         technique's payload family rather than a marker it was handed.
         """
-        import re as _re
         import time as _time
 
         value = params.get("q", [""])[0]
@@ -326,6 +345,53 @@ class FixtureHandler(BaseHTTPRequestHandler):
             return
         log.info("invoice %s denied (role=%r)", invoice_id, role)
         self._send(403, b"{\"error\": \"forbidden\"}", "application/json")
+
+    def _api_delay(self, payload: dict) -> None:
+        """``POST /api/delay`` — the blind SQLi stand-in, JSON-API shaped.
+
+        The same SLEEP-parsing backend ``/delay`` simulates, reached through a
+        JSON body: ``{"filter": "<value>"}``. What the body carries is
+        interpreted on its own terms — a parseable ``SLEEP(n)`` delays, anything
+        else returns fast — which is exactly the two-population differential
+        the timing technique compares, on the transport API programs speak.
+        """
+        import time as _time
+
+        value = str(payload.get("filter", ""))
+        match = _re.search(r"SLEEP\((\d+(?:\.\d+)?)\)", value)
+        if match:
+            _time.sleep(min(float(match.group(1)), SLEEP_CEILING))
+        log.info("api delay filter=%r", value[:64])
+        self._send(200, b"{\"ok\": true}", "application/json")
+
+    def _api_fetch(self, payload: dict) -> None:
+        """``POST /api/fetch`` — the SSRF stand-in, JSON-API shaped.
+
+        Fetches the caller-supplied ``url`` field server-side, exactly like
+        ``/fetch`` but from a JSON body: the blind class's request shape on an
+        API surface. The proof is still the collaborator's interaction record —
+        which transport carried the URL does not change who did the fetching.
+        """
+        target = str(payload.get("url", ""))
+        if not target:
+            self._send(400, b"{\"error\": \"url is required\"}", "application/json")
+            return
+        log.info("api fetch url=%r", target)
+        try:
+            with urllib.request.urlopen(target, timeout=FETCH_TIMEOUT) as response:  # noqa: S310 - the vulnerability
+                body = response.read(65536)
+                status = response.status
+        except urllib.error.HTTPError as error:
+            body = json.dumps({"upstream_status": error.code}).encode("utf-8")
+            status = 200
+        except Exception as exc:  # noqa: BLE001 - report the failure, do not 500
+            self._send(
+                502,
+                json.dumps({"error": type(exc).__name__}).encode("utf-8"),
+                "application/json",
+            )
+            return
+        self._send(status, body, "application/json")
 
     def _send(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)

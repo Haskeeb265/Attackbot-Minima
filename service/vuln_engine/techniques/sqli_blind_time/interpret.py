@@ -119,7 +119,15 @@ def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[
     winner: str = ""
     winner_median = 0.0
     measured: dict[str, float] = {}
-    for variant, _ in probe_grammar.PAYLOAD_VARIANTS:
+    # The family follows the surface's transport: a body surface proposed from
+    # the body table, a query surface from the query table — the two never mix
+    # in one comparison.
+    variants = (
+        probe_grammar.BODY_VARIANTS
+        if surface.where == "body"
+        else probe_grammar.PAYLOAD_VARIANTS
+    )
+    for variant, _ in variants:
         samples = _elapsed_samples(observations, TIMING_INJECTED, probe, variant=variant)
         median = _median(samples)
         if median is None:
@@ -176,18 +184,28 @@ def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[
                 # The verifier's own question: measure both populations fresh,
                 # with the same margin and the *same SQL*. The payloads travel
                 # on the spec — what to inject is data, never a conclusion.
+                # ``where`` travels too: a body-shaped surface is verified with
+                # body-shaped requests, the same SQL on the same transport.
                 "kind": "timing.differential",
                 "probe": probe,
                 "margin": MARGIN_SECONDS,
                 "url": surface.url,
                 "param": surface.param,
+                "where": surface.where,
+                "companions": dict(surface.companions or {}),
                 "baseline_payload": probe_grammar.QUIET_PAYLOAD,
                 "injected_payload": winner_payload,
                 "variant": winner,
             },
-            # The payload that makes the candidate reproducible by hand.
+            # The payload that makes the candidate reproducible by hand. On a
+            # body surface the SQL travels in the request body, not the URL —
+            # so the reproducible location is the endpoint itself, and the
+            # surface's ``where`` field (on the candidate) says how to send it.
             payload=winner_payload,
-            repro_url=with_parameter(surface.url, surface.param, winner_payload),
+            repro_url=(
+                surface.url if surface.where == "body"
+                else with_parameter(surface.url, surface.param, winner_payload)
+            ),
         )
     ]
 

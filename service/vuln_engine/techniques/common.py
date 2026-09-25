@@ -12,9 +12,15 @@ vulnerability is, the contract would be leaking.
 
 from __future__ import annotations
 
+import json
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from ..kernel.technique import Surface
+
+#: The content type every JSON-body probe carries. Declared once: a technique
+#: that spelled it differently per technique would drift from the one spelling
+#: servers actually dispatch on.
+JSON_CONTENT_TYPE = "application/json"
 
 
 # --------------------------------------------------------------------------- #
@@ -85,6 +91,31 @@ def with_parameter(url: str, param: str, value: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
+def json_body_request(
+    surface: Surface, param: str, value: str
+) -> tuple[str, dict[str, str], str]:
+    """``(url, headers, content)`` to carry ``{param: value}`` as a JSON body.
+
+    The API-program counterpart of :func:`with_parameter`: where a query
+    parameter travels in the URL, a JSON API's parameter travels in the body,
+    and a probe grammar that only knows ``with_parameter`` silently excludes
+    every modern API surface. The URL is the surface's, verbatim — unlike the
+    query case there is nothing to encode into it. Companion fields, when the
+    operator declared them, ride along as sibling JSON keys (the same protocol
+    discipline the stored grammar's form bodies follow).
+
+    Returns the exact ``Http1Effect.perform`` kwargs shape minus ``method``:
+    the transport stays dumb, the technique stays pure, and the *gate* still
+    sees only whitelisted detail fields — bodies never reach the world log.
+    """
+    payload: dict[str, str] = {param: value}
+    for name, fixed in (surface.companions or {}).items():
+        if name != param:
+            payload[name] = fixed
+    content = json.dumps(payload)
+    return surface.url, {"Content-Type": JSON_CONTENT_TYPE}, content
+
+
 __all__ = [
     "DOM_MARKER_PREFIX",
     "DOM_Q_ATTR",
@@ -93,7 +124,9 @@ __all__ = [
     "DOM_Q_SCRIPT",
     "DOM_Q_TEXT",
     "DOM_Q_URLATTR",
+    "JSON_CONTENT_TYPE",
     "dom_marker",
+    "json_body_request",
     "surface_id_prefix",
     "with_parameter",
 ]

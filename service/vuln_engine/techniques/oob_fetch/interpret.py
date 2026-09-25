@@ -56,7 +56,13 @@ def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[
     # The URL as it was actually sent, with the placeholder visible: the real
     # collaborator URL is per-probe and only meaningful while the collaborator is
     # up, so showing where it goes is more honest than inventing a working link.
-    as_sent = with_parameter(surface.url, surface.param, oob_sentinel(probe))
+    # A body surface carried the sentinel in the JSON body, not the URL — so the
+    # reproducible location is the bare endpoint (the body shape is named in the
+    # surface's own ``where`` field on the candidate).
+    if surface.where == "body":
+        as_sent = surface.url
+    else:
+        as_sent = with_parameter(surface.url, surface.param, oob_sentinel(probe))
     return [
         Candidate(
             id=f"{surface_id_prefix(NAME, surface)}",
