@@ -1,34 +1,47 @@
-# Dependencies.
+# Dependency manifest — everything `pip install -r requirements.txt` needs.
 #
-# Pre-existing note (unchanged): the recon stage's own dependencies were
-# installed out of band, so this file was a comment rather than a manifest.
+# Unpinned on purpose: no lockfile exists in this repo yet. If a fresh install
+# ever breaks on an upgrade, pin the offender and say why in a comment.
 #
-# --- vuln engine, Phase 1 --------------------------------------------------
-# Declared here because the engine's verification path depends on them, and
-# nothing said so until Phase 1 item 0.4 of docs/vuln_engine_docs/phase1_checklist.md.
-#
-# httpx       transports/http1.py. Already installed and already the recon
-#             platform's client idiom (pipelines/url_endpoint/validate.py).
-# playwright  D1 — the browser Effect. CDP-level events (script execution,
-#             dialogs) are the Phase 1 evidence bar. Requires a browser
-#             download: `python -m playwright install chromium`.
-#             transports/browser.py degrades to the system-Chrome CDP driver
-#             and reports `available: false` with a reason when it is absent.
+# --- vuln engine -------------------------------------------------------------
+# httpx       transports/http1.py, transports/oob.py, transports/browser.py,
+#             and the recon pipelines' client idiom (url_endpoint/validate.py).
 # requests    llm/client.py's plain-POST transport (imported lazily, only when
-#             a key is configured — the degraded path never needs it).
+#             a key is configured — the degraded path never needs it), plus
+#             several recon source modules (asn_cidr, cloud_resource, ...).
+# playwright  the browser Effect in transports/browser.py. Requires a browser
+#             download: `python -m playwright install chromium`. The transport
+#             degrades to the system-Chrome CDP driver and reports
+#             `available: false` with a reason when it is absent, so this is
+#             optional at runtime but declared because the import is not.
 httpx
-playwright
 requests
+playwright
 
-# --- scraper / recon platform ----------------------------------------------
-# python-dotenv  config.py (root) and service/recon_pipeline/platform/common/config.py
-#                load .env at import time. Was installed out of band with the other
-#                recon deps; declared here so a fresh interpreter that does not see
-#                user site-packages can still import it.
+# --- scraper / db layer ------------------------------------------------------
+# python-dotenv  config.py (root) and platform/common/config.py load .env at
+#                import time.
+# psycopg        db/persistence (asyncpg-style binary wheel; no libpq needed).
+# psycopg_pool   the connection pool the persistence layer holds.
+# sqlalchemy     db/migrations/env.py (Alembic runs on a SQLAlchemy engine).
+# alembic        schema migrations (`python -m alembic upgrade head`).
 python-dotenv
+psycopg[binary]
+psycopg_pool
+sqlalchemy
+alembic
 
-# --- tests / typing --------------------------------------------------------
+# --- recon platform ----------------------------------------------------------
+# dnspython   subdomain_domain_wildcards (resolvers, wildcard checks, axfr,
+#             enrich), port_service_host (RDAP), and the graph seam's DNS use.
+dnspython
+
+# --- graph -------------------------------------------------------------------
+# neo4j       the official Bolt driver: platform/graph/neo4j_backend.py
+#             (program intelligence + the graph_normalize --push-neo4j path)
+#             and the vuln engine's --graph-neo4j reader.
+neo4j
+
+# --- tests / typing ----------------------------------------------------------
 pytest
 mypy
-
-#pip install "psycopg[binary]" psycopg_pool sqlalchemy alembic --break-system-packages

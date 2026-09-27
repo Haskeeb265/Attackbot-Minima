@@ -179,33 +179,41 @@ Each recon stage has its own README with flags, outputs and measured yields:
 ## Setup
 
 **Requirements:** Python 3.14, Docker (for PostgreSQL, Neo4j, and the recon
-stage's tool image), and a `.env` at the repo root.
+stage's tool image), and a `.env` at the repo root. The full walkthrough —
+secrets, first-boot caveats, migrations, populating the stores, verification —
+is in [SETUP.md](SETUP.md).
 
 ```bash
-# 1. dependencies — NOTE: requirements.txt is not yet declared (it is a single
-#    commented line), so `pip install -r requirements.txt` installs nothing.
-#    Install by hand for now: python-dotenv, requests, dnspython (recon stages),
-#    neo4j (graph layer), psycopg[binary] + psycopg_pool + sqlalchemy + alembic
-#    (scraper), pytest. See docs/codebase/CONCERNS.md #2.
+# 1. dependencies (requirements.txt is the complete manifest)
 pip install -r requirements.txt
+#    optional: the browser verifier without system Chrome
+python -m playwright install chromium
 
-# 2. datastores
-docker compose up -d          # postgres:16-alpine + neo4j
+# 2. secrets — compose interpolates POSTGRES_*/NEO4J_* from .env, and Neo4j
+#    sets its initial admin password on FIRST boot, so create .env before up
+cp .env.example .env   # then fill in the credentials
+docker compose up -d   # postgres:16-alpine + neo4j
 
 # 3. the recon stage's all-in-one tool image (11 tools; only needed for recon)
 docker build -t subdomain_domain_wildcards_image \
   service/recon_pipeline/pipelines/subdomain_domain_wildcards/
 ```
 
-`.env` keys, by subsystem (all loaded by `config.py`):
+A fresh Postgres volume needs no migration — `db/init/001_schema.sql` already
+creates the current shape. `python -m alembic upgrade head` is only for
+restoring an older data volume.
+
+`.env` keys, by subsystem (all loaded by `config.py`; the authoritative list
+lives in [.env.example](.env.example)):
 
 | Subsystem | Keys |
 |---|---|
 | PostgreSQL | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST`, `POSTGRES_PORT` |
-| HackerOne API | `HACKERONE_USERNAME`, `HACKERONE_TOKEN` |
 | Neo4j | `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE` |
+| HackerOne API | `HACKERONE_USERNAME`, `HACKERONE_TOKEN` |
+| Vuln engine LLM | `VULN_ENGINE_LLM_API_KEY` (empty = deterministic degraded junctions, by design), plus optional `VULN_ENGINE_LLM_API_URL`, `VULN_ENGINE_LLM_MODEL`, `VULN_ENGINE_LLM_MAX_COMPLETION_TOKENS` |
 | Redis (planned) | `REDIS_URL` |
-| Recon stage | `TARGET` (default target), `CHAOS_API_KEY`, `SUBDW_IMAGE`, plus optional amass datasource keys (`SHODAN_KEY`, `CENSYS_KEY`, `VIRUS_TOTAL_KEY`, `SECURITY_TRAILS_KEY`, `GITHUB_KEY`) |
+| Recon stage | `TARGET` (default target), `CHAOS_KEY`, `URL_URLSCAN_KEY`, `SUBDW_IMAGE`, plus optional datasource keys (`SHODAN_KEY`, `CENSYS_KEY`, `VIRUS_TOTAL_KEY`, `SECURITY_TRAILS_KEY`, `GITHUB_KEY`) |
 
 ---
 
