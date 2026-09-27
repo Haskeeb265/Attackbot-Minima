@@ -13,7 +13,9 @@ S2  ██████████ built   Scoring engine (pure, auditable, clam
 S3  ████░░░░░░░ partial  Extraction & normalization (hostnames only)
 S4  ██████░░░░░ partial  GraphSink writers built + journal/replay; program scope
                         now loads from Postgres (platform/programs.py, --program)
-                        — per-asset eligibility still dropped by the scraper's mapper
+                        — per-asset eligibility now PERSISTED (mapper keeps it,
+                        migration 0004) and the vuln engine annotates findings
+                        with it; asset-level graph loading still pending
 S5  ██████░░░░░ built*  crt.sh (standalone, writes files not graph)
 S6  ██████░░░░░ built*  Wayback CDX (standalone)
 S7  ██████░░░░░ partial  Platform run loop + writers exist; no pipeline calls the sink
@@ -25,7 +27,9 @@ S12 ███████░░░░░ partial  Stealth layer (direct mode; no
 S13 ████████░░░░ built   LLM classification — advisory, key-gated (no key here)
 S14 ████████░░░░ built   Run registry + metrics + DLQ surface (no alerting sinks)
 ────────────────────────────────────────────────────────────────────
-S15 ██████████ built   Scope Engine (declared/discovered/needs_review)
+S15 ██████████ built   Scope Engine (declared/discovered/needs_review) + the
+                        explicit out-of-scope boundary set (an out-of-scope rule
+                        is checked first and wins over an in-scope wildcard)
 S16 ██████░░░░░ built*  DNS-brute/permutation techniques (built elsewhere)
 S22 ███████░░░ built*  Cloud buckets (cloud_resource: S3/Azure/GCS harvest +
                         provider probes; graph_normalize reads it — cloud kind)
@@ -38,6 +42,70 @@ XX  ████████░░░ built   port_service_host — exists OUTSI
 XX  █████████ built   url_endpoint — URLs / endpoints / parameters, OUTSIDE both
                         plans' numbering (passive + extract + S24 JS crawl built)
 ```
+
+## Session 2026-09-26 — scraper intelligence, scope boundary, graph seed, and the graph agent
+
+**The pipeline became end-to-end.** Four increments, each verified against the
+live stores (PostgreSQL and Neo4j in compose), plus the tool-calling agent loop
+on top — and, the same day, the asset snapshot learned to follow it into the
+store (`graph_normalize --push-neo4j`, below): **no pipeline output stays
+file-only**. The graph now holds both layers — program intelligence from the
+scraper, the recon asset model from `graph_state.json` — merged by identity.
+
+1. **Scraper + DB intelligence.** The mapper no longer drops what it fetched:
+   `eligible_for_bounty`, `eligible_for_submission`, CIA requirements and
+   asset ids persist on every scope row, and `in_scope` is derived per row
+   (`False` only when the source says `eligible_for_submission is False`; a
+   missing field is never an out-of-scope claim). Out-of-scope assets are now
+   **typed rows** (`bounty_detail.in_scope = false`), not free-text exclusions.
+   Program-level attributes (status, URL, name, description, policy,
+   disclosure, safe-harbour, bounty flags) persist too. Migration `0004`
+   (idempotent, nullable) added the columns; absent source fields become
+   `NULL`, never invented data.
+2. **Scope boundary in the scope engine.** An explicit out-of-scope rule is
+   checked **first** and wins over a declared in-scope wildcard —
+   `api.example.com` inside `*.example.com` is refused, and a discovered
+   `thirdparty.example.net` is `out_of_scope` rather than `needs_review`. The
+   boundary travels whole through `scope_for_apex` and the child-process
+   snapshot (a refusal is always safe to carry in full). The three existing
+   states (`in_scope` / `needs_review` / `out_of_scope`) are unchanged.
+3. **Program intelligence in Neo4j.** `platform/graph/program_graph.py`
+   builds a Program / ScopeRule / VulnerabilityPolicy / WeaknessClass document
+   from the scraper's tables and loads it merge-by-identity (idempotent:
+   verified live, a re-load changes nothing). The scope engine's loader routes
+   `in_scope=False` rows into the boundary buckets.
+4. **Vuln engine context + eligibility.** New `policy/eligibility.py` assesses
+   proven findings as `potentially_eligible` / `ineligible` / `unknown` against
+   the program's own weakness classes (never a bare "eligible");
+   `run_engine.py --program` loads scope **and boundary** fail-fast, and
+   findings are annotated with scope state and eligibility with reasons.
+5. **The graph agent (junction 6).** A bounded tool-calling loop
+   (`llm/graph_nav.py` + `GraphNavigator`): one validated JSON decision per
+   step (`call` a read-only graph tool / `stop` selecting node ids), every
+   step logged as a digest-keyed `llm.junction` row, `--graph-steps` to bound
+   it. The selected ids are expanded by `seed.candidates_for_nodes`, which
+   re-applies the whole-graph rule (only `url` nodes with observed parameters,
+   only in-scope hosts) — an invented id or a boundary asset expands to
+   nothing. Verified live: a 4-step navigation over the real 6,816-node graph
+   (stats → search → broaden → neighbors) with real ids and scores.
+
+**A live-model lesson worth keeping.** Groq's gpt-oss-20b has a strong
+function-calling prior: asked to "call a tool" it sometimes renders the reply
+as a native tool-call envelope (`{"name": ..., "arguments": {...}}`) even when
+the request declared no tools, and the provider rejects the *generation* with
+400 `tool_use_failed`. Three fixes, all general: the prompt frames tools as
+"read-only queries" (same schema, same validator); the caller salvages the
+model's text from the error body's `failed_generation` (with `temperature=0` a
+resample reproduces the same refusal — salvage, then retry); and `ask` unwraps
+the one envelope shape when `arguments` holds the real answer. The loop then
+ran clean end-to-end.
+
+**Verified:** 1,979 passed / 1 skipped (≈+80 across the increments, including
+hermetic junction tests, integration tests over the real `tools.dispatch`, and
+env-gated Neo4j agent tests that skip when the store is down). mypy clean on
+every touched file. The 9 `tests/vuln_engine/llm` failures in a full-suite run
+are environmental (a real key in `.env` leaks into `LLMClient()`'s default and
+flips the degradation tests); they pass in isolation.
 
 ## Session 2026-09-20 (part 3) — the operator feeds recon: `--scope-file`/`--asset`
 
@@ -780,7 +848,9 @@ and the escalation plan is only as good as `cdn_classified.jsonl`'s freshness.
    `organization` nodes (Cymru's name, RDAP's name, the handle); it is the one
    place the model is knowingly fragmentary.
 4. **S4 seed ingestion** — Postgres programs → `Organization`/anchor nodes; the
-   scraper's data is still a disconnected island and scope files are hand-made.
+   scraper's data is no longer a disconnected island for *scope and policy*
+   (program_graph loads them into Neo4j; see the 2026-09-26 session), but the
+   asset-level snapshot still reaches the graph only as `graph_state.json`.
 5. **Declare dependencies + wire CI** — cheapest reliability wins from CONCERNS.md
    (the suite is 1 123 tests in ~26 s and still runs nowhere automatically).
 6. **Queue workers (S9 remainder)** — the topology, spool and DLQ exist; a

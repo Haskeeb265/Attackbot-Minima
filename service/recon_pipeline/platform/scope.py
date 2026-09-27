@@ -114,6 +114,14 @@ class ScopeEngine:
     discovered_networks: set[str] = field(default_factory=set)
     #: Out-of-scope refusals recorded by the seed stage (refused ranges).
     refused: dict[str, str] = field(default_factory=dict)
+    #: Explicit out-of-scope **domain** rules (the program's boundary set).  A
+    #: boundary rule is final: it refuses the host even when a declared in-scope
+    #: wildcard would otherwise cover it, so a program listing
+    #: ``api.example.com`` out of scope inside ``*.example.com`` is honoured.
+    out_of_scope_domains: dict[str, str] = field(default_factory=dict)
+    #: Explicit out-of-scope networks (the program's boundary set).  Refuses the
+    #: network and everything inside it.
+    out_of_scope_networks: dict[str, str] = field(default_factory=dict)
     #: Address -> one of the target's own names that resolved to it.  Populated
     #: from DNS evidence by :meth:`add_resolved_address`; the *name* is kept, not
     #: just the fact, because it is what the reason quotes and what makes the
@@ -165,6 +173,52 @@ class ScopeEngine:
         if canonical:
             self.discovered_networks.add(canonical)
 
+    # ------------------------------------------------------------------ #
+    # the boundary set — explicitly out-of-scope declarations
+    # ------------------------------------------------------------------ #
+
+    def add_out_of_scope_domain(self, domain: str, reason: str = "") -> bool:
+        """Declare a host/apex explicitly out of scope; refuses it and children.
+
+        This is the *boundary* half of scope: an asset the program declared but
+        does not authorize.  It is deliberately a separate set from
+        ``declared_domains`` so "in scope" and "out of scope" can never be the
+        same input in the same bucket, and the rule is checked first in
+        :meth:`check_host`.
+        """
+        from .common.normalize import canonicalize_host
+
+        canonical = canonicalize_host(domain)
+        if canonical is None:
+            return False
+        self.out_of_scope_domains[canonical] = reason or (
+            f"explicitly out of scope (program boundary): {canonical}"
+        )
+        return True
+
+    def add_out_of_scope_network(self, network: str, reason: str = "") -> bool:
+        """Declare a network explicitly out of scope; refuses what is inside it."""
+        try:
+            canonical = str(ipaddress.ip_network(network.strip(), strict=False))
+        except (ValueError, AttributeError):
+            return False
+        self.out_of_scope_networks[canonical] = reason or (
+            f"explicitly out of scope (program boundary): {canonical}"
+        )
+        return True
+
+    def add_out_of_scope_address(self, address: str, reason: str = "") -> bool:
+        """Declare an address explicitly out of scope (recorded in ``refused``)."""
+        from .common.normalize import canonicalize_ip
+
+        canonical = canonicalize_ip(address)
+        if canonical is None:
+            return False
+        self.refused[canonical] = reason or (
+            f"explicitly out of scope (program boundary): {canonical}"
+        )
+        return True
+
     def add_resolved_address(self, address: str, host: str) -> bool:
         """Record that *host* resolves to *address* — DNS evidence, not a claim.
 
@@ -202,6 +256,21 @@ class ScopeEngine:
             return ScopeDecision(OUT_OF_SCOPE, f"not a valid host: {host!r}")
         if is_ip_literal(canonical):
             return self.check_address(canonical)
+        # An explicit out-of-scope rule is final and is checked first: it beats
+        # even a declared in-scope wildcard, which is what lets recon recognise
+        # a boundary asset it discovered from an authorized parent.
+        excluded_matches = sorted(
+            (
+                rule
+                for rule in self.out_of_scope_domains
+                if is_subdomain_of(canonical, rule)
+            ),
+            key=lambda rule: (len(rule), rule),
+            reverse=True,
+        )
+        if excluded_matches:
+            rule = excluded_matches[0]
+            return ScopeDecision(OUT_OF_SCOPE, self.out_of_scope_domains[rule])
         # The most specific declared domain that covers it, so the answer (and
         # its wording) does not depend on set iteration order.
         declared_matches = sorted(
@@ -226,13 +295,18 @@ class ScopeEngine:
         canonical = canonicalize_ip(address)
         if canonical is None:
             return ScopeDecision(OUT_OF_SCOPE, f"not a valid address: {address!r}")
-        if canonical in self.declared_addresses:
-            return ScopeDecision(IN_SCOPE, "declared address")
+        # An explicit refusal is final, and it is checked before even a declared
+        # address: nothing re-enters a refused range by also being declared.
         if canonical in self.refused:
             return ScopeDecision(OUT_OF_SCOPE, self.refused[canonical])
+        if canonical in self.declared_addresses:
+            return ScopeDecision(IN_SCOPE, "declared address")
         if not is_scannable(canonical):
             return ScopeDecision(OUT_OF_SCOPE, "not globally routable")
         ip = ipaddress.ip_address(canonical)
+        excluded_match = _most_specific_containing(ip, set(self.out_of_scope_networks))
+        if excluded_match is not None:
+            return ScopeDecision(OUT_OF_SCOPE, self.out_of_scope_networks[excluded_match])
         declared_match = _most_specific_containing(ip, self.declared_networks)
         if declared_match is not None:
             return ScopeDecision(IN_SCOPE, f"inside declared network {declared_match}")
@@ -266,6 +340,14 @@ class ScopeEngine:
         except (ValueError, AttributeError):
             return ScopeDecision(OUT_OF_SCOPE, f"not a valid network: {network!r}")
         canonical = str(ip_network)
+        # Explicit out-of-scope boundary: the network itself, or contained in a
+        # declared out-of-scope supernet.
+        if canonical in self.out_of_scope_networks:
+            return ScopeDecision(OUT_OF_SCOPE, self.out_of_scope_networks[canonical])
+        for excluded_text, reason in self.out_of_scope_networks.items():
+            excluded = ipaddress.ip_network(excluded_text)
+            if ip_network.subnet_of(excluded):  # type: ignore[arg-type]
+                return ScopeDecision(OUT_OF_SCOPE, reason)
         if canonical in self.declared_networks:
             return ScopeDecision(IN_SCOPE, "declared network")
         if canonical in self.discovered_networks:
@@ -297,4 +379,6 @@ class ScopeEngine:
             "discovered_networks": len(self.discovered_networks),
             "resolved_addresses": len(self.resolved_from),
             "refused": len(self.refused),
+            "out_of_scope_domains": len(self.out_of_scope_domains),
+            "out_of_scope_networks": len(self.out_of_scope_networks),
         }

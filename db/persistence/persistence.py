@@ -11,10 +11,21 @@ def persist_program(conn, mapped_program: dict):
 
         master = mapped_program["master"]
 
+        # Everything besides identity is optional program-level intelligence;
+        # the repository's column whitelist decides what is eagerly persisted,
+        # so passing the whole dict here keeps this seam from growing a line
+        # every time the scraper learns one more field about a program.
+        intelligence = {
+            key: value
+            for key, value in master.items()
+            if key not in ("handle", "scope_count")
+        }
+
         master_id = bounty_master.upsert_program(
             conn,
             handle=master["handle"],
             scope_count=master["scope_count"],
+            **intelligence,
         )
 
         bounty_detail.update_scopes(

@@ -355,7 +355,11 @@ def test_ensure_constraints_is_idempotent_ddl(monkeypatch: pytest.MonkeyPatch) -
     backend, driver = _backend_with(monkeypatch, {})
     ensure_constraints(backend)
     queries = [q for q, _ in driver.log]
-    assert sum("CREATE CONSTRAINT" in q for q in queries) == 2
+    # Two asset-layer constraints, four program-intelligence ones: every label
+    # a loader merges by identity needs its own id constraint.
+    assert sum("CREATE CONSTRAINT" in q for q in queries) == 6
+    for label in ("Asset", "GraphMeta", "Program", "ScopeRule", "VulnerabilityPolicy", "WeaknessClass"):
+        assert any(f":{label}) REQUIRE" in q for q in queries)
     assert all("IF NOT EXISTS" in q for q in queries)
 
 

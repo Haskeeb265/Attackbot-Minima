@@ -89,6 +89,18 @@ class BaseConnector(ABC):
     # Source contract — every platform connector implements these
     # ------------------------------------------------------------------
 
+    def fetch_program_detail(self, handle: str) -> dict:
+        """Raw attributes for one program — status, policy, disclosure, etc.
+
+        Optional, and deliberately **not** abstract: a connector that has no
+        per-program endpoint, or whose response shape has not been adapted yet,
+        returns ``{}`` and the mapper persists NULLs instead of inventing
+        program-level facts. The scraper calls this best-effort; a platform that
+        cannot answer must degrade to "no program intelligence", never fail the
+        whole program's ingestion.
+        """
+        return {}
+
     @abstractmethod
     def fetch_programs(
         self,

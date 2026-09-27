@@ -21,7 +21,50 @@ ORGANIZATION = "organization"
 #: reference has no region at all.
 CLOUD = "cloud"
 
-NODE_KINDS = (DOMAIN, WILDCARD, IP, SERVICE, URL, PARAMETER, ASN, NETWORK, ORGANIZATION, CLOUD)
+# --------------------------------------------------------------------------- #
+# Program intelligence — the bug-bounty layer above the assets
+#
+# These nodes come from the scraper (via PostgreSQL), not from recon. They are
+# separate kinds from the asset taxonomy because they answer different
+# questions: an asset node says "this exists"; a scope rule says "the program
+# said this is (not) ours to test"; a policy says "if a bug exists here, is it
+# potentially eligible?".  Keeping them distinct is what lets the graph answer
+# "why is this asset out of scope?" and "which program rule decided that?".
+# --------------------------------------------------------------------------- #
+
+#: A bug-bounty program — the root of the intelligence graph.  Distinct from an
+#: ``organization`` (a registry ownership claim over networks/ASNs): a program
+#: is a *policy* entity — who declared what, under which rules.
+PROGRAM = "program"
+#: One declared scope asset with its boundary.  Properties carry ``kind``
+#: (``in_scope`` / ``out_of_scope``), ``asset_type`` and ``identifier`` — the
+#: program's own words — so the rule itself is the evidence for a verdict. The
+#: *identifier* is deliberately kept on the rule even though the classifier may
+#: also link the rule to an asset node: an out-of-scope host rediscovered during
+#: recon must be recognisable even before an asset node exists for it.
+SCOPE_RULE = "scope_rule"
+#: A program's vulnerability/bounty policy: the rules that decide whether a
+#: discovered vulnerability is potentially eligible.
+POLICY = "vulnerability_policy"
+#: A vulnerability class (a CWE / weakness family) a policy allows or refuses.
+WEAKNESS_CLASS = "weakness_class"
+
+NODE_KINDS = (
+    DOMAIN,
+    WILDCARD,
+    IP,
+    SERVICE,
+    URL,
+    PARAMETER,
+    ASN,
+    NETWORK,
+    ORGANIZATION,
+    CLOUD,
+    PROGRAM,
+    SCOPE_RULE,
+    POLICY,
+    WEAKNESS_CLASS,
+)
 
 # --------------------------------------------------------------------------- #
 # Edge types
@@ -79,6 +122,18 @@ OWNED_BY = "owned_by"
 #: deliberately separate from ``owned_by``: "hosted by Cloudflare" mislabeled as
 #: ownership would actively mislead a scope judgment.
 HOSTED_BY = "hosted_by"
+#: A program owns a scope rule (in-scope or out-of-scope).
+HAS_SCOPE_RULE = "has_scope_rule"
+#: A scope rule names an asset.  Carries ``state`` (``in_scope`` /
+#: ``out_of_scope``) so an asset declared both ways resolves to the refusal —
+#: the same precedence the scope engine applies.
+DECLARES = "declares"
+#: A program owns a vulnerability/bounty policy.
+HAS_POLICY = "has_policy"
+#: A policy permits a vulnerability class (bounty-eligible).
+ELIGIBLE_CLASS = "eligible_class"
+#: A policy refuses a vulnerability class (explicitly ineligible).
+INELIGIBLE_CLASS = "ineligible_class"
 
 EDGE_TYPES = (
     RESOLVES_TO,
@@ -93,6 +148,11 @@ EDGE_TYPES = (
     ANNOUNCED_BY,
     OWNED_BY,
     HOSTED_BY,
+    HAS_SCOPE_RULE,
+    DECLARES,
+    HAS_POLICY,
+    ELIGIBLE_CLASS,
+    INELIGIBLE_CLASS,
 )
 
 # --------------------------------------------------------------------------- #
@@ -159,6 +219,12 @@ GRAPH_LABELS: dict[str, tuple[str, ...]] = {
     NETWORK: ("Asset", "CIDR"),
     ORGANIZATION: ("Asset", "Organization"),
     CLOUD: ("Asset", "CloudResource"),
+    # Program intelligence — deliberately NOT labelled :Asset: they are not
+    # things on the attack surface, and a query for assets must not pick them up.
+    PROGRAM: ("Program",),
+    SCOPE_RULE: ("ScopeRule",),
+    POLICY: ("VulnerabilityPolicy",),
+    WEAKNESS_CLASS: ("WeaknessClass",),
 }
 
 #: Neutral edge type → the relationship a graph write would use, plus the
@@ -179,14 +245,35 @@ GRAPH_RELATIONSHIPS: dict[str, tuple[str, str]] = {
     ANNOUNCED_BY: ("ANNOUNCED_BY", "network -> asn"),
     OWNED_BY: ("OWNED_BY", "network -> organization | asn -> organization"),
     HOSTED_BY: ("HOSTED_BY", "ip -> organization"),
+    HAS_SCOPE_RULE: ("HAS_SCOPE_RULE", "program -> scope_rule"),
+    DECLARES: ("DECLARES", "scope_rule -> asset (state on the edge)"),
+    HAS_POLICY: ("HAS_POLICY", "program -> vulnerability_policy"),
+    ELIGIBLE_CLASS: ("ELIGIBLE_CLASS", "vulnerability_policy -> weakness_class"),
+    INELIGIBLE_CLASS: ("INELIGIBLE_CLASS", "vulnerability_policy -> weakness_class"),
 }
+
+#: The node kinds and edges that come from the scraper rather than recon.
+#: Kept named so a consumer can tell the two layers apart without re-deriving
+#: which strings are which.
+PROGRAM_NODE_KINDS = (PROGRAM, SCOPE_RULE, POLICY, WEAKNESS_CLASS)
+PROGRAM_EDGE_TYPES = (
+    HAS_SCOPE_RULE,
+    DECLARES,
+    HAS_POLICY,
+    ELIGIBLE_CLASS,
+    INELIGIBLE_CLASS,
+)
 
 #: The one-sentence caveat that travels with every artifact of this pipeline.
 SCHEMA_NOTE = (
     "the schema is settled (2026-09-19): ten asset kinds, twelve claim-typed "
-    "edges; the mapping below is normative. This pipeline still emits a "
-    "file-only model — no database writer exists yet, so nothing was written "
-    "to a graph (graph_written: false)."
+    "edges; the mapping below is normative. The program-intelligence layer "
+    "(program / scope_rule / vulnerability_policy / weakness_class and their "
+    "edges) was added on 2026-09-26 — it comes from the scraper via PostgreSQL, "
+    "not from this pipeline, and is loaded by the graph's program loader. This "
+    "pipeline still emits a file-only model for the asset layer — no database "
+    "writer exists there yet (graph_written: false), though the program loader "
+    "does write the program layer."
 )
 
 #: The field the model writes to say a mapping exists but was not used.

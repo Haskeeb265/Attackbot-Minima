@@ -1,26 +1,50 @@
 import shared.db as db
 
+#: Every program-level intelligence column, in one place: the two write paths
+#: below build their SQL from it, and a new field is added here once. It is the
+#: DB side of the contract; the mapper names the *source* fields that fill it.
+PROGRAM_COLUMNS = (
+    "platform",
+    "program_url",
+    "program_name",
+    "program_status",
+    "description",
+    "policy",
+    "disclosure_policy",
+    "safe_harbor",
+    "offers_bounties",
+    "open_scope",
+    "gold_standard_safe_harbor",
+)
+
+
+def _program_values(handle: str, scope_count: int, fields: dict) -> tuple:
+    return (handle, scope_count, *(fields.get(column) for column in PROGRAM_COLUMNS))
+
+
+def _columns_sql() -> str:
+    return ", ".join(("handle", "scope_count", *PROGRAM_COLUMNS))
+
+
+def _placeholders_sql() -> str:
+    return ", ".join(["%s"] * (2 + len(PROGRAM_COLUMNS)))
+
 
 def add_program(
     conn,
     handle: str,
     scope_count: int = 0,
+    **fields,
 ):
     row = db.fetch_one(
         conn,
-        """
+        f"""
         INSERT INTO bounty_master
-            (
-                handle,
-                scope_count
-            )
-        VALUES (%s, %s)
+            ({_columns_sql()})
+        VALUES ({_placeholders_sql()})
         RETURNING id
         """,
-        (
-            handle,
-            scope_count,
-        ),
+        _program_values(handle, scope_count, fields),
     )
 
     return row["id"]
@@ -30,30 +54,34 @@ def upsert_program(
     conn,
     handle: str,
     scope_count: int = 0,
+    **fields,
 ):
+    """Insert or refresh one program, absorbing its program-level intelligence.
+
+    An absent field arrives as ``None``; because the column list is fixed, a
+    refresh always writes every column, so a field the source stops reporting
+    becomes NULL rather than quietly keeping a stale value.
+    """
+    updates = ", ".join(
+        ["scope_count = EXCLUDED.scope_count"]
+        + [f"{column} = EXCLUDED.{column}" for column in PROGRAM_COLUMNS]
+    )
     row = db.fetch_one(
         conn,
-        """
+        f"""
         INSERT INTO bounty_master
-            (
-                handle,
-                scope_count
-            )
-        VALUES (%s, %s)
+            ({_columns_sql()})
+        VALUES ({_placeholders_sql()})
 
         ON CONFLICT (handle)
         DO UPDATE
             SET
-                scope_count = EXCLUDED.scope_count,
+                {updates},
                 updated_at = %s
 
         RETURNING id
         """,
-        (
-            handle,
-            scope_count,
-            db.now(),
-        ),
+        (*_program_values(handle, scope_count, fields), db.now()),
     )
 
     return row["id"]

@@ -426,10 +426,12 @@ def _edge_from_record(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def ensure_constraints(db: Neo4jBackend) -> None:
-    """The whole index set — four constraints, nothing speculative.
+    """The whole index set — nothing speculative.
 
     ``Asset.id`` uniqueness is the identity mechanic; the property indexes make
-    the backend's own queries (kind/band filters, meta lookup) cheap. Creating
+    the backend's own queries (kind/band filters, meta lookup) cheap. The
+    program-intelligence labels get their own id constraints so the program
+    loader merges by identity exactly the way the asset loader does. Creating
     constraints is idempotent (``IF NOT EXISTS``).
     """
     for stmt in (
@@ -437,6 +439,10 @@ def ensure_constraints(db: Neo4jBackend) -> None:
         "CREATE CONSTRAINT graph_meta_id IF NOT EXISTS FOR (m:GraphMeta) REQUIRE m.id IS UNIQUE",
         "CREATE INDEX asset_kind IF NOT EXISTS FOR (n:Asset) ON (n.kind)",
         "CREATE INDEX asset_band IF NOT EXISTS FOR (n:Asset) ON (n.band)",
+        "CREATE CONSTRAINT program_id IF NOT EXISTS FOR (n:Program) REQUIRE n.id IS UNIQUE",
+        "CREATE CONSTRAINT scope_rule_id IF NOT EXISTS FOR (n:ScopeRule) REQUIRE n.id IS UNIQUE",
+        "CREATE CONSTRAINT policy_id IF NOT EXISTS FOR (n:VulnerabilityPolicy) REQUIRE n.id IS UNIQUE",
+        "CREATE CONSTRAINT weakness_class_id IF NOT EXISTS FOR (n:WeaknessClass) REQUIRE n.id IS UNIQUE",
     ):
         db._run(stmt)
 

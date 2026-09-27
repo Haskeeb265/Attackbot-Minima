@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from .runtime import HypothesizeResult, ReflectDecision
 from .client import EVENT_LLM_JUNCTION, Health, LLMClient, Opinion
 from . import rank, synthesize, write
-from .runtime import HypothesisJunction, ReflectJunction, SynthesisJunction
+from .runtime import GraphNavigation, GraphNavigator, HypothesisJunction, ReflectJunction, SynthesisJunction
 
 log = logging.getLogger("vuln_engine.llm")
 
@@ -69,6 +69,12 @@ class Advisory:
     #: an empty interpretation, bounded by ``reflect.MAX_REFLECT_ROUNDS``; a
     #: degraded opinion leaves the one-pass behavior unchanged.
     reflect: ReflectJunction | None = None
+    #: Junction 6 (graph navigation), built in ``from_env``. Asked only when the
+    #: operator requests it (``--graph-agent``): it explores the recon graph
+    #: through the tool layer and reports node ids, which the seed layer expands
+    #: under the ordinary rules. Present regardless so the health report is one
+    #: object.
+    graph_nav: GraphNavigator | None = None
 
     @classmethod
     def from_env(cls) -> "Advisory":
@@ -79,6 +85,7 @@ class Advisory:
             synthesis=SynthesisJunction(client),
             hypothesize=HypothesisJunction(client),
             reflect=ReflectJunction(client),
+            graph_nav=GraphNavigator(client),
         )
 
     @property
@@ -199,6 +206,7 @@ class Advisory:
         parameters_rows: list[dict],
         alive_urls: list[str],
         memory: dict | None = None,
+        graph_context: list[dict] | None = None,
         log_handle=None,
         now: float = 0.0,
     ) -> "HypothesizeResult":
@@ -206,7 +214,8 @@ class Advisory:
 
         Thin pass-through so callers do not import the runtime; degrades to
         the operator's unchanged seed whenever the junction is missing or the
-        model path is unavailable.
+        model path is unavailable. ``graph_context`` is the recon graph's own
+        candidate rows — a different question, digest-keyed like the rest.
         """
         from .runtime import HypothesizeResult
 
@@ -223,6 +232,7 @@ class Advisory:
             parameters_rows=parameters_rows,
             alive_urls=alive_urls,
             memory=memory,
+            graph_context=graph_context,
             world=log_handle,
             now=now,
         )
@@ -260,6 +270,42 @@ class Advisory:
             observations_summary=observations_summary,
             world=log_handle,
             now=now,
+        )
+
+    # ------------------------------------------------------------------ #
+    # junction 6 — graph navigation (asked only on the operator's request)
+    # ------------------------------------------------------------------ #
+
+    def navigate_graph(
+        self,
+        goal: str,
+        *,
+        tool_names: list[str],
+        dispatch,
+        log_handle=None,
+        now: float = 0.0,
+        max_steps: int = 0,
+    ) -> GraphNavigation:
+        """The junction-6 navigation for *goal* over the offered graph tools.
+
+        Thin pass-through; degrades to "no navigation" whenever the junction is
+        missing or the model path is unavailable, so the graph-derived seed the
+        deterministic path built is unchanged.  ``max_steps`` of 0 (the default)
+        means "the junction's own budget" — the CLI passes the operator's
+        ``--graph-steps`` through when it says otherwise.
+        """
+        if self.graph_nav is None or not self.available:
+            return GraphNavigation(
+                source="degraded",
+                reason=self.health.reason if not self.available else "no graph navigation junction wired",
+            )
+        return self.graph_nav.navigate(
+            goal,
+            tool_names=tool_names,
+            dispatch=dispatch,
+            world=log_handle,
+            now=now,
+            **({"max_steps": max_steps} if max_steps > 0 else {}),
         )
 
     # ------------------------------------------------------------------ #
@@ -304,6 +350,7 @@ def hypothesized_seed_advisory(
     parameters_rows: list[dict],
     alive_urls: list[str],
     memory: dict | None = None,
+    graph_context: list[dict] | None = None,
     log_handle=None,
     now: float = 0.0,
 ):
@@ -323,8 +370,32 @@ def hypothesized_seed_advisory(
         parameters_rows=parameters_rows,
         alive_urls=alive_urls,
         memory=memory,
+        graph_context=graph_context,
         log_handle=log_handle,
         now=now,
+    )
+
+
+def graph_navigation_advisory(
+    advisory: "Advisory | None",
+    goal: str,
+    *,
+    tool_names: list[str],
+    dispatch,
+    log_handle=None,
+    now: float = 0.0,
+    max_steps: int = 0,
+) -> GraphNavigation:
+    """Module-level convenience for a caller that may have no advisory at all."""
+    if advisory is None:
+        return GraphNavigation(source="degraded", reason="no advisory wired")
+    return advisory.navigate_graph(
+        goal,
+        tool_names=tool_names,
+        dispatch=dispatch,
+        log_handle=log_handle,
+        now=now,
+        max_steps=max_steps,
     )
 
 
@@ -473,6 +544,7 @@ def opinion_row(opinion: Opinion) -> dict:
 
 __all__ = [
     "Advisory",
+    "graph_navigation_advisory",
     "hypothesized_seed_advisory",
     "load_memory",
     "load_recon_artifacts",

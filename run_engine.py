@@ -45,6 +45,7 @@ from service.vuln_engine.kernel.technique import (  # noqa: E402
     EngagementSeed,
     Surface,
 )
+from service.vuln_engine.llm import graph_nav
 from service.vuln_engine.llm.wiring import (
     Advisory,
     hypothesized_seed_advisory,
@@ -52,7 +53,19 @@ from service.vuln_engine.llm.wiring import (
     load_recon_artifacts,
     remember,
 )
+from service.vuln_engine.policy.eligibility import (  # noqa: E402
+    ProgramPolicy,
+    annotate_findings,
+    policy_from_document,
+)
 from service.vuln_engine.policy.gate import PolicyGate, default_effects  # noqa: E402
+from service.vuln_engine.seed import (  # noqa: E402
+    DEFAULT_MAX_SURFACES,
+    MAX_GRAPH_CONTEXT,
+    derive_surfaces,
+    graph_context_rows,
+    merge_surfaces,
+)
 from service.vuln_engine.registry import TechniqueRegistry  # noqa: E402
 from service.vuln_engine.scheduler.campaign import Budget, Campaign, CampaignReport  # noqa: E402
 from service.vuln_engine.scheduler.driver import Engine, RunReport  # noqa: E402
@@ -71,6 +84,12 @@ COLLABORATOR_PORT = 9009
 #: Where ``--hypothesize-from-recon`` looks for recon artifacts by default: the
 #: url_endpoint pipeline's own directory, exactly as ``run_recon.py`` leaves it.
 DEFAULT_RECON_DIR = ROOT / "service/recon_pipeline/pipelines/url_endpoint"
+
+#: Where ``--from-graph`` looks for the asset model by default: the
+#: graph_normalize pipeline's own output, where ``run_recon.py`` leaves it.
+DEFAULT_GRAPH_STATE = (
+    ROOT / "service/recon_pipeline/pipelines/graph_normalize/output/graph_state.json"
+)
 
 #: The collaborator URL the *target* must be able to reach.  The compose service
 #: name rather than ``host.docker.internal``: it works identically on Docker
@@ -102,6 +121,10 @@ class Profile:
     #: is a *policy* number, not a safety one: the interesting refusal in Phase 1
     #: is scope, and a budget DEFER would only make the log harder to read.
     host_budget: int = 50
+    #: The program's bounty-eligibility rules, when a program was loaded.  The
+    #: engine never lets this decide *whether* to test (scope does that); it only
+    #: annotates proven findings with what the program would likely accept.
+    policy: ProgramPolicy | None = None
 
 
 def _out(line: str) -> None:
@@ -171,6 +194,35 @@ def load_env_file(path: Path | None = None) -> dict[str, str]:
     return loaded
 
 
+def _build_graph_backend(args):
+    """The graph the seed is derived from — a ``graph_state.json`` or Neo4j.
+
+    Both satisfy ``platform.graph.reader.GraphBackend``; the choice is the
+    operator's, and nothing above the protocol changes with it.  A missing file
+    is named, not silently treated as an empty graph: deriving zero surfaces from
+    an absent model would look like "nothing to test" when it is really "recon
+    has not run".
+    """
+    if args.graph_neo4j:
+        from service.recon_pipeline.platform.graph.neo4j_backend import Neo4jBackend
+
+        return Neo4jBackend(
+            os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+            os.getenv("NEO4J_USERNAME"),
+            os.getenv("NEO4J_PASSWORD"),
+            os.getenv("NEO4J_DATABASE") or None,
+        )
+    from service.recon_pipeline.platform.graph.reader import JsonFileBackend
+
+    path = Path(args.from_graph) if args.from_graph else DEFAULT_GRAPH_STATE
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"no graph_state.json at {path} — run the graph_normalize pipeline "
+            "first (or point --from-graph at one)"
+        )
+    return JsonFileBackend(path)
+
+
 def fixture_profile(*, chrome_path: str = "") -> Profile:
     """The Phase 1 evaluation profile: the compose fixture app, declared in scope.
 
@@ -208,6 +260,48 @@ def fixture_profile(*, chrome_path: str = "") -> Profile:
         scope=ScopeEngine(declared_addresses={"127.0.0.1"}),
         collaborator_public=FIXTURE_COLLABORATOR_PUBLIC,
         collaborator_local=f"http://127.0.0.1:{COLLABORATOR_PORT}",
+        chrome_path=chrome_path,
+    )
+
+
+def program_profile(
+    scope,
+    *,
+    target: str,
+    surfaces: list[Surface],
+    declared: list[str],
+    collaborator_public: str,
+    collaborator_local: str,
+    chrome_path: str = "",
+) -> Profile:
+    """An engagement whose scope is a program the scraper ingested.
+
+    This is the recon seam brought to the engine: the declared scope and the
+    **boundary set** (assets the program explicitly placed out of scope) are
+    applied to the engine's own ``ScopeEngine``, so the gate refuses an
+    out-of-scope host even if the operator typed a surface for it.  The engine
+    still declares no surfaces of its own — the operator declares what to test,
+    the program decides whether it is theirs.
+    """
+    from service.recon_pipeline.platform.programs import apply_program_scope
+
+    engine = ScopeEngine()
+    apply_program_scope(engine, scope)
+    # Operator declarations still apply, on top of the program's — an engagement
+    # may add a staging host the program does not list.
+    for token in declared:
+        if "/" in token:
+            engine.add_declared_network(token)
+        elif token.count(".") == 3 and token.replace(".", "").isdigit():
+            engine.add_declared_address(token)
+        else:
+            engine.add_declared_domain(token)
+    return Profile(
+        target=target,
+        seed=EngagementSeed(target=target, surfaces=tuple(surfaces)),
+        scope=engine,
+        collaborator_public=collaborator_public,
+        collaborator_local=collaborator_local,
         chrome_path=chrome_path,
     )
 
@@ -393,6 +487,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fixture", action="store_true", help="run the Phase 1 fixture profile (default)")
     parser.add_argument("-t", "--target", default="", help="declared target domain")
     parser.add_argument(
+        "--program",
+        default="",
+        metavar="HANDLE",
+        help=(
+            "load the declared scope AND the explicitly out-of-scope boundary for "
+            "one ingested program from PostgreSQL (the scraper's tables); surfaces "
+            "are still declared with --surface, and an out-of-scope host is refused "
+            "by the gate even if a surface names it"
+        ),
+    )
+    parser.add_argument(
         "--surface",
         action="append",
         default=[],
@@ -444,6 +549,63 @@ def main(argv: list[str] | None = None) -> int:
         help="the url_endpoint pipeline directory for --hypothesize-from-recon (default: auto-detect from the repo)",
     )
     parser.add_argument(
+        "--from-graph",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="PATH",
+        help=(
+            "derive candidate surfaces from the recon graph (a graph_state.json); "
+            "omit PATH for graph_normalize's default output. Out-of-scope and "
+            "needs-review URLs are filtered out before they become surfaces"
+        ),
+    )
+    parser.add_argument(
+        "--graph-neo4j",
+        action="store_true",
+        help="use the configured Neo4j store as the graph backend for --from-graph",
+    )
+    parser.add_argument(
+        "--max-surfaces",
+        type=int,
+        default=DEFAULT_MAX_SURFACES,
+        metavar="N",
+        help="cap on graph-derived surfaces (default %(default)s)",
+    )
+    parser.add_argument(
+        "--no-infer-remote-fetch",
+        action="store_true",
+        help=(
+            "do not claim can_influence_remote_fetch from URL-shaped parameter "
+            "names (the claim only arms an SSRF hypothesis; verification proves it)"
+        ),
+    )
+    parser.add_argument(
+        "--graph-agent",
+        action="store_true",
+        help=(
+            "let the model navigate the recon graph through its read-only tools "
+            "(requires --from-graph or --graph-neo4j); the node ids it selects are "
+            "expanded under the ordinary scope rules, never trusted directly"
+        ),
+    )
+    parser.add_argument(
+        "--graph-goal",
+        default="",
+        metavar="TEXT",
+        help="what the graph agent should look for (default: the target's endpoints most worth testing)",
+    )
+    parser.add_argument(
+        "--graph-steps",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "max tool calls the graph agent may make (default: the junction's "
+            "own budget, " + str(graph_nav.MAX_STEPS) + ")"
+        ),
+    )
+    parser.add_argument(
         "--memory-file",
         default="",
         metavar="PATH",
@@ -491,7 +653,65 @@ def main(argv: list[str] | None = None) -> int:
                 _out(f"  {line}")
         return 0 if result.clean else 1
 
-    if args.target:
+    policy: ProgramPolicy | None = None
+    if args.program:
+        # Fail-fast, exactly like the recon side's --program: an unknown handle,
+        # a program with no engagable domain, or a -t the program does not
+        # declare all stop the run before anything is wired. Scope is the safety
+        # input; there is no silent fallback to the fixture.
+        from service.recon_pipeline.platform.graph.program_graph import document_from_db
+        from service.recon_pipeline.platform.programs import (
+            ProgramScopeError,
+            ProgramScopeLoader,
+        )
+
+        try:
+            program_scope = ProgramScopeLoader().load(args.program)
+        except ProgramScopeError as exc:
+            print(f"program scope: {exc}", file=sys.stderr)
+            return 2
+        target = args.target or (program_scope.apexes[0] if program_scope.apexes else "")
+        if not target:
+            print(
+                "program declares no engagable domain — pass -t to name the "
+                "engagement target",
+                file=sys.stderr,
+            )
+            return 2
+        if args.target and not program_scope.declares(args.target):
+            print(
+                f"program {args.program!r} does not declare {args.target!r}; "
+                f"declared domains: {', '.join(program_scope.apexes) or '(none)'}",
+                file=sys.stderr,
+            )
+            return 2
+        profile = program_profile(
+            program_scope,
+            target=target,
+            surfaces=[parse_surface(token) for token in args.surface],
+            declared=args.declare,
+            collaborator_public=args.collaborator_url or f"http://oob_collaborator:{COLLABORATOR_PORT}",
+            collaborator_local=args.collaborator_local or f"http://127.0.0.1:{COLLABORATOR_PORT}",
+            chrome_path=args.chrome_path,
+        )
+        try:
+            policy = policy_from_document(document_from_db(args.program))
+        except (KeyError, ValueError):
+            policy = None
+        _out(
+            f"program {program_scope.handle}: {len(program_scope.domains)} declared domain(s), "
+            f"{len(program_scope.out_of_scope_domains) + len(program_scope.out_of_scope_networks) + len(program_scope.out_of_scope_addresses)} "
+            "explicitly out-of-scope boundary rule(s)"
+        )
+        _out(
+            f"  eligibility policy: "
+            + (
+                f"{len(policy.eligible_classes)} accepted class(es) from {policy.handle}"
+                if policy and policy.eligible_classes
+                else "none published — findings will be assessed as UNKNOWN"
+            )
+        )
+    elif args.target:
         profile = target_profile(
             args.target,
             surfaces=[parse_surface(token) for token in args.surface],
@@ -502,14 +722,127 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         profile = fixture_profile(chrome_path=args.chrome_path)
+    profile.policy = policy
+
+    graph_seed: dict | None = None
+    graph_context: list[dict] | None = None
+    graph_backend = None
+    if args.from_graph is not None or args.graph_neo4j:
+        # Seed construction from graph context: recon's observed URLs and their
+        # parameters become surfaces, filtered by the *same* scope engine the
+        # gate uses, so a boundary asset is never proposed. Operator-declared
+        # surfaces win on a collision. This adds hypotheses, not conclusions —
+        # every derived surface still pays the gate and the verifier.
+        try:
+            backend = _build_graph_backend(args)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"graph seed: {exc}", file=sys.stderr)
+            return 2
+        graph_backend = backend
+        derived = derive_surfaces(
+            backend,
+            scope_state=lambda host: profile.scope.check_host(host).state,
+            max_surfaces=max(1, args.max_surfaces),
+            infer_remote_fetch=not args.no_infer_remote_fetch,
+        )
+        graph_seed = derived.report
+        if args.hypothesize_from_recon:
+            # The advisory junction may widen the seed further, but only across
+            # what recon observed — so the same scope-filtered candidates the
+            # deterministic derivation used become the junction's context rows.
+            graph_context = graph_context_rows(
+                backend,
+                scope_state=lambda host: profile.scope.check_host(host).state,
+                max_rows=MAX_GRAPH_CONTEXT,
+                infer_remote_fetch=not args.no_infer_remote_fetch,
+            )
+        declared = list(profile.seed.surfaces)
+        profile.seed = EngagementSeed(
+            target=profile.target,
+            surfaces=tuple(merge_surfaces(declared, derived.surfaces)),
+        )
+        _out(
+            f"graph seed: {len(derived.surfaces)} surface(s) from "
+            f"{graph_seed.get('urls_considered', 0)} URL node(s); "
+            f"{graph_seed.get('remote_fetch_claims', 0)} remote-fetch claim(s); "
+            f"filtered {graph_seed.get('skipped_out_of_scope', 0)} out-of-scope / "
+            f"{graph_seed.get('skipped_needs_review', 0)} needs-review"
+        )
+        if graph_seed.get("truncated"):
+            _out(f"  capped at {args.max_surfaces} ({graph_seed.get('dropped', 0)} dropped)")
+
     profile.browser_driver = args.driver
     profile.cookies = "; ".join(args.cookie)
     profile.session_b_cookie = "; ".join(args.session_b_cookie)
     if args.host_budget > 0:
         profile.host_budget = args.host_budget
 
-    advisory = Advisory.from_env() if (args.llm_draft or args.hypothesize_from_recon) else None
+    advisory = Advisory.from_env() if (args.llm_draft or args.hypothesize_from_recon or args.graph_agent) else None
     output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_ROOT / profile.target.replace(":", "_")
+
+    agent_result: dict | None = None
+    if args.graph_agent:
+        # Junction 6: the model navigates the graph through the *same* read-only
+        # tools an operator uses, and reports node ids — never surfaces. The ids
+        # are expanded by ``candidates_for_nodes``, which re-applies the
+        # whole-graph rule and the scope filter, so an agent cannot turn an
+        # invented id or a boundary asset into a target. Degrades to no
+        # navigation without a key; the deterministic seed is unaffected.
+        if graph_backend is None:
+            print(
+                "--graph-agent needs a graph: pass --from-graph PATH (or "
+                "--graph-neo4j)",
+                file=sys.stderr,
+            )
+            return 2
+        from service.recon_pipeline.platform.graph.tools import (
+            dispatch as graph_dispatch,
+            tool_schemas,
+        )
+        from service.vuln_engine.llm.wiring import graph_navigation_advisory
+        from service.vuln_engine.seed import candidates_for_nodes
+
+        tool_names = [schema["function"]["name"] for schema in tool_schemas()]
+        # The operator's step budget, or the junction's own.  A larger budget
+        # buys more exploration, not more authority: every step is still one
+        # validated, logged decision and the expansion rules do not move.
+        max_steps = args.graph_steps if args.graph_steps > 0 else graph_nav.MAX_STEPS
+        navigation = graph_navigation_advisory(
+            advisory,
+            args.graph_goal or f"find the endpoints of {profile.target} most worth testing",
+            tool_names=tool_names,
+            dispatch=lambda name, arguments: graph_dispatch(
+                graph_backend, name, arguments
+            ),
+            log_handle=WorldLog(output_dir / "world.jsonl"),
+            max_steps=max_steps,
+        )
+        agent_result = navigation.to_dict()
+        if navigation.selected_nodes:
+            expanded = candidates_for_nodes(
+                graph_backend,
+                navigation.selected_nodes,
+                scope_state=lambda host: profile.scope.check_host(host).state,
+                infer_remote_fetch=not args.no_infer_remote_fetch,
+            )
+            existing = list(profile.seed.surfaces)
+            profile.seed = EngagementSeed(
+                target=profile.target,
+                surfaces=tuple(merge_surfaces(existing, expanded.surfaces)),
+            )
+            agent_result["expanded_surfaces"] = len(expanded.surfaces)
+            agent_result["expansion"] = expanded.report
+        _out(
+            f"graph agent: {navigation.source} - {navigation.observations} tool call(s), "
+            f"{len(navigation.selected_nodes)} node(s) selected"
+            + (
+                f", {agent_result.get('expanded_surfaces', 0)} surface(s) expanded"
+                if navigation.selected_nodes
+                else ""
+            )
+        )
+        if navigation.reason:
+            _out(f"  agent: {navigation.reason}")
 
     widening: dict | None = None
     if args.hypothesize_from_recon:
@@ -531,6 +864,7 @@ def main(argv: list[str] | None = None) -> int:
             parameters_rows=parameters_rows,
             alive_urls=alive_urls,
             memory=memory,
+            graph_context=graph_context,
             log_handle=widening_log,
         )
         profile.seed = widening_result.seed
@@ -551,8 +885,15 @@ def main(argv: list[str] | None = None) -> int:
             advisory=advisory,
             widening=widening,
         )
+        campaign_payload = campaign_report.to_dict()
+        # Same provenance the single-run report carries: what the graph-derived
+        # seed was, and what (if anything) the navigating agent selected.
+        if graph_seed is not None:
+            campaign_payload["graph_seed"] = graph_seed
+        if agent_result is not None:
+            campaign_payload["graph_agent"] = agent_result
         if args.json:
-            _out(json.dumps(campaign_report.to_dict(), indent=2))
+            _out(json.dumps(campaign_payload, indent=2))
             return 0
         _out(f"vuln engine campaign - {campaign_report.target}")
         _out(f"  rounds:     {campaign_report.rounds_run}/{campaign_report.rounds_planned}")
@@ -589,7 +930,7 @@ def main(argv: list[str] | None = None) -> int:
                     key = f"{key}#{surface['param']}"
                 _out(f"    + {key}")
         write_drafts(
-            campaign_report.to_dict(),
+            campaign_payload,
             output_dir,
             advisory,
             log_handle=WorldLog(output_dir / "world.jsonl"),
@@ -597,8 +938,32 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if campaign_report.findings else 1
 
     report = run(profile, output_dir=output_dir, force=args.force, advisory=advisory)
+    payload = report.to_dict()
+    if graph_seed is not None:
+        payload["graph_seed"] = graph_seed
+    if agent_result is not None:
+        payload["graph_agent"] = agent_result
+    # Eligibility is a view of a *proven* finding, not part of the world log (the
+    # log cannot change because a program's rules did). So it is attached here,
+    # to the report the run writes, and the canonical findings remain the log's.
+    if args.program:
+        payload["findings"] = annotate_findings(
+            payload.get("findings") or [],
+            policy=profile.policy,
+            scope_lookup=lambda host: profile.scope.check_host(host).state,
+        )
+        payload["program"] = profile.policy.handle if profile.policy else args.program
+    if graph_seed is not None or agent_result is not None or args.program:
+        # Re-write the report with the enrichments attached: the file on disk
+        # should match what --json prints, and a graph seed or an agent walk
+        # missing from the report would be provenance an operator cannot audit.
+        (output_dir / "report.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=False),
+            encoding="utf-8",
+            newline="\n",
+        )
     write_drafts(
-        report.to_dict(),
+        payload,
         output_dir,
         advisory,
         log_handle=WorldLog(output_dir / "world.jsonl"),
@@ -612,7 +977,7 @@ def main(argv: list[str] | None = None) -> int:
         _out(f"  memory:     {memory_path} (feed back with --memory-file)")
 
     if args.json:
-        _out(json.dumps(report.to_dict(), indent=2))
+        _out(json.dumps(payload, indent=2))
         return 0
 
     _out(f"vuln engine - {report.target}")
@@ -634,6 +999,13 @@ def main(argv: list[str] | None = None) -> int:
     _out(f"  findings:   {len(report.findings)}")
     for line in report.report_lines:
         _out(f"    {line}")
+    if args.program:
+        for finding in payload.get("findings") or []:
+            _out(
+                f"    scope={finding.get('scope_state', 'unknown')} "
+                f"eligibility={finding.get('eligibility', 'unknown')} "
+                f"({finding.get('eligibility_reason', '')})"
+            )
     if report.leads:
         _out(f"  leads:      {len(report.leads)} (recorded, not promoted)")
     if report.problems:

@@ -201,6 +201,30 @@ def _default_caller(
                 },
                 timeout=timeout,
             )
+            if response.status_code == 400:
+                # A model with a native tool-calling prior (observed on Groq's
+                # gpt-oss-20b) sometimes renders its reply as a function-call
+                # even when the request declared no tools; the provider then
+                # rejects the *generation* with 400 ``tool_use_failed``. The
+                # body names the model's text in ``failed_generation`` — the
+                # model said something, and it may be exactly the answer we
+                # asked for, wrapped in an envelope the caller above cannot
+                # carry. Salvage it as the content and let ``ask``'s unwrapping
+                # validate it; with ``temperature=0`` a resample reproduces the
+                # same refusal, so salvage-then-retry, and only a 400 with no
+                # recoverable generation falls through to the HTTP error.
+                try:
+                    provider_error = response.json().get("error", {})
+                except ValueError:
+                    provider_error = {}
+                if provider_error.get("code") == "tool_use_failed":
+                    salvaged = str(provider_error.get("failed_generation") or "")
+                    if salvaged.strip():
+                        content = salvaged
+                        return content
+                response.raise_for_status()
+            if response.status_code in (429, 413) and attempt < 2:
+                retry_after = response.headers.get("retry-after", "")
             if response.status_code in (429, 413) and attempt < 2:
                 retry_after = response.headers.get("retry-after", "")
                 try:
@@ -314,7 +338,7 @@ class LLMClient:
 
         try:
             text = self._perform(prompt, system)
-            answer = _extract_json(text)
+            answer = _unwrap_tool_envelope(_extract_json(text))
             validation = validate(answer)
             opinion = Opinion(
                 junction=junction,
@@ -418,6 +442,26 @@ def _extract_json(text: str) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("the answer's JSON is not an object")
     return payload
+
+
+def _unwrap_tool_envelope(answer: dict) -> dict:
+    """Unwrap a native tool-call envelope, if the answer came wrapped in one.
+
+    A model with a strong tool-calling prior (observed on Groq's gpt-oss-20b)
+    sometimes renders its reply as a function-call object —
+    ``{"name": <tool>, "arguments": {<the actual answer>}}`` — even when the
+    request declared no tools.  The junction's contract is a single JSON
+    object; the model's *intent* is intact inside the envelope, so unwrap one
+    level and hand the validation on.  Only the exact envelope shape is
+    unwrapped: ``name`` present, ``arguments`` a dict, and no ``action`` at the
+    top level (which would mean the answer was already what we asked for).
+    """
+    if "action" in answer or "name" not in answer:
+        return answer
+    arguments = answer.get("arguments")
+    if not isinstance(arguments, dict):
+        return answer
+    return arguments
 
 
 __all__ = [

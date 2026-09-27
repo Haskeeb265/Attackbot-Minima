@@ -1,15 +1,17 @@
 # Attackbot
 
 Attack surface management for bug bounty programs: program data is scraped from
-HackerOne into PostgreSQL, and the recon pipeline turns a program's in-scope
-domains into a mapped inventory of live hosts.
+HackerOne into PostgreSQL, the recon pipeline turns a program's in-scope domains
+into a mapped inventory of live hosts, and the vuln engine evaluates the
+discovered surface against the program's scope, boundary and eligibility rules.
 
-Two halves, both in this repo:
+Three halves, all in this repo:
 
 | Half | What it does | Where |
 |---|---|---|
-| **Scraper** | Pulls HackerOne programs, scopes, weaknesses and exclusions into PostgreSQL | `service/scraper/`, `db/`, `shared/connectors/` |
-| **Recon** | Discovers subdomains, domains and wildcards; resolves them to live hosts | `service/recon_pipeline/` |
+| **Scraper** | Pulls HackerOne programs, typed in- and out-of-scope assets, weaknesses, exclusions and bounty policy into PostgreSQL | `service/scraper/`, `db/`, `shared/connectors/` |
+| **Recon** | Discovers subdomains, domains and wildcards; resolves them to live hosts; normalizes everything into one scored graph | `service/recon_pipeline/` |
+| **Vuln engine** | Runs deterministic, scope-gated techniques over graph-derived surfaces; advisory LLM junctions, evidence-backed findings | `run_engine.py`, `service/vuln_engine/` |
 
 Documentation lives in [`docs/`](docs/README.md) — start there.
 
@@ -22,7 +24,14 @@ Be aware that the plan documents describe much more than what exists:
 **Built**
 
 - Scraper: HackerOne ingestion end to end (fetch → map → persist), with the
-  `bounty_*` schema and Alembic migrations.
+  `bounty_*` schema and Alembic migrations. The mapper now keeps the
+  per-asset fields it used to drop — `eligible_for_bounty`,
+  `eligible_for_submission`, CIA requirements, asset ids — and derives
+  `in_scope` per row, so an **out-of-scope asset is a typed row**, not free
+  text: `bounty_detail.in_scope = false` (migration `0004` added the columns,
+  idempotent and nullable; absent source fields persist as `NULL`, never
+  invented). Program-level attributes (status, URL, name, description, policy,
+  disclosure, safe-harbour, bounty flags) persist alongside the scopes.
 - Recon graph seam (`service/recon_pipeline/platform/graph/`): the journaling
   write sink with the degrade contract. The pre-run Neo4j schema (labels,
   constraints, CRUD repository) was removed on 2026-09-19 — it was designed
@@ -65,10 +74,20 @@ Be aware that the plan documents describe much more than what exists:
   (`service/recon_pipeline/pipelines/graph_normalize/`).
 - **ASM platform** (`service/recon_pipeline/platform/`) — the layer every
   pipeline consumes: the plugin contract + registry + one run path, evidence
-  scoring (S2), the scope engine (S15), the active-policy dispatcher (S10), a
+  scoring (S2), the scope engine (S15) with an explicit **out-of-scope
+  boundary set** (an out-of-scope rule is checked first and wins over a
+  declared in-scope wildcard — `api.example.com` inside `*.example.com` is
+  refused, and the boundary travels whole through `scope_for_apex` and the
+  child-process snapshot), the active-policy dispatcher (S10), a
   Redis hot cache (S8) and Streams queue (S9), the lifecycle loop (S11),
   key-gated LLM enrichment (S13), observability (S14) and the graph sink
   (S4/S7). Every service degrades instead of failing a run.
+- **Program intelligence in the graph** (`platform/graph/program_graph.py`) —
+  builds a Program / ScopeRule / VulnerabilityPolicy / WeaknessClass document
+  from the scraper's PostgreSQL tables and loads it into Neo4j (`HAS_SCOPE_RULE`,
+  `DECLARES`, `HAS_POLICY`, `ELIGIBLE_CLASS`/`INELIGIBLE_CLASS`), merging by
+  `kind:identity` (idempotent — a re-load changes nothing). CLI:
+  `python -m service.recon_pipeline.platform.graph.program_graph --program HANDLE`.
 - **`python -m service.recon_pipeline`** — the canonical CLI: `list` the
   discovered pipelines, `run` them against a target, read the run `history`,
   inspect the `dlq`, and `replay` reports the graph writes awaiting the future
@@ -78,6 +97,16 @@ Be aware that the plan documents describe much more than what exists:
   [`service/recon_pipeline/README.md`](service/recon_pipeline/README.md)).
 - `run_recon.py` — the legacy combined-report workflow; still runs every
   pipeline and assembles `RECON_<target>_OUTPUT.md` from the stage reports.
+- **Vuln engine** (`run_engine.py`, `service/vuln_engine/`) — deterministic,
+  deny-by-default techniques over declared *and* graph-derived surfaces, with
+  advisory LLM junctions (rank / synthesize / write / hypothesize / reflect /
+  graph navigation), receipts, replay and per-finding bounty-eligibility
+  annotation. See [Running the vuln engine](#running) below.
+- **Vuln-engine seed from the graph** (`service/vuln_engine/seed/from_graph.py`)
+  — derives candidate surfaces from `graph_state.json` or Neo4j through the
+  storage-agnostic reader: only `url` nodes with observed parameters, only
+  in-scope hosts, provenance on every surface (`graph:<node id>#<param>`),
+  operator-declared surfaces win on a collision.
 - Stealth & resilience layer (`service/recon_pipeline/platform/stealth/`), wired into every
   active step: coherent per-host browser identities, pacing with jitter/backoff,
   WAF + challenge detection, persistent quarantine with a passive-only fallback,
@@ -86,8 +115,11 @@ Be aware that the plan documents describe much more than what exists:
 
 **Planned, not built**
 
-- Seed ingestion from Postgres into the graph (S4's other half) — the scraped
-  programs are still a disconnected island, and scope files are hand-prepared.
+- Journaling the recon-asset snapshot through the graph *sink* (the merge-on-
+  write path with degrade-on-down): `graph_normalize --push-neo4j` now loads
+  `graph_state.json` into Neo4j directly (merge by identity, idempotent, and
+  both layers — program intelligence and recon assets — live in one store),
+  but the writers' journal/replay machinery is still unused by pipelines.
 - Queue **workers**: the topology, producer, spool and DLQ exist, but no
   long-running consumer pool drains the streams yet.
 - Correlation (certificate/favicon/JARM clustering, reverse-WHOIS pivots,
@@ -97,7 +129,8 @@ Be aware that the plan documents describe much more than what exists:
 - Proxy pools and CAPTCHA handling in the stealth layer; Redis-backed shared
   quarantine.
 - **No pipeline calls the graph sink yet** — the writers and their journal
-  exist, but results still land only in each pipeline's `output/`.
+  exist; `graph_normalize --push-neo4j` loads the final model into Neo4j, and
+  intermediate results still land only in each pipeline's `output/`.
 
 The authoritative status per stage is in the two plan documents, each of which
 carries an implementation-status section:
@@ -112,7 +145,9 @@ carries an implementation-status section:
 |---|---|
 | `main.py`, `config.py` | the scraper entry point and the single `.env` loader |
 | `run_recon.py` | runs all five recon pipelines and assembles the combined report |
-| `db/` | PostgreSQL schema, mapper, persistence, repos, Alembic migrations |
+| `run_engine.py` | the vuln engine CLI: fixture / target / program profiles, `--from-graph`, `--graph-agent`, `--campaign`, `--replay` |
+| `service/vuln_engine/` | the vuln engine: kernel, techniques, transports, scheduler, policy (gate + eligibility), world (log/views), advisory LLM junctions (`llm/`), graph-derived seeding (`seed/`) |
+| `db/` | PostgreSQL schema, mapper, persistence, repos, Alembic migrations (per-asset eligibility + typed out-of-scope since `0004`) |
 | `service/scraper/` | HackerOne ingestion |
 | `service/recon_pipeline/cli.py` + `__main__.py` | the canonical platform CLI (`python -m service.recon_pipeline`) |
 | `service/recon_pipeline/platform/` | the ASM platform — contract, registry, runner, scoring, scope, dispatch, cache, queues, lifecycle, enrichment, observability, `graph/` (journaling sink; schema pending), `stealth/`, `common/` |
@@ -219,6 +254,14 @@ python -m service.recon_pipeline.pipelines.cloud_resource.main -t example.com
 # (the platform runs it last automatically, because it declares what it consumes)
 python -m service.recon_pipeline.pipelines.graph_normalize.main -t example.com
 
+# graph: load one program's intelligence (scope rules, policy, weakness
+# classes) from PostgreSQL into Neo4j — idempotent, merge by identity
+python -m service.recon_pipeline.platform.graph.program_graph --program acme
+
+# graph: push the emitted asset model into Neo4j as well (opt-in; the file
+# output is unchanged and the push is a second consumer of the same document)
+python -m service.recon_pipeline.pipelines.graph_normalize.main -t example.com --push-neo4j
+
 # recon: every pipeline + one combined report (RECON_<target>_OUTPUT.md)
 python run_recon.py -t example.com
 
@@ -250,11 +293,54 @@ Raw per-tool Docker commands (and the resolver warning that matters) are in
 ## Tests
 
 ```bash
-python -m pytest tests/recon -q      # 1373 hermetic tests: no Docker, no DNS, no network
-python -m pytest tests/ -q           # 1373 passed, 1 skipped
+python -m pytest tests/recon -q      # 1512 hermetic tests: no Docker, no DNS, no network
+python -m pytest tests/ -q           # 1979 passed, 1 skipped
 ```
 
 The recon suite is the project's real test suite: it runs anywhere and covers every
 stage's contract. The scraper tests are script-style and need a live PostgreSQL
 (the one collectable scraper test skips without its fixture — see
 [docs/codebase/TESTING.md](docs/codebase/TESTING.md)).
+
+The vuln-engine suite is hermetic too (`tests/vuln_engine/`), including the
+LLM junction tests — every model answer is a canned caller, no key, no
+network. Two caveats: the graph-agent Neo4j tests run against a real store
+when `NEO4J_USERNAME`/`NEO4J_PASSWORD` are set and skip otherwise, and the
+`tests/vuln_engine/llm` degradation tests can fail in a full-suite run when a
+real `VULN_ENGINE_LLM_API_KEY` sits in `.env` (the environment leaks into
+`LLMClient()`'s default), while passing in isolation.
+
+### Running the vuln engine
+
+```bash
+# the Phase 1 fixture: compose app + collaborator, scope declared as an address
+docker compose up -d fixture_app oob_collaborator
+python run_engine.py --fixture
+
+# a target with hand-declared surfaces
+python run_engine.py -t example.com \
+  --surface 'url=https://example.com/search;param=q;capability=public_param'
+
+# a scraped program: scope AND the out-of-scope boundary load from PostgreSQL,
+# findings get bounty-eligibility annotations from the program's policy
+python run_engine.py --program acme -t example.com \
+  --surface 'url=https://example.com/search;param=q'
+
+# seed from recon's graph (file or Neo4j), then derive candidate surfaces
+python run_engine.py -t example.com --from-graph   # default: graph_normalize's graph_state.json
+python run_engine.py -t example.com --graph-neo4j
+
+# the graph agent: the model navigates the graph through its read-only tools,
+# one validated JSON decision per step; the node ids it selects expand under
+# the ordinary scope rules (an invented id or boundary asset expands to nothing)
+python run_engine.py -t example.com --from-graph --graph-agent \
+  --graph-goal "parameterised endpoints" --graph-steps 6
+
+# an offline replay of a finished run, recomputing every decision from the log
+python run_engine.py --replay output/vuln_engine/<target>/world.jsonl
+```
+
+Every model influence is advisory and logged: junction calls land in the run's
+`world.jsonl` as digest-keyed `llm.junction` rows, so a `--replay` reproduces
+the model's contribution with the key removed. Without a key, every junction
+degrades to the deterministic behavior and the run is unchanged.

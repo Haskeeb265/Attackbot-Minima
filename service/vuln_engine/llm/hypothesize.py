@@ -47,6 +47,11 @@ MAX_INPUT_PARAMS = 60
 #: How many alive URLs the prompt may carry, same determinism rule.
 MAX_INPUT_URLS = 40
 
+#: How many graph-context rows (recon-linked url/param candidates) the prompt may
+#: carry.  Same determinism rule as the artifact caps.  Declared here rather than
+#: imported from ``seed`` to keep this layer kernel-side only.
+MAX_INPUT_GRAPH = 40
+
 #: How many surfaces one answer may propose.  The engine's host budget is a
 #: policy number; this cap is the model's share of it — enough to cover a
 #: recon-sized parameter inventory's interesting slice, small enough that one
@@ -142,8 +147,44 @@ def _compact_memory(memory: dict | None) -> dict:
     }
 
 
+def _graph_context_rows(graph_context: list[dict] | None) -> list[dict]:
+    """Whitelist, bound and order the graph rows the prompt may see.
+
+    The seed layer already scope-filters and orders its candidates; this repeats
+    the discipline here so a caller passing an arbitrary list (or a hand-edited
+    one) cannot bloat the digest or smuggle prose into the prompt.  The order is
+    the same ``(-score, url, param)`` the rest of the junction uses.
+    """
+    rows: list[dict] = []
+    for entry in graph_context or ():
+        if not isinstance(entry, dict):
+            continue
+        url = _clean_str(entry.get("url"))
+        param = _clean_str(entry.get("param"))
+        if not url or not param:
+            continue
+        try:
+            score = int(entry.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0
+        rows.append(
+            {
+                "url": url,
+                "param": param,
+                "capability": _clean_str(entry.get("capability")),
+                "score": score,
+                "band": _clean_str(entry.get("band")),
+            }
+        )
+    rows.sort(key=lambda row: (-row["score"], row["url"], row["param"]))
+    return rows[:MAX_INPUT_GRAPH]
+
+
 def build_input(
-    rows: list[dict], alive_urls: list[str], memory: dict | None = None
+    rows: list[dict],
+    alive_urls: list[str],
+    memory: dict | None = None,
+    graph_context: list[dict] | None = None,
 ) -> dict:
     """The junction's input, from raw recon artifact rows.
 
@@ -153,9 +194,11 @@ def build_input(
     engagement's distilled record (``wiring.remember``), or ``None`` — when
     present it is part of the digest, so a run informed by memory is a
     different question than one without it, and a replay reproduces both.
-    Aggregation is deterministic: grouped by (url, parameter), ordered by
-    observation count descending then by url, truncated at the caps — the
-    same artifacts always yield the same digest.
+    ``graph_context`` is the recon graph's own candidate rows
+    (``seed.graph_context_rows``) — the assets recon linked to an observed
+    parameter.  Aggregation is deterministic: grouped by (url, parameter),
+    ordered by observation count descending then by url, truncated at the caps —
+    the same artifacts and graph always yield the same digest.
     """
     grouped: dict[tuple[str, str], dict] = {}
     for row in rows:
@@ -184,6 +227,9 @@ def build_input(
         "parameters": parameters,
         "alive_urls": urls[:MAX_INPUT_URLS],
     }
+    graph = _graph_context_rows(graph_context)
+    if graph:
+        payload["graph_context"] = graph
     compact = _compact_memory(memory)
     if compact:
         payload["memory"] = compact
@@ -215,6 +261,20 @@ def build_prompt(input: dict) -> tuple[str, str]:
             lines.append(f"- {url}")
     else:
         lines.append("Recon validated no URL as alive today.")
+    graph = input.get("graph_context") or []
+    if graph:
+        lines.append("")
+        lines.append(
+            "Assets the recon graph already linked to an observed parameter"
+            " (score is recon's own confidence; these are endpoints the engine"
+            " may declare as surfaces too):"
+        )
+        for entry in graph:
+            lines.append(
+                f"- {entry['url']}  param={entry['param']}"
+                f"  claim={entry['capability'] or 'public_param'}"
+                f"  score={entry['score']}  band={entry['band'] or 'unknown'}"
+            )
     memory = input.get("memory") or {}
     if memory:
         lines.append("")
@@ -237,7 +297,8 @@ def build_prompt(input: dict) -> tuple[str, str]:
         f"Answer with JSON only: {{\"surfaces\": [{{\"url\": \"...\", \"param\": \"...\","
         f" \"where\": \"query|body|path\", \"capability\": \"...\", \"label\": \"...\","
         f" \"read_back\": \"...\"}}]}}."
-        f" Rules: every url must be copied exactly from the lists above; at most"
+        f" Rules: every url must be copied exactly from the lists above (including"
+        f" the graph-linked assets); at most"
         f" {MAX_PROPOSED} surfaces; an empty list is a valid answer when nothing is"
         f" worth probing; label is one short factual phrase; read_back (optional,"
         f" storage claims only) is where submitted input renders back."
@@ -384,6 +445,7 @@ def merge_surfaces(
 
 __all__ = [
     "CAPABILITY_HELP",
+    "MAX_INPUT_GRAPH",
     "MAX_INPUT_PARAMS",
     "MAX_INPUT_URLS",
     "MAX_MEMORY_ARMS",

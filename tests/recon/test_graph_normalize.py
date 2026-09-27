@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from service.recon_pipeline.pipelines.graph_normalize import emit, main, merge, settings, sources
+from service.recon_pipeline.pipelines.graph_normalize import emit, main, merge, settings, sources, state
 from service.recon_pipeline.pipelines.graph_normalize import normalize as norm
 from service.recon_pipeline.pipelines.graph_normalize import score as score_mod
 from service.recon_pipeline.pipelines.graph_normalize import state
@@ -191,6 +191,19 @@ def _run(root: Path, output: Path, **overrides):
     return main.run_pipeline(APEX, output_dir=output, **kwargs)
 
 
+def _argv_dirs(root: Path) -> list[str]:
+    """The same fixture roots as ``_all_dirs``, as main()-style argv tokens."""
+    tokens: list[str] = []
+    for flag, name in (
+        ("--names-dir", "names"),
+        ("--ports-dir", "ports"),
+        ("--urls-dir", "urls"),
+        ("--networks-dir", "networks"),
+    ):
+        tokens += [flag, str(root / name)]
+    return tokens
+
+
 def _nodes(output: Path) -> dict[str, dict]:
     rows = [
         json.loads(line)
@@ -207,6 +220,110 @@ def _edges(output: Path) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# the neo4j push (--push-neo4j): the same document, a second consumer
+# --------------------------------------------------------------------------- #
+
+
+def test_push_neo4j_merges_the_emitted_document(monkeypatch, tmp_path: Path) -> None:
+    """The push is load_snapshot over the emitted file — one consumer of the
+    same document, not a second writer with its own ideas. A fake backend
+    records what the loader asked the store to run."""
+    output = tmp_path / "out"
+    _run(tmp_path, output)
+    graph_state = output / state.GRAPH_STATE_FILE
+    assert graph_state.is_file()
+
+    ran: list[tuple[str, dict]] = []
+
+    class _FakeDB:
+        def _run(self, query: str, **params):
+            ran.append((query, params))
+
+        def close(self):
+            pass
+
+    code = main._push_neo4j(str(graph_state), backend_factory=lambda path: _FakeDB())
+    assert code == 0
+    queries = [query for query, _params in ran]
+    assert any("GraphMeta" in query for query in queries)
+    assert any("UNWIND $rows" in query for query in queries)  # batched node upserts
+    # The document's own header landed on the meta node (the MERGE, not the
+    # constraint statement, which also names the label).
+    doc = json.loads(graph_state.read_text(encoding="utf-8"))
+    meta_params = next(p for q, p in ran if "MERGE (m:GraphMeta" in q)
+    assert meta_params["target"] == doc["target"]
+
+
+def test_push_neo4j_without_credentials_is_exit_2_and_never_touches_a_store(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    output = tmp_path / "out"
+    _run(tmp_path, output)
+    graph_state = output / state.GRAPH_STATE_FILE
+
+    monkeypatch.delenv("NEO4J_USERNAME", raising=False)
+    monkeypatch.delenv("NEO4J_PASSWORD", raising=False)
+    touched = []
+
+    def _boom(*a, **k):
+        touched.append(1)
+        raise AssertionError("no store may be constructed without credentials")
+
+    monkeypatch.setattr("service.recon_pipeline.platform.graph.neo4j_backend.Neo4jBackend", _boom)
+
+    code = main._push_neo4j(str(graph_state))
+    assert code == 2
+    assert touched == []
+    assert "NEO4J_USERNAME" in capsys.readouterr().err
+
+
+def test_push_neo4j_with_an_unreachable_store_is_exit_1(tmp_path: Path) -> None:
+    output = tmp_path / "out"
+    _run(tmp_path, output)
+    graph_state = output / state.GRAPH_STATE_FILE
+
+    from service.recon_pipeline.platform.graph.neo4j_backend import Neo4jUnavailable
+
+    class _DownDB:
+        def __init__(self, *a, **k):
+            pass
+
+        def _run(self, *a, **k):
+            raise Neo4jUnavailable("connection refused")
+
+        def close(self):
+            pass
+
+    code = main._push_neo4j(str(graph_state), backend_factory=lambda path: _DownDB())
+    assert code == 1
+
+
+def test_cli_wires_the_push_flag(monkeypatch, tmp_path: Path) -> None:
+    """``--push-neo4j`` reaches main() and pushes the emitted document."""
+    called = {}
+
+    def _fake_push(path):
+        called["path"] = path
+        return 0
+
+    output = tmp_path / "out"
+    _run(tmp_path, output)
+    monkeypatch.setattr(main, "_push_neo4j", _fake_push)
+
+    # Run main() against the same fixture roots the pipeline just consumed —
+    # main() re-runs the pipeline and then pushes.
+    argv = [
+        "-t", APEX,
+        "--output-dir", str(output),
+        "--push-neo4j",
+        *_argv_dirs(tmp_path),
+    ]
+    code = main.main(argv)
+    assert code == 0
+    assert called["path"].endswith("graph_state.json")
+
+
+# --------------------------------------------------------------------------- #
 # vocabulary
 # --------------------------------------------------------------------------- #
 
@@ -216,8 +333,14 @@ def test_every_node_kind_and_edge_type_has_a_graph_mapping() -> None:
     type without a label mapping means the graph write would silently drop it."""
     assert set(vocab.GRAPH_LABELS) == set(vocab.NODE_KINDS)
     assert set(vocab.GRAPH_RELATIONSHIPS) == set(vocab.EDGE_TYPES)
-    for labels in vocab.GRAPH_LABELS.values():
-        assert labels and labels[0] == "Asset"
+    for kind, labels in vocab.GRAPH_LABELS.items():
+        assert labels, f"{kind} has no labels"
+        if kind in vocab.PROGRAM_NODE_KINDS:
+            # Program intelligence is deliberately not an :Asset: an asset query
+            # must not pick up program policy nodes.
+            assert labels[0] != "Asset", f"{kind} must not be labelled :Asset"
+        else:
+            assert labels[0] == "Asset"
 
 
 def test_trust_precedence_is_declared_then_observed_then_discovered() -> None:

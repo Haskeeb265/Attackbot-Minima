@@ -17,6 +17,8 @@ not add a conclusion.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..kernel.technique import (
@@ -30,12 +32,13 @@ from ..kernel.technique import (
     Surface,
 )
 from ..techniques.common import with_parameter
-from . import hypothesize, reflect, synthesize
+from . import graph_nav, hypothesize, reflect, synthesize
 from .client import LLMClient
 
 NAME = "synthesize"
 HYPOTHESIZE_NAME = "hypothesize"
 REFLECT_NAME = "reflect"
+GRAPH_NAV_NAME = "graph.navigate"
 
 
 @dataclass(frozen=True)
@@ -189,21 +192,25 @@ class HypothesisJunction:
         parameters_rows: list[dict],
         alive_urls: list[str],
         memory: dict | None = None,
+        graph_context: list[dict] | None = None,
         world=None,
         now: float = 0.0,
     ) -> HypothesizeResult:
         """The widened seed, or the operator's unchanged.
 
-        Every proposed URL is validated against recon's observed set; anything
-        else degrades the opinion whole and the seed comes back exactly as it
-        arrived. ``memory`` (a previous engagement's distilled record) becomes
-        part of the question — a run informed by memory asks a different
-        question than one without it, and both are digest-keyed, so a replay
-        reproduces each with the key removed.
+        Every proposed URL is validated against recon's observed set — the URL
+        artifacts **and** the recon graph's linked assets; anything else
+        degrades the opinion whole and the seed comes back exactly as it
+        arrived. ``memory`` (a previous engagement's distilled record) and
+        ``graph_context`` (the graph's own candidate rows) each become part of
+        the question, so a run informed by either is a different question than
+        one without it, and both are digest-keyed, so a replay reproduces each
+        with the key removed.
         """
-        input = hypothesize.build_input(parameters_rows, alive_urls, memory)
+        input = hypothesize.build_input(parameters_rows, alive_urls, memory, graph_context)
         known_urls = {entry["url"] for entry in input["parameters"]}
         known_urls.update(u.strip().rstrip("/") for u in alive_urls if u.strip())
+        known_urls.update(entry["url"] for entry in input.get("graph_context", []))
         prompt, system = hypothesize.build_prompt(input)
         opinion = self.client.ask(
             junction=HYPOTHESIZE_NAME,
@@ -329,10 +336,138 @@ class ReflectJunction:
         )
 
 
+# --------------------------------------------------------------------------- #
+# junction 6 — graph navigation: explore the recon graph tool by tool
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class GraphNavigation:
+    """One navigation's outcome: the steps taken and the nodes it selected.
+
+    ``selected_nodes`` are *candidate* node ids, not surfaces — the caller
+    expands them through ``seed.candidates_for_nodes``, which re-applies the
+    whole-graph rule and the scope filter.  ``source`` is ``live`` / ``cached`` /
+    ``degraded`` for a model finish, or ``budget`` when the step cap stopped it.
+    """
+
+    steps: tuple[dict, ...] = ()
+    selected_nodes: tuple[str, ...] = ()
+    source: str = "degraded"
+    reason: str = ""
+
+    @property
+    def observations(self) -> int:
+        return len(self.steps)
+
+    def to_dict(self) -> dict:
+        return {
+            "junction": GRAPH_NAV_NAME,
+            "source": self.source,
+            "reason": self.reason,
+            "steps": [dict(step) for step in self.steps],
+            "selected_nodes": list(self.selected_nodes),
+        }
+
+
+class GraphNavigator:
+    """Run the bounded tool-calling loop against a dispatch callable.
+
+    ``dispatch(tool_name, arguments) -> str`` is the composition root's wiring of
+    ``platform.graph.tools.dispatch`` over a chosen backend; it is passed in as a
+    plain callable so this layer never imports the recon platform's tool module
+    (the same reason the grammars are wired in from ``run_engine``).
+    """
+
+    def __init__(self, client: LLMClient) -> None:
+        self.client = client
+
+    @property
+    def available(self) -> bool:
+        return self.client.available
+
+    def navigate(
+        self,
+        goal: str,
+        *,
+        tool_names: list[str],
+        dispatch: Callable[[str, dict], str],
+        world=None,
+        now: float = 0.0,
+        max_steps: int = graph_nav.MAX_STEPS,
+    ) -> GraphNavigation:
+        """Explore until the model stops or the step budget runs out.
+
+        Every step is one validated decision and one logged opinion; a step whose
+        opinion is refused, or a dispatch that raises, ends the navigation with
+        what it found so far rather than spinning.  The loop is deterministic in
+        its *bounds* and its *validation*, not in the model's choices — which is
+        exactly the advisory position every other junction holds.
+        """
+        if not self.client.available:
+            return GraphNavigation(
+                source="degraded", reason=self.client.health.reason
+            )
+        known = {str(name) for name in tool_names if str(name)}
+        if not known:
+            return GraphNavigation(
+                source="degraded", reason="no graph tools were offered to the navigator"
+            )
+        transcript: list[dict] = []
+        for step in range(1, max(1, int(max_steps)) + 1):
+            input = graph_nav.build_input(goal, sorted(known), transcript)
+            prompt, system = graph_nav.build_prompt(input)
+            opinion = self.client.ask(
+                junction=GRAPH_NAV_NAME,
+                input=input,
+                prompt=prompt,
+                system=system,
+                validate=graph_nav.validate_answer(known),
+                world=world,
+                now=now,
+            )
+            if not opinion.validated:
+                return GraphNavigation(
+                    steps=tuple(transcript),
+                    source=opinion.source,
+                    reason=opinion.reason or "navigation step refused",
+                )
+            action, tool, arguments, reason, nodes = graph_nav.extract(opinion.answer, known)
+            if action == graph_nav.ACTION_STOP:
+                return GraphNavigation(
+                    steps=tuple(transcript),
+                    selected_nodes=tuple(nodes),
+                    source=opinion.source,
+                    reason=reason or opinion.validation,
+                )
+            # One tool call, bounded and error-tolerant: a tool that raises is an
+            # observation the next step can react to, never a crashed run.
+            try:
+                raw = dispatch(tool, arguments)
+            except Exception as exc:  # noqa: BLE001 - a failed tool is a readable observation
+                raw = json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+            transcript.append(
+                {
+                    "step": step,
+                    "tool": tool,
+                    "arguments": arguments,
+                    "observation": graph_nav.summarize_tool_result(raw),
+                }
+            )
+        return GraphNavigation(
+            steps=tuple(transcript),
+            source="budget",
+            reason=f"step budget ({max(1, int(max_steps))}) exhausted before the model stopped",
+        )
+
+
 __all__ = [
+    "GRAPH_NAV_NAME",
     "NAME",
     "HYPOTHESIZE_NAME",
     "REFLECT_NAME",
+    "GraphNavigation",
+    "GraphNavigator",
     "HypothesisJunction",
     "HypothesizeResult",
     "ReflectDecision",

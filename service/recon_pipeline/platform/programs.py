@@ -80,6 +80,13 @@ class ProgramScope:
     #: The programs' own instructions for in-scope assets (scope_instructions),
     #: carried for the report — the operator reads them, the engine does not.
     instructions: tuple[str, ...] = ()
+    #: Assets the program explicitly placed **out of scope** — the boundary set.
+    #: They travel with the scope so recon can recognise an asset it discovered
+    #: from an authorized parent as a boundary rather than a target, but they are
+    #: never engagable and never a source of surfaces.
+    out_of_scope_domains: tuple[str, ...] = ()
+    out_of_scope_networks: tuple[str, ...] = ()
+    out_of_scope_addresses: tuple[str, ...] = ()
 
     @property
     def apexes(self) -> tuple[str, ...]:
@@ -103,6 +110,9 @@ class ProgramScope:
             "addresses": list(self.addresses),
             "unsupported": [list(item) for item in self.unsupported],
             "instructions": list(self.instructions),
+            "out_of_scope_domains": list(self.out_of_scope_domains),
+            "out_of_scope_networks": list(self.out_of_scope_networks),
+            "out_of_scope_addresses": list(self.out_of_scope_addresses),
         }
 
 
@@ -114,6 +124,8 @@ class ProgramScopeApplication:
     domains: int = 0
     networks: int = 0
     addresses: int = 0
+    #: Boundary rules applied (explicitly out-of-scope assets), counted as one.
+    out_of_scope: int = 0
     refused: list[tuple[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -122,6 +134,7 @@ class ProgramScopeApplication:
             "declared_domains": self.domains,
             "declared_networks": self.networks,
             "declared_addresses": self.addresses,
+            "out_of_scope": self.out_of_scope,
             "refused": [list(item) for item in self.refused],
         }
 
@@ -232,7 +245,8 @@ def classify_scope_asset(identifier: str, scope_type: str = "") -> tuple[str | N
 
 _HANDLE_QUERY = "SELECT id, handle FROM bounty_master WHERE handle = %s"
 _SCOPES_QUERY = (
-    "SELECT scope_type, scope_identifier, max_severity, scope_instructions "
+    "SELECT scope_type, scope_identifier, max_severity, scope_instructions, "
+    "in_scope, eligible_for_bounty "
     "FROM bounty_detail WHERE master_id = %s"
 )
 
@@ -272,8 +286,18 @@ class ProgramScopeLoader:
         domains: list[str] = []
         networks: list[str] = []
         addresses: list[str] = []
+        out_domains: list[str] = []
+        out_networks: list[str] = []
+        out_addresses: list[str] = []
         unsupported: list[tuple[str, str]] = []
         instructions: list[str] = []
+
+        in_scope_buckets = {"domain": domains, "network": networks, "address": addresses}
+        boundary_buckets = {
+            "domain": out_domains,
+            "network": out_networks,
+            "address": out_addresses,
+        }
 
         for row in rows:
             identifier = str(row.get("scope_identifier") or "").strip()
@@ -286,15 +310,20 @@ class ProgramScopeLoader:
                 # most needs to read them.
                 instructions.append(note)
             scope_type = str(row.get("scope_type") or "").strip()
+            # ``in_scope`` is the boundary decision the mapper recorded; a NULL
+            # or absent flag means in scope (the source did not say), which is
+            # the same null-tolerant reading the mapper and the repos use.
+            in_scope = row.get("in_scope") is not False
             kind, value = classify_scope_asset(identifier, scope_type)
             bucket = (
-                {"domain": domains, "network": networks, "address": addresses}.get(kind)
+                (in_scope_buckets if in_scope else boundary_buckets).get(kind)
                 if kind is not None
                 else None
             )
             if bucket is None:
                 label = scope_type or "untyped"
-                unsupported.append((identifier, f"{label}: {value}"))
+                where = "" if in_scope else "out of scope; "
+                unsupported.append((identifier, f"{where}{label}: {value}"))
                 continue
             # ``value`` is the canonical form (a wildcard's base domain, a
             # CIDR in ipaddress spelling) — storing it is what makes
@@ -309,6 +338,9 @@ class ProgramScopeLoader:
             addresses=tuple(addresses),
             unsupported=tuple(unsupported),
             instructions=tuple(instructions),
+            out_of_scope_domains=tuple(out_domains),
+            out_of_scope_networks=tuple(out_networks),
+            out_of_scope_addresses=tuple(out_addresses),
         )
 
     # ------------------------------------------------------------------ #
@@ -385,9 +417,14 @@ def list_programs(fetch_rows=None) -> list[dict]:
     """
     domain_types = tuple(sorted(_DOMAIN_TYPES | _WILDCARD_TYPES | _URL_TYPES))
     placeholders = ", ".join("%s" for _ in domain_types)
+    # ``domains`` counts only engagable (in-scope) rows; ``out_of_scope`` counts
+    # the boundary set separately, so an operator can see both at a glance and
+    # an out-of-scope row can never inflate what looks engagable.
     query = (
         "SELECT m.handle, m.scope_count, "
-        f"count(d.id) FILTER (WHERE d.scope_type IN ({placeholders})) AS domains "
+        f"count(d.id) FILTER (WHERE d.scope_type IN ({placeholders}) "
+        "AND d.in_scope IS NOT FALSE) AS domains, "
+        "count(d.id) FILTER (WHERE d.in_scope IS FALSE) AS out_of_scope "
         "FROM bounty_master m LEFT JOIN bounty_detail d ON d.master_id = m.id "
         "GROUP BY m.id, m.handle, m.scope_count ORDER BY m.handle"
     )
@@ -408,6 +445,7 @@ def list_programs(fetch_rows=None) -> list[dict]:
             "handle": str(row.get("handle") or ""),
             "scope_count": int(row.get("scope_count") or 0),
             "domains": int(row.get("domains") or 0),
+            "out_of_scope": int(row.get("out_of_scope") or 0),
         }
         for row in rows
     ]
@@ -429,6 +467,12 @@ def scope_for_apex(scope: ProgramScope, apex: str) -> ProgramScope:
         domain for domain in scope.domains
         if domain == canonical or domain.endswith(f".{canonical}")
     )
+    # The boundary set travels WHOLE, deliberately unlike the in-scope domains.
+    # In-scope domains are sliced so one engagement cannot declare another
+    # program asset's hosts. An out-of-scope rule is a *refusal*, and refusing a
+    # host is always safe: slicing it away would hide exactly the boundary this
+    # set exists to enforce (`api.example.com` out of scope while engaging
+    # `example.com`, or a foreign `thirdparty.example.net`).
     return ProgramScope(
         handle=scope.handle,
         domains=domains,
@@ -436,6 +480,9 @@ def scope_for_apex(scope: ProgramScope, apex: str) -> ProgramScope:
         addresses=scope.addresses,
         unsupported=scope.unsupported,
         instructions=scope.instructions,
+        out_of_scope_domains=scope.out_of_scope_domains,
+        out_of_scope_networks=scope.out_of_scope_networks,
+        out_of_scope_addresses=scope.out_of_scope_addresses,
     )
 
 
@@ -464,6 +511,29 @@ def apply_program_scope(
     for address in scope.addresses:
         if engine.add_declared_address(address):
             application.addresses += 1
+        else:
+            application.refused.append((address, f"{source}: not a canonicalisable address"))
+    # The boundary set: explicitly out-of-scope assets, applied so the engine
+    # refuses them even where a declared in-scope wildcard would cover them.
+    for domain in scope.out_of_scope_domains:
+        if engine.add_out_of_scope_domain(
+            domain, reason=f"{source}: program declared {domain} out of scope"
+        ):
+            application.out_of_scope += 1
+        else:
+            application.refused.append((domain, f"{source}: not a canonicalisable domain"))
+    for network in scope.out_of_scope_networks:
+        if engine.add_out_of_scope_network(
+            network, reason=f"{source}: program declared {network} out of scope"
+        ):
+            application.out_of_scope += 1
+        else:
+            application.refused.append((network, f"{source}: not a valid network"))
+    for address in scope.out_of_scope_addresses:
+        if engine.add_out_of_scope_address(
+            address, reason=f"{source}: program declared {address} out of scope"
+        ):
+            application.out_of_scope += 1
         else:
             application.refused.append((address, f"{source}: not a canonicalisable address"))
     return application
@@ -519,6 +589,9 @@ def scope_from_environment(engine) -> dict | None:
             domains=tuple(payload.get("domains") or ()),
             networks=tuple(payload.get("networks") or ()),
             addresses=tuple(payload.get("addresses") or ()),
+            out_of_scope_domains=tuple(payload.get("out_of_scope_domains") or ()),
+            out_of_scope_networks=tuple(payload.get("out_of_scope_networks") or ()),
+            out_of_scope_addresses=tuple(payload.get("out_of_scope_addresses") or ()),
         )
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         log.warning(

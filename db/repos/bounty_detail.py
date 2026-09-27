@@ -8,6 +8,13 @@ def add_scope(
     scope_identifier: str,
     max_severity: str | None = None,
     scope_instructions: str | None = None,
+    asset_id: str | None = None,
+    in_scope: bool | None = None,
+    eligible_for_bounty: bool | None = None,
+    eligible_for_submission: bool | None = None,
+    confidentiality_requirement: str | None = None,
+    integrity_requirement: str | None = None,
+    availability_requirement: str | None = None,
 ):
     row = db.fetch_one(
         conn,
@@ -18,9 +25,16 @@ def add_scope(
                 scope_type,
                 scope_identifier,
                 max_severity,
-                scope_instructions
+                scope_instructions,
+                asset_id,
+                in_scope,
+                eligible_for_bounty,
+                eligible_for_submission,
+                confidentiality_requirement,
+                integrity_requirement,
+                availability_requirement
             )
-        VALUES (%s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
@@ -29,6 +43,13 @@ def add_scope(
             scope_identifier,
             max_severity,
             scope_instructions,
+            asset_id,
+            in_scope,
+            eligible_for_bounty,
+            eligible_for_submission,
+            confidentiality_requirement,
+            integrity_requirement,
+            availability_requirement,
         ),
     )
 
@@ -148,7 +169,13 @@ def delete_scopes_for_program(conn, master_id):
 
 
 def update_scopes(conn, master_id, incoming_scopes: list[dict]):
-    
+    """Full replace: every declared asset, with its boundary and eligibility.
+
+    The eligibility and boundary fields are optional keys (``.get``), so an
+    older caller that supplies only the original four still writes a valid row;
+    a row with no ``in_scope`` is treated as in scope downstream, which is the
+    same null-tolerant reading the mapper uses.
+    """
     with db.atomic(conn):
         delete_scopes_for_program(conn, master_id)
 
@@ -160,4 +187,11 @@ def update_scopes(conn, master_id, incoming_scopes: list[dict]):
                 scope["scope_identifier"],
                 scope.get("max_severity"),
                 scope.get("scope_instructions"),
+                scope.get("asset_id"),
+                scope.get("in_scope"),
+                scope.get("eligible_for_bounty"),
+                scope.get("eligible_for_submission"),
+                scope.get("confidentiality_requirement"),
+                scope.get("integrity_requirement"),
+                scope.get("availability_requirement"),
             )

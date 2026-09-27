@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -416,6 +417,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-nodes", type=int, default=settings.MAX_NODES, help="node cap")
     parser.add_argument("--max-edges", type=int, default=settings.MAX_EDGES, help="edge cap")
+    parser.add_argument(
+        "--push-neo4j",
+        action="store_true",
+        help=(
+            "after emitting graph_state.json, load the same document into Neo4j "
+            "(merge by identity; needs NEO4J_URI/USERNAME/PASSWORD in the env). "
+            "Without this flag nothing touches the store — file output unchanged"
+        ),
+    )
     parser.add_argument("--max-evidence", type=int, default=settings.MAX_EVIDENCE)
     parser.add_argument("--max-wildcard-edges", type=int, default=settings.MAX_WILDCARD_EDGES)
     parser.add_argument("--max-orphans", type=int, default=settings.MAX_ORPHANS, help="orphan ids in the report")
@@ -433,6 +443,72 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return parser
+
+
+def _push_neo4j(graph_state_path: str, *, backend_factory=None) -> int:
+    """Load the emitted document into Neo4j — the opt-in half of the handoff.
+
+    ``backend_factory(path) -> (db, error)`` is the injection seam for tests;
+    the default builds a real :class:`Neo4jBackend` from the environment.
+    (Imports are call-time on purpose: this is the only Neo4j-touching path in
+    the pipeline, and a run without ``--push-neo4j`` must not need the driver
+    importable at all.)
+
+    ``load_snapshot`` merges by canonical id, so a re-run is an upsert, never a
+    duplicate, and a run that produced a smaller model never deletes what a
+    previous run proved.  Exit codes follow the pipeline's own: 0 pushed, 1
+    the store is unreachable (the file output stands — the store is a second
+    consumer of the same document, not the primary), 2 misconfiguration.
+    """
+    import json
+    import os
+    import sys
+
+    from service.recon_pipeline.platform.graph.neo4j_backend import (
+        Neo4jBackend,
+        Neo4jUnavailable,
+        ensure_constraints,
+        load_snapshot,
+    )
+
+    destination = "the configured Neo4j store"
+    if backend_factory is None:
+        uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+        destination = uri
+        username = os.getenv("NEO4J_USERNAME") or ""
+        password = os.getenv("NEO4J_PASSWORD") or ""
+        if not username or not password:
+            print(
+                "neo4j push: NEO4J_USERNAME / NEO4J_PASSWORD are not set — refusing "
+                "to guess credentials (graph_state.json is written either way)",
+                file=sys.stderr,
+            )
+            return 2
+        doc = json.loads(open(graph_state_path, encoding="utf-8").read())
+        db = Neo4jBackend(
+            uri,
+            username,
+            password,
+            os.getenv("NEO4J_DATABASE") or None,
+        )
+    else:
+        doc = json.loads(open(graph_state_path, encoding="utf-8").read())
+        db = backend_factory(graph_state_path)
+    try:
+        ensure_constraints(db)
+        counts = load_snapshot(db, doc)
+    except Neo4jUnavailable as exc:
+        print(f"neo4j push: store unreachable — {exc}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+    log.info(
+        "neo4j push: %s node(s) / %s edge(s) merged into %s",
+        counts.get("nodes"),
+        counts.get("edges"),
+        destination,
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -523,7 +599,18 @@ def main(argv: list[str] | None = None) -> int:
         )
     for note in report.notes:
         log.warning(note)
-    return 0 if report.ok else 1
+    if not report.ok:
+        return 1
+    if args.push_neo4j:
+        # The opt-in second consumer: the same document, merged by identity.
+        # A store that will not answer costs the push its own exit code and
+        # leaves the file output standing — the handoff contract is the file.
+        graph_state = report.outputs.get("graph_state")
+        if not graph_state:
+            print("neo4j push: no graph_state.json was emitted", file=sys.stderr)
+            return 1
+        return _push_neo4j(str(graph_state))
+    return 0
 
 
 if __name__ == "__main__":

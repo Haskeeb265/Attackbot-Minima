@@ -87,8 +87,16 @@ class ProgramDetailScraper:
     
     
     def fetch_program(self, handle: str) -> dict:
+        """Everything one program publishes: identity, scope, policy, exclusions.
+
+        ``program`` carries the program-level attributes (status, policy,
+        disclosure, safe harbour) the mapper now persists; it is the source's own
+        dict and is best-effort — an empty dict means the source did not answer,
+        which the mapper records as NULLs rather than as invented facts.
+        """
         return {
             **self._fetch_handle_scopes(handle),
+            "program": self.connector.fetch_program_detail(handle),
             "scope_exclusions": self.get_scope_exclusions(handle),
             "weaknesses": self.get_weaknesses(handle),
         }
