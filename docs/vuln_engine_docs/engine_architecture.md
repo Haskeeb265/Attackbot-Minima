@@ -109,14 +109,23 @@ Everything else is implementation; these are the design.
 | Path | What it is |
 | --- | --- |
 | `kernel/` | Shared vocabulary: `technique.py` (Surface, Hypothesis, ProbeSpec, capabilities), `evidence.py` (grades, oracles), `manifest.py`, `observation.py`, `verdict.py`, `exchange.py` |
+| `seed/` | `from_graph.py` — the graph→engine bridge: recon's nodes become `Surface` claims, plus `merge_surfaces` for operator precedence. See [graph_seed_bridge.md](graph_seed_bridge.md) |
 | `techniques/` | One folder per technique; each holds `manifest.py` + four pure modules and a thin adapter class |
 | `policy/gate.py` | The chokepoint: scope, effects ledger, per-request authorization, session shims |
 | `transports/` | `http1`, `browser`, `oob` — raw effect implementations, no opinions |
 | `scheduler/` | `driver.py` (one pass), `campaign.py` (multi-round), `ucb.py` (arm picking), `replay.py` |
 | `verification/` | `VerificationLayer` + the five verifiers |
+| `abduction/` | `proposal.py`, `deterministic.py`, `validator.py` — the abductive loop's proposal, baseline and validation |
+| `memory/` | `anomaly.py` — case memory keyed by structural features, not targets |
 | `llm/` | Junction modules (pure) + `runtime.py` + `wiring.py` (the Advisory) + `client.py` |
 | `world/` | `log.py` (append-only JSONL), `views.py` (report derivations), `observe.py` |
 | `registry.py` | Alphabetical folder discovery; strict mode refuses manifests without postconditions |
+
+Eight techniques are registered today: `command_injection`, `generic_differential`,
+`idor_differential`, `oob_fetch`, `sqli_blind_time`, `xss_dom`, `xss_reflected`,
+`xss_stored`. There is no `http2` transport — the three on disk are `http1`,
+`browser` and `oob`; HTTP/2 is deferred (it was a Phase 4 item in the
+checklists and never landed).
 
 ---
 

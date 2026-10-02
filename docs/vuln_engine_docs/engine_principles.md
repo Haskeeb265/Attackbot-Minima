@@ -88,16 +88,18 @@ one.
 service/vuln_engine/
   kernel/          contracts only: Effect, Observation, Technique, Verdict,
                    Budget, Evidence, NoiseProfile (no logic)
-  transports/      http1, http2, browser, oob — swappable implementations
+  transports/      http1, browser, oob — swappable implementations
                    behind Effect; each reports capabilities (stealth-style)
   techniques/      <class>/  hypothesis.py · probes.py · interpret.py ·
-                             manifest.json (preconditions, postconditions,
+                             manifest.py (preconditions, postconditions,
                              noise profile, evidence classes)
+  seed/            from_graph.py — recon's graph becomes Surface claims
   verification/    browser-runner · differential · oob-correlator
   scheduler/       attack tree + UCB selection over receipts/history,
                    noise-budgeted
   world/           event log (append-only JSONL, platform conventions)
                    + derived views (graph, chain candidates)
+  abduction/       proposal · deterministic baseline · validator
   memory/          case store keyed by structural features, not targets
   llm/             the typed junctions + prompt registry + replay cache
   policy/          wraps platform dispatch; the only caller of Effect

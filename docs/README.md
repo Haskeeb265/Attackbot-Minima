@@ -23,6 +23,7 @@ below is the intended design — file an update to whichever is wrong.
 | understand what the whole system is meant to become | [`recon_docs/recon.md`](recon_docs/recon.md) + [`recon_docs/recon_v2.md`](recon_docs/recon_v2.md) |
 | know what is built versus planned | the status section in [`recon_docs/IMPLEMENTATION_PLAN.md`](recon_docs/IMPLEMENTATION_PLAN.md) and [`recon_docs/IMPLEMENTATION_PLAN_V2.md`](recon_docs/IMPLEMENTATION_PLAN_V2.md) |
 | work on the scraper or the `bounty_*` schema | [`scraper_docs/schema.md`](scraper_docs/schema.md) |
+| understand how recon's graph becomes the vuln engine's probe targets | [`vuln_engine_docs/graph_seed_bridge.md`](vuln_engine_docs/graph_seed_bridge.md) — the graph→`Surface` path, what each registered technique gates on, the measured 1-of-8 capability gap, and what recon must supply to close it |
 | get an orientation pass over the codebase | [`codebase/`](codebase) — stack, structure, architecture, conventions, integrations, testing, concerns, platform |
 
 ## The document sets
@@ -65,6 +66,30 @@ v1 pair first.
 |---|---|
 | [`schema.md`](scraper_docs/schema.md) | the `bounty_*` tables, the API→mapper→DB field mapping, and the write patterns per table |
 | [`program_attributes.md`](scraper_docs/program_attributes.md) | which HackerOne program attributes the scraper actually filters on, and the priority tiers it builds from them |
+
+### `vuln_engine_docs/` — the vulnerability engine
+
+Phases 1–3 (one finding provably · noise-budgeted scheduling · the advisory
+boundary) are built, wired and verified; see `progress.md` for the running
+record. The current-state reading order:
+
+| Document | Role |
+|---|---|
+| [`graph_seed_bridge.md`](vuln_engine_docs/graph_seed_bridge.md) | how recon's `graph_state.json` becomes engine `Surface` claims, what each of the eight registered techniques gates on, the measured 1-of-8 capability gap, and what recon must supply to close it |
+| [`engine_architecture.md`](vuln_engine_docs/engine_architecture.md) | the module map and the composition of one run |
+| [`engine_principles.md`](vuln_engine_docs/engine_principles.md) | the load-bearing invariants, each with the test that pins it |
+| [`engine_view.md`](vuln_engine_docs/engine_view.md) | the short orientation; `engine_explained.md` is the long form |
+| [`owasp_coverage.md`](vuln_engine_docs/owasp_coverage.md) | OWASP Top 10:2025 coverage, the cost model for adding a technique, and which categories are honestly not black-box testable |
+| [`DECISIONS.md`](vuln_engine_docs/DECISIONS.md) | numbered decision record (DR-nnn) with the reasoning and the alternatives |
+| [`PRD_abductive_loop.md`](vuln_engine_docs/PRD_abductive_loop.md) | the plan of record for unseen-finding capability (Phases 0–10) |
+| [`phase1_checklist.md`](vuln_engine_docs/phase1_checklist.md) · [`phase2_checklist.md`](vuln_engine_docs/phase2_checklist.md) · [`phase3_checklist.md`](vuln_engine_docs/phase3_checklist.md) | per-phase build checklists, each with a STATUS block recording its exit criteria and the deliberate deviations |
+| [`target_assumptions_audit.md`](vuln_engine_docs/target_assumptions_audit.md) | the audit that no technique reads a training target |
+| `RnD.md`, `RnD_2026-09.md`, `RnD_2026-09-25_smarter.md`, `feasibility_notes.md`, `vwa_benchmark_proposal.md`, `vwa_training_rnd.md`, `xss_dom_sketch.md` | dated research passes; historical by construction, kept for the reasoning |
+
+Note the discipline the engine docs hold themselves to: a capability *claim*
+produces a lead, and only an independent verifier in a different evidence class
+produces a finding. "The engine knows X" and "the engine proved X" are different
+statements throughout.
 
 ### Outside `docs/`
 

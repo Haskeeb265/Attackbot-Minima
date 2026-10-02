@@ -5,7 +5,9 @@ found along the way, and what is next. Companion docs:
 [`phase1_checklist.md`](./phase1_checklist.md) (status banner at top),
 [`phase2_checklist.md`](./phase2_checklist.md) (status banner at top),
 [`engine_view.md`](./engine_view.md) (the design), [`RnD_2026-09.md`](./RnD_2026-09.md)
-(the research grounding).
+(the research grounding), [`DECISIONS.md`](./DECISIONS.md) (accepted decisions,
+numbered and dated), [`../../NOVELTY.md`](../../NOVELTY.md) (the north-star
+anchor for finding unseen/novel bugs).
 
 ---
 
@@ -842,6 +844,248 @@ coverage — the next `--memory-file` run inherits the redirect shape too.
 
 ---
 
+## The operator UI (2026-09-30) — the work became visible ✅
+
+The divergence from novelty: a web app over the artifacts, because recon ran,
+the engine ran, and none of it was visible without reading log files by hand.
+Built in `service/ui/` (stdlib HTTP server, vanilla JS, zero new dependencies;
+see [`service/ui/README.md`](../../service/ui/README.md)). Seven panels:
+
+1. **Program** — everything one program declares from the scraper's four
+tables, including the typed **out-of-scope boundary** the gate enforces.
+2. **Recon logs** — per-stage console logs (`recon_<target>_<stage>_<stamp>.log`).
+3. **Attack surface** — `graph_state.json` as a force-directed graph,
+scope-outlined, with the kind/trust/scope counts beside it.
+4. **Engine inputs** — the seed surfaces (url/param/where/capability),
+techniques, transport capabilities, scheduler picks with reasons, hypotheses.
+5. **Engine log** — the world log, realtime: the engine's own
+every-decision-is-a-row discipline is what makes a file tail a faithful live
+view. Filters for verdicts/gate rows.
+6. **Engine output** — `report.json`: findings, leads, gate audit.
+7. **Run/jobs** — launch recon or the engine (the same CLIs, whitelisted
+argv, no shell) and stream each job's captured output.
+
+Two build findings worth keeping:
+
+- **The realtime cursor is an index, not a timestamp.** Rows share `at`
+values; resuming at `at > t` dropped every same-`at` row after the batch
+boundary — caught by a live walk of the DVWA ledger (238 of 241 rows on the
+timestamp cursor, 241/241 on the index cursor). The append-only ledger is
+what makes a row index stable. Pinned by test.
+- **`safe_resolve` takes the root as an argument.** Anchoring on a module
+constant made every view read the *real* repo the moment a test swapped a
+tree; the boundary has to travel with the caller. Caught by the first HTTP
+test that asserted on a temp-tree artifact.
+
+Verified live: 35 hermetic tests (real HTTP over loopback, no Docker), mypy
+clean, and end to end against the real stores — 292 programs from Postgres,
+20 recon targets' logs, the 3 541-node graph, and a fixture engine run
+launched *through the UI* whose world log streamed live to the report (10
+findings in the ledger, ssrf + xss on top).
+
+### The guided demo: the whole flow through a test (2026-09-30)
+
+"Show me the flow without a real bounty" became `python -m service.ui.demo`
+(or the Run panel's **Run demo flow** button). One command drives the real
+path with the target swapped for the local fixture: it seeds an
+`attackbot-demo` program into the scraper's own tables (`demo_seed.py`,
+idempotent, boundary rows included — the Program panel then shows a complete
+program document), launches the fixture engine through the UI's job runner
+into `output/vuln_engine/demo_flow/`, tails the world log exactly as panel 5
+does while it streams, then reads the findings exactly as panel 6 does.
+Last verified pass: 54 rows streamed live, gate 5×ALLOW/0×DENY, findings
+`ssrf` (oob) + `xss` (execution).
+
+Two build findings folded in:
+
+- **A bare `--output-dir` name landed at the repo root** — run_engine
+resolves it against its CWD, so the UI's job builder now emits
+`output/vuln_engine/<name>` and the engine views can find the run. Caught
+the first time the demo ran end to end.
+- **Campaign runs write no report.json**, so the Output panel showed zero
+findings beside a ledger that held two. `report_view` now falls back to
+deriving findings from the ledger (proven verdicts joined to their
+candidates' typed fields) and names its `source`, report.json vs world_log —
+the same derive-from-the-ledger rule the engine's own views follow. Pinned
+by test. 41 UI tests, mypy clean across 9 files.
+
+---
+
+## The abductive loop: Phases 0–10 (2026-10-02) ✅ (built + verified; L3 measured live on the fixture; no rung claimed)
+
+DeepSeek's "Abductive Loop" PRD was assessed and amended to v1.1 (A1–A4,
+[`PRD_abductive_loop.md`](./PRD_abductive_loop.md)); its phases were then
+implemented 0→9, each with tests and a full-suite + mypy verification. The
+goal remains NOVELTY.md's **P4** (a proven finding no registry entry could
+generate, on an unseen target, replay-clean); what is built here is the *loop*
+that can reach it, not the rung itself. **Honest status: the machinery is
+verified on the fixture; the `fixture-session` case is scored live at
+`recall_declared = 1.0` but max **L2** (the loop and the plan table reach the
+same surface there); an earlier keyed run did reach **L3** live on a
+role-labelled surface the plan table skips. No third-party held-back benchmark
+pass has been run, so no P1–P4 claim is made.**
+
+| Phase | Delivered | Where |
+|---|---|---|
+| 0 | Claim-shape cap (`object_read` provable, `state_change` refused loudly) + eligibility derived from the plan table with import-time refuse-to-load | `kernel/claim.py`, `techniques/generic_differential/eligibility.py`, `verification/authorization_verifier.py` |
+| 1 | `vuln_class` vocabulary — normalization, canonical set, CWE anchors, novel-class lane | `kernel/vuln_class.py` |
+| 2 | Prediction layer + the third interpret outcome: a clean measurement that violates a hypothesis's expectation is retained, never evidence | `kernel/prediction.py`, `scheduler/driver.py` |
+| 3 | Anomaly ledger + holding pen + deterministic anomaly memory — JSONL files, append-only, derived views (A1, no DB) | `world/anomalies.py`, `world/holding_pen.py`, `memory/anomaly.py`, `kernel/anomaly.py` |
+| 4 | Deterministic abducer (composition rules over the plan table) + three-valued validator; driver hook logs `abduction.proposed`/`abduction.validated` and holds what no verifier can prove | `abduction/`, `scheduler/driver.py` |
+| 5 | Capped novelty reward (below `REWARD_FOUND`, receipts-based, cell-decaying — A2) + in-memory hypothesis pool | `scheduler/ucb.py`, `scheduler/pool.py` |
+| 6 | Verifier vocabulary registry: confirm kinds as first-class records with claim shapes + alignment check; the validator's vocabulary reads from it | `verification/registry.py` |
+| 7 | LLM abduction + property-proposal channels (A3) — typed in, validated bounded out, converted to real plan rows; degrades to the deterministic control arm with no key | `llm/abduce.py`, `llm/runtime.py`, `llm/wiring.py` |
+| 8 | Canonical plan serialization + digest in the log's hypothesis rows (the experiment is explainable, not just replayable) | `kernel/plan.py`, `kernel/technique.py` |
+| 9 | Novelty levels L0–L4 computed from the log's provenance, carried in the run report | `world/novelty.py`, `scheduler/driver.py` |
+| 10 | **The loop closes.** Expressible abductions are materialized through the technique's own hook (`Proposal.from_dict` → `plan_from_dict` → `technique.hypothesis_for_proposal`) and *run* through the ordinary gate/interpret/verifier; the LLM abduce junction wired as a second proposal source; the abduced arm keyed by plan id and bounded to one extra pass | `scheduler/driver.py`, `abduction/proposal.py`, `techniques/generic_differential/{plan,hypothesis,__init__}.py` |
+
+**Verified:** **570 passed / 2 skipped** (`pytest tests/vuln_engine/`), mypy
+clean on every changed module and test file. (The skip count dropped from 15 to 2
+because Docker was brought up, running the live fixture tests.) New test modules:
+`test_claim_shapes.py`, `test_vuln_class_vocabulary.py`,
+`test_eligibility_derivation.py`, `test_prediction.py`, `test_anomaly_store.py`,
+`test_abduction.py`, `test_abduction_execution.py`, `test_novelty_reward.py`,
+`test_verifier_registry.py`, `test_plan_serialization.py`, `test_novelty.py`,
+`llm/test_abduce.py`.
+
+**Deliberate limits (left honest):**
+
+- The loop is now closed end to end: a retained surprise is abduced (deterministic
+  and/or model), validated three-valued, and an expressible explanation is
+  *run* — the test `test_a_retained_surprise_drives_a_model_proposal_to_a_finding`
+  shows a surprise on one surface driving a model proposal on a *different*
+  surface all the way to a proven finding through the unchanged verifier. The
+  loop is wired into the operator CLI (`run_engine.py`) for both the single pass
+  and the campaign, and abduced candidates are replay-clean (recorded fact,
+  listed like the synthesize junction's).
+- **Held-back measurement (2026-10-02): live DVWA pass is L0; the machinery
+  reaches L2 live on a session-boundary target.** With Docker up, the held-back
+  DVWA pass was run live (`benchmarks/run_benchmark.py dvwa-low` → pass
+  `3fc5c61-fast`): `recall_declared = 1.0`, 2 findings, `world/novelty.py` max
+  **L0**. The loop is **inert on the corpus as declared**: only the
+  plan-table rows carry expectations, and neither case declares an
+  `access_differs_by_session` or `method_role=` surface, so no `anomaly.retained`
+  ever arises (the log has zero `anomaly.*`/`abduction.*` rows). On the fixture's
+  session-boundary endpoint (`/api/invoices/<id>`, two seeded sessions) the same
+  pipeline run live reaches **L2 (composition novelty)** — the plan-row
+  experiment proven by the unchanged verifier, beside the L0 `idor_differential`
+  finding.
+- **The two live gaps are closed (2026-10-02).** (1) A3's property channel is
+  now invoked by the driver (`Engine._propose_properties`), pooled and validated
+  like an anomaly-driven explanation. (2) A target that retains an anomaly now
+  exists: the fixture gained `GET /api/reports/<id>` (owner 200, authenticated
+  low-priv **500**, anon 403). Running the loop live against it fires the whole
+  circuit — `anomalies_retained=1` → `abduction.proposed=1` → `expressible_now`
+  → `abductions_run=1` — with **0 findings**, because a surprise is never a
+  finding. Two correctness fixes: the novelty classifier now matches abduced
+  hypotheses (`stage=hypothesis.abduced`) so abduced findings classify at their
+  real level (L2/L3/L4) rather than L0, and a model-named class now reaches the
+  plan row so the L4 path is real. **L3/L4 are wired and proven hermetically**
+  (`test_the_property_channel_reaches_l3`). A pre-existing bug was fixed
+  alongside: `GET /api/fetch` called its handler without the required payload
+  (now passes the query params).
+- **Live keyed run reaches L3, and the classifier refuses to inflate
+  (2026-10-02).** With the `.env` key (`VULN_ENGINE_LLM_API_KEY`), the property
+  channel ran live: the model proposed `object_read` (class `id-enumeration`) on
+  a role-labeled surface the ordinary pass skips, the abduced round ran it, and
+  the unchanged verifier proved it — **L3 structural novelty, computed live**.
+  The run exposed an honesty gap: the classifier had awarded **L4 on a novel
+  class name** for an experiment the registry already generates. Fixed: a model
+  proposal of a registry-generated experiment is capped at **L3**, and a model
+  finding reproducing a registry technique on the same `(host, path)` is **L0
+  duplicate** — verified live (the same proposal on a surface `idor_differential`
+  already proved is now L0, not L4). **L4 is not honestly reachable yet**; it
+  needs a new invariant and its verifier (A4).
+- **The loop's contribution is now scored (`fixture-session`, 2026-10-02).** A
+  scored benchmark case with a declared session boundary was added
+  (`benchmarks/vwas/fixture-session/`) so the abductive loop can be scored, not
+  just demonstrated. Three declared entries: `invoices/4821` (object-access,
+  differential), `invoices/99` (object-access, differential, declared
+  `capability=public_param` only), `reports/4821` (`none` — the surprise).
+  Re-run **live** with Docker up: **both tiers reach `recall_declared = 1.0`**
+  and **max level L2** (`invoices/4821` TP, `invoices/99` TP, `reports/4821`
+  correct-negative). The case **does not isolate the model channel**: the
+  earlier `method_role=target` marker on `invoices/99` excluded it from
+  `object_read_plans`, so the plan table skipped it; that marker was a false
+  claim (the surface is a plain object, not a state-change target) and when
+  removed the plan table reads `invoices/99` too — so the loop adds **no
+  recall** here.
+- **A novelty-inflation bug, found and fixed (2026-10-02).** The classifier had
+  read the deterministic `invoices/99` finding at **L3**, because the model
+  channel and the plan table both build the plan id `object_read:{key}`, so a
+  rule in `rules_by_plan` leaked onto the deterministic finding. Provenance is
+  the **arm**: `Finding` now carries the verdict's arm, and only a finding that
+  ran through the abduced arm (`technique@plan_id`) is model-proven. Recomputed
+  from the same log, the finding is **L2**; the hermetic abduced-arm case
+  (`test_the_property_channel_reaches_l3`) still reads **L3**. Regression test:
+  `test_novelty.py::test_a_plan_row_finding_shared_with_a_model_proposal_stays_l2`.
+  **Honest framing:** this is a *fixture case we wrote*, not a third-party
+  held-back target; on it the loop and the plan table reach the same surface,
+  so it is **not P4** and moves no rung. (Suite: **571 passed / 2 skipped**,
+  mypy clean.)
+- **A genuinely model-only case: the loop's contribution is now a measured
+  recall (2026-10-02).** Added `fixture-model-only`
+  (`benchmarks/vwas/fixture-model-only/`) — the companion to `fixture-session`
+  built so the ordinary pass *cannot* lower the experiment. Every surface
+  declares `capability=public_param` and none declares
+  `access_differs_by_session`, so the plan table is inert by its own gates
+  (`generic_differential` needs a declared two-session fact; `idor_differential`
+  keys on it too). Same fixture, same sessions, same three objects. Measured
+  live: **fast — 0 findings, `recall_declared = 0.0`, max L0**; **llm-ab — both
+  invoices TP at grade `differential`, `recall_declared = 1.0`, max L3**
+  (structural novelty via the model channel; report stays a correct-negative).
+  The model names the class `id-enumeration` (novel, outside the canonical
+  set), so the scorer queues it as `unadjudicated` for the human ruling — the
+  GT entries record that adjudicated class, which is what makes the run score.
+  The class being model-chosen is an honest fragility, recorded. This is the
+  first *scored* demonstration that the loop contributes recall the
+  deterministic pipeline cannot produce; it is still a fixture case we wrote
+  and **L3, not L4**, so it establishes no rung.
+- The deterministic abducer is expected to plateau at **L2** (compositions of
+  known primitives); the LLM channel (Phase 7) is the L3/L4 source. Neither has
+  a live engagement in the corpus yet.
+- Promotion out of the holding pen is a code change by design (A4); nothing
+  auto-promotes.
+
+---
+
+## Growing the known-bug corpus: OWASP Top 10:2025 (2026-10-02) — first technique shipped
+
+Paused novelty work and turned to **breadth**: adding the bug classes the engine
+knows, so it can find them wherever a surface is declared (or recon-derived).
+The research pass is [`owasp_coverage.md`](./owasp_coverage.md) — a category-by-
+category map of the 2025 Top 10 to engine techniques, feasibility, and a
+prioritized build order. Honest headline: **4 of the 10 categories are not
+testable by a black-box DAST engine** (A03 supply chain, A06 insecure design, A09
+logging/alerting, and deserialization under A08); they are stated as out of scope
+rather than faked.
+
+**Shipped: command injection (A05).**
+`service/vuln_engine/techniques/command_injection/` — blind OS command injection
+via a timing side channel. It shares the operator's `delayed_response` claim with
+`sqli_blind_time` (two *explanations* of one declared fact), reuses the existing
+**`timing.differential`** verifier, and adds the canonical class
+`command-injection` (CWE-78). The family is five shell interpolation shapes
+(`;`, `|`, `&&`, `$(...)`, backticks); the separating shape is the finding, the
+rest are the control.
+
+- **Live proof:** the fixture gained `GET /api/exec?host=` (a `shell=True` command
+  built by concatenation). `run_engine.py` against it produced **1 finding:
+  COMMAND-INJECTION at grade `differential`** (repro URL in the report).
+- **Tests:** 11 new (`tests/vuln_engine/techniques/test_command_injection.py`);
+  the registry test's expected list updated. **582 passed / 2 skipped, mypy clean.**
+- **Known follow-up:** DVWA's `/vulnerabilities/exec/` is now *coverable* in
+  principle, but needs a **form-urlencoded** body transport (the engine's
+  `where=body` is JSON-only) — the same gap would unblock several A02/A07
+  form-shaped targets. Fixture proof stands in for it meanwhile.
+
+**Next in the batch:** security headers (A02), path traversal (A01/A05),
+echo-based SQLi (A05), CORS (A01/A02), insecure cookie flags (A04/A07), user
+enumeration (A07), SSTI (A05), XXE (A05 — reuses the existing `oob.read`
+verifier), error disclosure (A10).
+
+---
+
 ## Open items deliberately left open
 
 - `techniques/sqli_blind_time/probes.measurement_probes()` was written but
@@ -861,3 +1105,50 @@ coverage — the next `--memory-file` run inherits the redirect shape too.
 - Playwright is installed and now the answering driver (previously CDP only);
   the capability report names whichever answered, so no action needed.
 - Redis remains absent from compose by design; `cache.py`/`queueing.py` degrade.
+
+---
+
+## Docs reconciled against the code (2026-10-02)
+
+A pass over `docs/vuln_engine_docs/` with the code as the arbiter. The docs were
+in better shape than expected — Phases 1–3 all carry accurate STATUS blocks, and
+`owasp_coverage.md` needed no correction at all. Four things were wrong, and one
+whole seam was undocumented.
+
+**Fixed (stale layout claims, in four documents).** `engine_architecture.md` §3,
+`engine_principles.md` §1.3, `engine_view.md` and `engine_explained.md` all
+carried the same three errors:
+
+* an `http2` transport that does not exist — the three on disk are `http1`,
+  `browser`, `oob` (http2 was a Phase 4 item that never landed);
+* `manifest.json`, which is `manifest.py`;
+* no `seed/`, `abduction/` or `memory/` in the maps, although all three exist.
+
+**Added: [`graph_seed_bridge.md`](graph_seed_bridge.md).** The graph→`Surface`
+path had zero prose anywhere in the repo, and it is the seam that decides what
+the engine can actually *do*. It now documents the four-module path, the two
+rules that make the derivation trustworthy (code navigates / the model does not;
+a derived surface is a claim), what each of the eight techniques gates on, and
+the measured gap — **the graph supplies 1 of 8 capability claims**, so two of
+eight techniques can fire from recon alone. Nine ordered requirements to close
+it, evidence-state gating first (83% of current candidates are historical or
+dead URLs). All numbers came from running the bridge against the live
+`qbsco.net` graph, not from reading it.
+
+**Index: `docs/README.md` had no `vuln_engine_docs/` section at all** — 19
+documents, none described. Added one with a reading order, plus a pointer to the
+bridge doc from the "where to start" table.
+
+**Verified, not asserted:**
+
+| Check | Result |
+| --- | --- |
+| technique roster | `registry.discover()` → exactly the 8 documented, 0 manifest problems |
+| path claims in all 6 touched docs | 0 broken (every backticked path and `.md` link resolves) |
+| tests | `pytest tests/vuln_engine` → 568 passed, 16 skipped (skips are the compose fixture being down) |
+| mypy | `service/vuln_engine` → clean, 105 files |
+
+**Left alone deliberately:** the dated `RnD_*`, `feasibility_notes.md`,
+`vwa_*` and `xss_dom_sketch.md` files. They are research passes, historical by
+construction, and the index now labels them as such rather than pretending they
+describe current behaviour.
