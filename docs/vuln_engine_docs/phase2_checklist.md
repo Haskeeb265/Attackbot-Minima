@@ -22,8 +22,8 @@
 > populations by design, pinned to the grammar's spellings by a test. Either wire
 > it or delete it when a second differential technique exists.
 
-Companion to [`engine_explained.md`](./engine_explained.md) §7 and
-[`engine_principles.md`](./engine_principles.md) §2.5. Unblocks what
+Companion to [`README.md`](./README.md) §5 and §8 (the consolidated
+engine doc; the originals are in git history at `6209547`). Unblocks what
 [`phase1_checklist.md`](./phase1_checklist.md) §3 deferred: **UCB + attack tree ·
 NoiseProfile units · blind SQLi (time-based)**. Phase 1's contract (gate, receipts,
 world log, replay) is reused verbatim — Phase 2 replaces *ordering and selection*,
@@ -52,7 +52,7 @@ of visibility**.
 
 ### 1. UCB selector — pure math (`scheduler/ucb.py`)
 - [ ] `Arm` (technique, surface, throws, rewards, prior) + `Arm.ucb(total, c=1.4)`
-      exactly per `engine_explained.md` §7.2: untried ⇒ `inf` (tried once),
+      exactly per the arm-selection rule in [`README.md`](./README.md) §5: untried ⇒ `inf` (tried once),
       `mean + c·√(ln N / n)` after.
 - [ ] `pick(arms, noise=)` — highest optimistic bound **divided by the arm's
       declared `NoiseProfile.cost`**; the design's own addition (§2.5), the reason

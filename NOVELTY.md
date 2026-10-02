@@ -8,11 +8,11 @@ checkable from here, however long that takes. The bar in §4 does not move. If
 it turns out to be unreachable, the honest response is a decision record
 saying so — not a redefinition.**
 
-Companion docs: [`docs/vuln_engine_docs/DECISIONS.md`](./docs/vuln_engine_docs/DECISIONS.md)
+Companion docs: [`docs/vuln_engine_docs/README.md`](./docs/vuln_engine_docs/README.md) (decision record consolidated; the standalone `DECISIONS.md` is in git history at `6209547`)
 (accepted decisions; DR-001 covers the spike replay result),
 [`docs/vuln_engine_docs/progress.md`](./docs/vuln_engine_docs/progress.md)
 (what is built and verified),
-[`docs/vuln_engine_docs/RnD_2026-09-25_smarter.md`](./docs/vuln_engine_docs/RnD_2026-09-25_smarter.md)
+[`docs/vuln_engine_docs/progress.md`](./docs/vuln_engine_docs/progress.md) (that pass is recorded there; the standalone R&D file is in git history at `6209547`)
 (research grounding).
 
 **Last substantive update: 2026-09-30 (evening)** — post-divergence status
@@ -51,7 +51,7 @@ target:
   `OBJECT-ACCESS`, a `vuln_class` that exists **nowhere in the technique folder
   tree**. Log: `output/vuln_engine/spike_generic/world.jsonl`.
 - `--replay` over that log is clean (DR-001 in
-  [`docs/vuln_engine_docs/DECISIONS.md`](./docs/vuln_engine_docs/DECISIONS.md)):
+  [`docs/vuln_engine_docs/README.md`](./docs/vuln_engine_docs/README.md) (decision record consolidated; the standalone `DECISIONS.md` is in git history at `6209547`)):
   invariant 4 survives hypothesis-as-data, by re-derivation from the seed.
 
 The consequence is the architectural claim everything after this builds on:
@@ -284,10 +284,10 @@ CI canary for item 4 belong in the same change.
   verifier; hypotheses were runtime data; `--replay` clean (DR-001). Evidence:
   `output/vuln_engine/spike_generic/world.jsonl`,
   `service/vuln_engine/techniques/generic_differential/`,
-  `docs/vuln_engine_docs/DECISIONS.md` DR-001.
+  DR-001 in the consolidated `docs/vuln_engine_docs/README.md`.
 - **2026-10-02 — the abductive loop is built and verified (no rung claimed).**
   The PRD was reviewed and amended to v1.1
-  (`docs/vuln_engine_docs/PRD_abductive_loop.md`, A1–A4), then implemented
+  (amendments A1–A4; the standalone PRD is in git history at `6209547`), then implemented
   Phases 0→9: the state-change evidence cap and derived eligibility; the
   `vuln_class` vocabulary; the prediction layer and third interpret outcome
   (a clean measurement that violates a hypothesis's expectation is *retained*,

@@ -19,7 +19,9 @@
 >   detection resolved drive-root paths against the cwd; (3) a second run's report resold the
 >   first run's findings — reports now read through a run-window (`WorldLog.since`).
 
-Companion to [`engine_view.md`](./engine_view.md) and [`engine_explained.md`](./engine_explained.md).
+Companion to [`README.md`](./README.md) (the consolidated engine doc; this
+checklist's original companions were consolidated into it and are in git
+history at `6209547`).
 Phase 1 goal, per the final proposal: **prove the engine can produce one finding that is
 independently verified, replayable, and gate-audited — with zero LLM code.** Everything
 else (UCB, attack tree, junctions, primitives) is explicitly out of scope until this passes.
@@ -79,7 +81,7 @@ semi-permanent (a dependency in the verification path).
 ### 1. Kernel contracts — pure data, no logic
 - [ ] `service/vuln_engine/kernel/evidence.py` — `Evidence` dataclass; `EVIDENCE_*` constants;
       `FINDING_GRADES = {execution, oob, differential}`. Port the sketch in
-      `engine_explained.md` §1 verbatim.
+      `README.md` §1 (was `engine_explained.md` §1) verbatim.
 - [ ] `service/vuln_engine/kernel/observation.py` — typed observation records: reflection
       context enums (`double_quoted_attribute`, …), status/bytes/timing fields. Payloads are
       `dict` of typed fields; **no `str` blobs**.
@@ -124,7 +126,7 @@ semi-permanent (a dependency in the verification path).
 - [ ] `service/vuln_engine/techniques/xss_reflected/{manifest.py, hypothesis.py, probes.py,
       interpret.py}` — pure; probes **emit specs** (canary reflection probe via http1; exec
       probe via browser, gated on the observed context). Manifest mirrors the sketch in
-      `engine_explained.md` §12 (`verification_needs="execution"`).
+      `README.md` §4 (`verification_needs="execution"`).
 - Tests: `tests/vuln_engine/techniques/test_xss_reflected.py` — pure functions over recorded
       observations; no I/O imports allowed.
 

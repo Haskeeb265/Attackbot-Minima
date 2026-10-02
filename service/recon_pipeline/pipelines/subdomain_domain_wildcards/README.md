@@ -89,7 +89,7 @@ wildcard is or which names it explains. Every suppressed name is written to
 ## Stealth and resilience (spec §5.1)
 
 All three stages share one stealth layer at
-[`service/recon_pipeline/platform/stealth/`](../../stealth/README.md): coherent per-host browser
+[`service/recon_pipeline/platform/stealth/`](../../platform/stealth/README.md): coherent per-host browser
 identities, per-host pacing with jitter and backoff, WAF/challenge detection, persistent
 quarantine (escalating to a passive-only run), and a per-resolver DNS volume budget. The active
 and permutation stages apply it to every resolve, brute force, zone-transfer sequence and HTTP
@@ -101,7 +101,7 @@ saying which transport actually ran, and what the target did about it.
 
 The design, the measurements behind it (real Chrome JA4 from `httpx -tlsi chrome`, the CLI's
 header-order limitation, the volume thresholds) and the honest limits are all in
-[`stealth/README.md`](../../stealth/README.md).
+[`stealth/README.md`](../../platform/stealth/README.md).
 
 ## Requirements
 

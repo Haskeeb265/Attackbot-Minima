@@ -4,8 +4,8 @@ A running record of what has been built, what has been *verified*, what was
 found along the way, and what is next. Companion docs:
 [`phase1_checklist.md`](./phase1_checklist.md) (status banner at top),
 [`phase2_checklist.md`](./phase2_checklist.md) (status banner at top),
-[`engine_view.md`](./engine_view.md) (the design), [`RnD_2026-09.md`](./RnD_2026-09.md)
-(the research grounding), [`DECISIONS.md`](./DECISIONS.md) (accepted decisions,
+`engine_view.md` (the design), `RnD_2026-09.md`
+(the research grounding), `DECISIONS.md` (accepted decisions,
 numbered and dated), [`../../NOVELTY.md`](../../NOVELTY.md) (the north-star
 anchor for finding unseen/novel bugs).
 
@@ -226,7 +226,7 @@ only the fixture path had ever run.
 ## Phase 4 begins: the DOM lens (`xss_dom`) — the first finding the wire lens cannot see ✅
 
 The Juice Shop gap, answered. Full design record in
-[`xss_dom_sketch.md`](./xss_dom_sketch.md); what actually happened:
+`xss_dom_sketch.md`; what actually happened:
 
 - **Kernel**: `observation.dom_placement` joined the observation kinds, with a
   DOM-only context family (`dom_text`, `dom_attribute`, `dom_url_attribute`,
@@ -333,7 +333,7 @@ not a silent grammar edit.
 
 ## Target-assumptions audit (2026-09-24) — is the engine being molded around Juice Shop?
 
-Full record in [`target_assumptions_audit.md`](./target_assumptions_audit.md).
+Full record in `target_assumptions_audit.md`.
 Method: grep sweeps for target identity, read-throughs of every grammar,
 observation, verifier and scheduler constant, plus one empirical probe. The
 falsifiable test: *delete the fixture and Juice Shop; no engine code may change
@@ -484,7 +484,8 @@ punctuation-followed-by-whitespace, so reproduction URLs survive intact.
 
 ## The benchmark skeleton: two cases, a runner, a scorer (2026-09-25)
 
-The [benchmark proposal](./vwa_benchmark_proposal.md) v2 became the smallest
+The benchmark proposal (`vwa_benchmark_proposal.md`, consolidated; git history
+`6209547`) v2 became the smallest
 real thing: not a harness, a skeleton. Two transcribed cases, a runner that
 invokes the engine like an operator would, a scorer that joins the artifacts
 against ground truth, the attribution convention, and the isolation tests —
@@ -701,7 +702,7 @@ Two-and-a-half vuln classes is a narrow lens.
 
 ## M1 + M2 + M3: the reflect loop, the IDOR technique, memory (2026-09-26) ✅
 
-All three builds from [`RnD_2026-09-25_smarter.md`](./RnD_2026-09-25_smarter.md)
+All three builds from `RnD_2026-09-25_smarter.md`
 landed together and were verified live the same day. 398 tests (one new wiring
 pin), mypy clean across 73 files.
 
@@ -914,7 +915,7 @@ by test. 41 UI tests, mypy clean across 9 files.
 ## The abductive loop: Phases 0–10 (2026-10-02) ✅ (built + verified; L3 measured live on the fixture; no rung claimed)
 
 DeepSeek's "Abductive Loop" PRD was assessed and amended to v1.1 (A1–A4,
-[`PRD_abductive_loop.md`](./PRD_abductive_loop.md)); its phases were then
+`PRD_abductive_loop.md`); its phases were then
 implemented 0→9, each with tests and a full-suite + mypy verification. The
 goal remains NOVELTY.md's **P4** (a proven finding no registry entry could
 generate, on an unseen target, replay-clean); what is built here is the *loop*
@@ -1053,7 +1054,7 @@ because Docker was brought up, running the live fixture tests.) New test modules
 
 Paused novelty work and turned to **breadth**: adding the bug classes the engine
 knows, so it can find them wherever a surface is declared (or recon-derived).
-The research pass is [`owasp_coverage.md`](./owasp_coverage.md) — a category-by-
+The research pass is `owasp_coverage.md` — a category-by-
 category map of the 2025 Top 10 to engine techniques, feasibility, and a
 prioritized build order. Honest headline: **4 of the 10 categories are not
 testable by a black-box DAST engine** (A03 supply chain, A06 insecure design, A09
@@ -1124,7 +1125,7 @@ carried the same three errors:
 * `manifest.json`, which is `manifest.py`;
 * no `seed/`, `abduction/` or `memory/` in the maps, although all three exist.
 
-**Added: [`graph_seed_bridge.md`](graph_seed_bridge.md).** The graph→`Surface`
+**Added: [`graph_seed_bridge.md`](graph_seed_bridge.md, consolidated).** The graph→`Surface`
 path had zero prose anywhere in the repo, and it is the seam that decides what
 the engine can actually *do*. It now documents the four-module path, the two
 rules that make the derivation trustworthy (code navigates / the model does not;
@@ -1152,3 +1153,51 @@ bridge doc from the "where to start" table.
 `vwa_*` and `xss_dom_sketch.md` files. They are research passes, historical by
 construction, and the index now labels them as such rather than pretending they
 describe current behaviour.
+
+---
+
+## Doc consolidation and repo cleanup (2026-10-02)
+
+**Nineteen documents became five.** `docs/vuln_engine_docs/README.md` is now the
+single current-state document: what the engine is, the five invariants, the
+module map, the technique contract with all eight registered techniques, the life
+of one arm, the policy gate, the graph→seed bridge with the measured 1-of-8
+capability gap, OWASP coverage, the five LLM junctions, status, and how to run
+it. The fifteen documents it absorbs are preserved in git history at `6209547`.
+
+Kept separate on purpose, because they are a dated record rather than
+current-state documentation: the three phase checklists (each with its STATUS
+block of exit criteria and deliberate deviations) and this log.
+
+**Repo cleanup:**
+
+* **34 root scan artifacts removed** (6.3 MB) — `RECON_*.md`, `recon_*.log`,
+  `recon_*.txt`. All gitignored build output, none tracked, all regenerable by
+  re-running a pipeline.
+* **`tests/scraper/test_persistence.py` → `scripts/persist_program.py`.** It
+  collected zero tests while its filename implied coverage, and its `main()`
+  hits the live HackerOne API and writes real rows to PostgreSQL. A `test_*`
+  file that nothing runs and that writes to a real database is a hazard; it now
+  carries a header saying exactly that.
+* **Caches cleared** (`__pycache__`, `.pytest_cache`, `.mypy_cache`, the stray
+  `.tmp_tls;C`).
+
+**What the audit did *not* find:** no redundant test files. The pairs that look
+like duplicates are not — `test_eligibility.py` (10) tests program-policy
+eligibility, `test_eligibility_derivation.py` (4) tests eligibility derived from
+the plan table; `test_novelty.py` (4) pins the classifier branches,
+`test_novelty_reward.py` (7) pins the reward cap and decay. No duplicate test
+basenames exist outside the legitimate per-package `conftest.py`. Deleting any of
+them would have removed coverage, not duplication.
+
+**Also fixed:** four pre-existing broken links in the recon pipeline READMEs
+(`stealth/README.md` paths stale since stealth moved under `platform/`), and
+every reference to the consolidated-away documents across `docs/README.md`,
+`NOVELTY.md`, the three checklists and this log. A repo-wide check now resolves
+every `.md` link outside the agent skill templates.
+
+**Verified:** 2 117 tests pass. The 13 failures in `tests/vuln_engine/llm/` are
+**pre-existing and unrelated** — they pass when that directory runs alone and
+fail only in the full suite, i.e. cross-test pollution from the uncommitted
+engine work in the tree. Confirmed by restoring the moved test file and
+reproducing the identical 13.

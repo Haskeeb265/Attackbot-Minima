@@ -304,4 +304,4 @@ the operator's budget is what bounds traffic.
 - [`commands.txt`](commands.txt) — raw per-tool commands for reproducing one source by hand.
 - `../subdomain_domain_wildcards/README.md` — the upstream stage that discovers the names this harvest covers.
 - `../port_service_host/README.md` — the sibling pipeline that maps what is listening on those names.
-- [`../../../stealth/README.md`](../../../stealth/README.md) — the shared shaping layer (used by the other stages; the passive sources here never touch the target).
+- [`../../../stealth/README.md`](../../platform/stealth/README.md) — the shared shaping layer (used by the other stages; the passive sources here never touch the target).

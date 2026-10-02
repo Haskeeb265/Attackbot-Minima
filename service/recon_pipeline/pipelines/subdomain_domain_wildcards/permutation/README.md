@@ -231,7 +231,7 @@ rather than picking one.
 
 Permutations are generated names resolved by brute force — the most clearly *enumerating*
 traffic this stage produces — so it runs under the same shared stealth layer as the active stage
-([`service/recon_pipeline/platform/stealth/`](../../../stealth/README.md)):
+([`service/recon_pipeline/platform/stealth/`](../../../platform/stealth/README.md)):
 
 * `PASSIVE_ONLY=1` (or a WAF quarantine left behind by an earlier run) **refuses to resolve
   permutations at all**, rather than resolving them and reporting an abort.

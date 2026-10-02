@@ -144,11 +144,16 @@ restructure's risk lives.
 
 ## `tests/scraper/` — script-style tests
 
-Three of these are standalone scripts, not pytest tests: they define `main()` and
+Two of these are standalone scripts, not pytest tests: they define `main()` and
 are run with `python tests/scraper/<file>.py` against a live PostgreSQL with
-`.env` credentials. They cover persistence (`test_persistence.py`), the detail
-scraper (`scraper_test.py`) and a full database lifecycle with a forced rollback
-(`smoke_test_db.py`).
+`.env` credentials. They cover the detail scraper (`scraper_test.py`) and a full
+database lifecycle with a forced rollback (`smoke_test_db.py`).
+
+A third script used to live here as `test_persistence.py`: it scraped one
+program, mapped it and persisted it against the real database. It collected zero
+tests while its filename implied coverage, so it now lives at
+`scripts/persist_program.py`, outside the test tree, with a header saying what it
+does and that it writes real rows.
 
 `test_hackerone_mapper.py` used to be a fourth script — and a broken one: it ran
 at import time, opened `test_detail_output.json` (a fixture not in the repo), and
@@ -160,9 +165,12 @@ eyeballing a fresh capture.
 | File | `pytest --collect-only` | Why |
 |---|---|---|
 | `test_hackerone_mapper.py` | 1 test, skipped | fixture `test_detail_output.json` is not in the repo (deliberate skip, not an error) |
-| `test_persistence.py` | no tests collected | script (no `test_*` functions); needs a live DB |
 | `scraper_test.py` | no tests collected | script; needs a live DB and HackerOne credentials |
 | `smoke_test_db.py` | no tests collected | script; needs a live DB |
+
+The persistence script moved to `scripts/persist_program.py` precisely because a
+`test_*` file that writes to a real database is a hazard: nothing runs it, so it
+never gets maintained, and its name claims coverage it does not have.
 
 ### The rollback pattern in `smoke_test_db.py`
 

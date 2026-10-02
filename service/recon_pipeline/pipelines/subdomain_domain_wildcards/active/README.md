@@ -308,7 +308,7 @@ Honest caveats:
 ## Stealth & resilience (spec §5.1)
 
 The stage runs under the shared stealth layer
-([`service/recon_pipeline/platform/stealth/`](../../../stealth/README.md)) by default. What that
+([`service/recon_pipeline/platform/stealth/`](../../../platform/stealth/README.md)) by default. What that
 changes here, concretely:
 
 * **Candidate order is shuffled** (keyed on the target) before resolution, and the work is
@@ -347,7 +347,7 @@ would be needed) — reported as a note rather than silently exceeded, and never
 
 Stealth can be turned off with `ACTIVE_STEALTH=0` (it then behaves exactly as it did before this
 layer existed). The `STEALTH_*` knobs and the evidence behind them are documented in
-[`stealth/README.md`](../../../stealth/README.md).
+[`stealth/README.md`](../../../platform/stealth/README.md).
 
 ## Settings
 

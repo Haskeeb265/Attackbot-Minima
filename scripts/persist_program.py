@@ -1,3 +1,16 @@
+"""MANUAL SCRIPT — not a test. It writes to your real database.
+
+This lived at ``tests/scraper/test_persistence.py``, where pytest ignored it
+(it collects zero tests) while its name implied it was covered. It is a
+one-shot operator tool: it scrapes one program, maps it, and persists it
+against the configured PostgreSQL.
+
+    python scripts/persist_program.py
+
+It hits the live HackerOne API and writes real rows. Read ``.env`` first and
+confirm you mean it.
+"""
+
 from service.scraper.program_detail_scraper import ProgramDetailScraper
 
 from db.mapper.hackerone_mapper import HackerOneMapper

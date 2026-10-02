@@ -29,8 +29,9 @@
 >   the model is not consulted twice for the same question, and replay never
 >   needs the key.
 
-Companion to [`engine_view.md`](./engine_view.md) §3 (rank), §4.1 (synthesize),
-§5 (write) and [`RnD_2026-09.md`](./RnD_2026-09.md) §C3 (junction contracts).
+Companion to [`README.md`](./README.md) §9 (the five junctions). The
+originals (`engine_view.md`, `RnD_2026-09.md` §C3) are in git history at
+`6209547`.
 Phase 1's contract (gate, receipts, world log, replay) is reused verbatim —
 Phase 3 adds *advice*, never authority.
 
