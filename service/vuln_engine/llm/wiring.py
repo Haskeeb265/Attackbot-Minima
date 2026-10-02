@@ -43,7 +43,15 @@ if TYPE_CHECKING:
     from .runtime import HypothesizeResult, ReflectDecision
 from .client import EVENT_LLM_JUNCTION, Health, LLMClient, Opinion
 from . import rank, synthesize, write
-from .runtime import GraphNavigation, GraphNavigator, HypothesisJunction, ReflectJunction, SynthesisJunction
+from .runtime import (
+    AbductionJunction,
+    AbductionResult,
+    GraphNavigation,
+    GraphNavigator,
+    HypothesisJunction,
+    ReflectJunction,
+    SynthesisJunction,
+)
 
 log = logging.getLogger("vuln_engine.llm")
 
@@ -75,6 +83,11 @@ class Advisory:
     #: under the ordinary rules. Present regardless so the health report is one
     #: object.
     graph_nav: GraphNavigator | None = None
+    #: Junction 7 (abduce + property proposal), built in ``from_env``. Asked by
+    #: the abductive loop when an anomaly is retained, and (property channel)
+    #: when the operator asks for static-context proposals. A3's primary
+    #: novelty source; the deterministic abducer is its control arm.
+    abduce: AbductionJunction | None = None
 
     @classmethod
     def from_env(cls) -> "Advisory":
@@ -86,6 +99,7 @@ class Advisory:
             hypothesize=HypothesisJunction(client),
             reflect=ReflectJunction(client),
             graph_nav=GraphNavigator(client),
+            abduce=AbductionJunction(client),
         )
 
     @property
@@ -309,6 +323,44 @@ class Advisory:
         )
 
     # ------------------------------------------------------------------ #
+    # junction 7 — abduce / propose properties (the abductive loop)
+    # ------------------------------------------------------------------ #
+
+    def abduced(
+        self,
+        anomaly: dict,
+        surfaces,
+        *,
+        memory: dict | None = None,
+        log_handle=None,
+        now: float = 0.0,
+    ) -> AbductionResult:
+        """LLM explanations for one retained anomaly, or the empty result.
+
+        Degrades to empty whenever the junction is missing or the model is
+        unavailable, so the deterministic abducer remains the whole loop.
+        """
+        if self.abduce is None or not self.available:
+            return AbductionResult(
+                source="degraded",
+                reason=self.health.reason if not self.available else "no abduce junction wired",
+            )
+        return self.abduce.explain(
+            anomaly, surfaces, memory=memory, world=log_handle, now=now
+        )
+
+    def proposed_properties(
+        self, surfaces, *, log_handle=None, now: float = 0.0
+    ) -> AbductionResult:
+        """A3's property channel over static context, or the empty result."""
+        if self.abduce is None or not self.available:
+            return AbductionResult(
+                source="degraded",
+                reason=self.health.reason if not self.available else "no abduce junction wired",
+            )
+        return self.abduce.propose_properties(surfaces, world=log_handle, now=now)
+
+    # ------------------------------------------------------------------ #
     # junction 3 — write
     # ------------------------------------------------------------------ #
 
@@ -396,6 +448,23 @@ def graph_navigation_advisory(
         log_handle=log_handle,
         now=now,
         max_steps=max_steps,
+    )
+
+
+def abduction_advisory(
+    advisory: "Advisory | None",
+    anomaly: dict,
+    surfaces,
+    *,
+    memory: dict | None = None,
+    log_handle=None,
+    now: float = 0.0,
+) -> AbductionResult:
+    """Module-level convenience for a caller that may have no advisory at all."""
+    if advisory is None:
+        return AbductionResult(source="degraded", reason="no advisory wired")
+    return advisory.abduced(
+        anomaly, surfaces, memory=memory, log_handle=log_handle, now=now
     )
 
 
@@ -544,6 +613,7 @@ def opinion_row(opinion: Opinion) -> dict:
 
 __all__ = [
     "Advisory",
+    "abduction_advisory",
     "graph_navigation_advisory",
     "hypothesized_seed_advisory",
     "load_memory",

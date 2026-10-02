@@ -18,10 +18,15 @@ What replay recomputes, and what it deliberately does not:
   effects, and an effect's result is a recorded fact, not something derivable. A
   replay that re-ran them would not be a replay;
 * **not recomputed, counted separately** — the synthesize junction's candidates
-  (``candidate.junction`` rows, Phase 3). A model's validated answer is recorded
-  fact like an effect's result: replaying it would re-run the model, which is
-  what the log's cached opinions exist to avoid. A replay lists them; it does
-  not treat their absence from its own recomputation as a mismatch.
+  (``candidate.junction`` rows, Phase 3) and the abductive loop's candidates
+  (the abduced round, ``note`` rows with ``stage=hypothesis.abduced``). A model's
+  validated answer is recorded fact like an effect's result: replaying it would
+  re-run the model, which is what the log's cached opinions exist to avoid. The
+  abduced round is listed for the same reason — its hypotheses come from the
+  abducers (one of which is a model) over retained anomalies, not from the
+  techniques' own ``hypotheses()``, so a pure recomputation would neither
+  reproduce nor honestly refute them. A replay lists both; it does not treat
+  their absence from its own recomputation as a mismatch.
 
 So a mismatch means one of two things, and both are worth knowing: an input to a
 pure function was not fully recorded, or a pure function is not pure. Neither is a
@@ -48,6 +53,9 @@ class ReplayReport:
     #: Phase 3: candidate ids the synthesize junction proposed (recorded fact,
     #: listed rather than recomputed — see the module docstring).
     junction_candidates: list[str] = field(default_factory=list)
+    #: The abductive loop: candidate ids the abduced round produced (recorded
+    #: fact, listed rather than recomputed — see the module docstring).
+    abduced_candidates: list[str] = field(default_factory=list)
     findings: list[dict] = field(default_factory=list)
     report_lines: list[str] = field(default_factory=list)
     #: Logged candidate ids the replay does not reproduce, and vice versa.
@@ -66,6 +74,7 @@ class ReplayReport:
             "candidates_logged": self.candidates_logged,
             "candidates_recomputed": self.candidates_recomputed,
             "junction_candidates": list(self.junction_candidates),
+            "abduced_candidates": list(self.abduced_candidates),
             "findings": len(self.findings),
             "mismatches": self.mismatches,
             "independence_violations": self.independence_violations,
@@ -102,10 +111,14 @@ def replay(
                 recomputed.extend(technique.interpret(hypothesis, seen))
 
     recomputed_ids = [candidate.id for candidate in recomputed]
+    # The abduced round's hypotheses are not derived from the techniques' own
+    # ``hypotheses()``, so a pure recomputation cannot reproduce them; they are
+    # recorded fact, listed rather than mismatched (see the module docstring).
+    abduced_ids = _abduced_candidate_ids(log)
     mismatches = [
         f"logged but not recomputed: {identifier}"
         for identifier in logged
-        if identifier not in recomputed_ids
+        if identifier not in recomputed_ids and identifier not in abduced_ids
     ] + [
         f"recomputed but not logged: {identifier}"
         for identifier in recomputed_ids
@@ -122,12 +135,33 @@ def replay(
         candidates_logged=len(logged),
         candidates_recomputed=len(recomputed_ids),
         junction_candidates=junction_candidates,
+        abduced_candidates=[identifier for identifier in logged if identifier in abduced_ids],
         findings=[finding.to_dict() for finding in views.findings(log)],
         report_lines=views.report_lines(log),
         mismatches=mismatches,
         independence_violations=_independence_violations(log),
         gate_audit=views.gate_audit(log),
     )
+
+
+def _abduced_candidate_ids(log: WorldLog) -> set[str]:
+    """Candidate ids the abduced round produced, read from its note rows.
+
+    The abduced round logs one ``note`` row per materialized hypothesis
+    (``stage=hypothesis.abduced``) carrying the hypothesis dict; a technique's
+    candidate id is its hypothesis id for the plan-table technique, which is
+    what makes this join exact. Nothing here runs an abducer — the rows are the
+    record of what ran.
+    """
+    ids: set[str] = set()
+    for row in log.events("note"):
+        if row.get("stage") != "hypothesis.abduced":
+            continue
+        hypothesis = row.get("hypothesis") or {}
+        identifier = str(hypothesis.get("id", ""))
+        if identifier:
+            ids.add(identifier)
+    return ids
 
 
 def _logged_surfaces(technique: object, seed: EngagementSeed) -> list[Surface]:

@@ -64,6 +64,27 @@ One endpoint per technique, each the way a real target ships the bug:
     the status code is the only signal, which is exactly the measurement
     ``idor_differential`` compares.
 
+``GET /api/exec?host=``
+    The command-injection fixture: the value is interpolated into a shell
+    command string that is executed with ``shell=True`` — the way real targets
+    build a command by concatenation — so a value carrying a shell metacharacter
+    and a delay command makes the response slow while a benign value returns
+    at once. The delay travels in the payload, so the endpoint answers a payload
+    *family*: whichever interpolation shape the shell honours separates, and the
+    shapes it does not honour are the control. A subprocess timeout caps a
+    hostile value so it cannot pin a worker. This is a deliberately vulnerable
+    fixture, reachable only from the compose network and the host, and scoped
+    like every other endpoint (declared, never a bypass).
+
+``GET /api/reports/<id>``
+    The *surprise* fixture: a session-gated read whose low-privilege answer is
+    an error (500), not a clean denial — the boundary check throws instead of
+    refusing. The owner (admin) reads it (200); the authenticated low-priv
+    session gets 500; an unknown session still fails closed (403). This is the
+    measurement the object-read plan expects to be *denied*, so the violation is
+    a **retained anomaly** — the material the abductive loop consumes (a clean
+    200/200 is a candidate, not a surprise, and a denial is the boundary holding).
+
 The app is only ever reachable from the compose network and the host. It is
 scoped like any other target — see ``tests/vuln_engine/eval/test_phase1.py`` and
 the note in ``docs/vuln_engine_docs/phase1_checklist.md`` item 12: the fixture is
@@ -76,6 +97,7 @@ import json
 import logging
 import os
 import re as _re
+import subprocess
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -90,6 +112,10 @@ FETCH_TIMEOUT = float(os.getenv("FIXTURE_FETCH_TIMEOUT", "10"))
 #: submissions would let one noisy run pin its memory; a real target's storage
 #: quota imposes the same shape of limit.
 COMMENT_CAP = 64
+
+#: How long ``/api/exec`` waits on the shell command it builds. A hostile
+#: value asking for a longer delay is a slow failure, not a hang.
+EXEC_TIMEOUT = float(os.getenv("FIXTURE_EXEC_TIMEOUT", "10"))
 
 #: The ``/delay`` endpoint's ceiling. The delay itself comes from the payload
 #: (a ``SLEEP(n)`` expression, parsed like a backend would parse one), so a
@@ -191,11 +217,17 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if parts.path.startswith("/api/invoices/"):
             self._invoice(parts.path)
             return
+        if parts.path.startswith("/api/reports/"):
+            self._report(parts.path)
+            return
         if parts.path == "/api/delay":
             self._api_delay(params)
             return
         if parts.path == "/api/fetch":
-            self._api_fetch()
+            self._api_fetch({"url": (params.get("url") or [""])[0]})
+            return
+        if parts.path == "/api/exec":
+            self._api_exec({"host": (params.get("host") or [""])[0]})
             return
         self._send(404, b"not found", "text/plain; charset=utf-8")
 
@@ -346,6 +378,40 @@ class FixtureHandler(BaseHTTPRequestHandler):
         log.info("invoice %s denied (role=%r)", invoice_id, role)
         self._send(403, b"{\"error\": \"forbidden\"}", "application/json")
 
+    def _report(self, path: str) -> None:
+        """Answer a report read whose low-privilege half is a surprise.
+
+        The owner (admin) reads the object (200) — so there is a genuine
+        boundary here to violate. The authenticated low-privilege session gets
+        a **500**: the check throws instead of denying, which is neither the
+        success that would make the access-differential candidate nor the
+        denial that would mean the boundary held. It is exactly the kind of
+        clean measurement that violates a prediction — the object-read plan
+        expects ``other_read`` to be denied — so the driver retains it as an
+        anomaly rather than inventing a finding. Unknown sessions still fail
+        closed (403), so the surprise is never a fabricated one.
+        """
+        cookies: dict[str, str] = {}
+        for pair in (self.headers.get("Cookie") or "").split(";"):
+            name, _, value = pair.partition("=")
+            if name.strip():
+                cookies[name.strip()] = value.strip()
+        report_id = path.rsplit("/", 1)[-1]
+        role = self.sessions.get(cookies.get("session", ""))
+        if role == "admin":
+            log.info("report %s served to role=%r", report_id, role)
+            body = (
+                '{"report": "' + report_id + '", "owner": "alice"}'
+            ).encode("utf-8")
+            self._send(200, body, "application/json")
+            return
+        if role is not None:  # authenticated low-priv: the check throws
+            log.info("report %s errored for role=%r", report_id, role)
+            self._send(500, b'{"error": "internal"}', "application/json")
+            return
+        log.info("report %s denied (role=%r)", report_id, role)
+        self._send(403, b'{"error": "forbidden"}', "application/json")
+
     def _api_delay(self, payload: dict) -> None:
         """``POST /api/delay`` — the blind SQLi stand-in, JSON-API shaped.
 
@@ -363,6 +429,33 @@ class FixtureHandler(BaseHTTPRequestHandler):
             _time.sleep(min(float(match.group(1)), SLEEP_CEILING))
         log.info("api delay filter=%r", value[:64])
         self._send(200, b"{\"ok\": true}", "application/json")
+
+    def _api_exec(self, payload: dict) -> None:
+        """``/api/exec`` — the command-injection stand-in, shell=True on purpose.
+
+        The value is interpolated into ``echo <value>`` and executed by a real
+        shell, which is the vulnerability: a value like ``x; sleep 4`` runs the
+        delay command *after* the echo, so the response is slow by the amount the
+        payload asked for, while a benign value returns at once. The two
+        populations the timing differential compares, in one endpoint. A
+        ``TimeoutExpired`` (a hostile value asking for a longer delay than the
+        ceiling) is caught and answered fast rather than pinning the worker.
+        """
+        value = str(payload.get("host", ""))
+        try:
+            completed = subprocess.run(  # noqa: S602, S310 - the vulnerability
+                f"echo {value}",
+                shell=True,
+                capture_output=True,
+                timeout=EXEC_TIMEOUT,
+            )
+            output = completed.stdout.decode("utf-8", errors="replace")[:4096]
+        except subprocess.TimeoutExpired:
+            output = ""
+        log.info("api exec host=%r", value[:64])
+        self._send(
+            200, json.dumps({"output": output}).encode("utf-8"), "application/json"
+        )
 
     def _api_fetch(self, payload: dict) -> None:
         """``POST /api/fetch`` — the SSRF stand-in, JSON-API shaped.

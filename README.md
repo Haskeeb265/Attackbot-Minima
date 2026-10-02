@@ -146,6 +146,8 @@ carries an implementation-status section:
 | `main.py`, `config.py` | the scraper entry point and the single `.env` loader |
 | `run_recon.py` | runs all five recon pipelines and assembles the combined report |
 | `run_engine.py` | the vuln engine CLI: fixture / target / program profiles, `--from-graph`, `--graph-agent`, `--campaign`, `--replay` |
+| `service/ui/` | the operator UI — one local web app over the artifacts: program scope, recon logs, the surface graph, engine inputs, the realtime world-log tail, engine output, and a job launcher ([`service/ui/README.md`](service/ui/README.md)) |
+| `NOVELTY.md` | the north-star anchor: the engine's unseen/novel-bug capability — the measurement, the proof ladder, and the append-only proof log |
 | `service/vuln_engine/` | the vuln engine: kernel, techniques, transports, scheduler, policy (gate + eligibility), world (log/views), advisory LLM junctions (`llm/`), graph-derived seeding (`seed/`) |
 | `db/` | PostgreSQL schema, mapper, persistence, repos, Alembic migrations (per-asset eligibility + typed out-of-scope since `0004`) |
 | `service/scraper/` | HackerOne ingestion |
@@ -220,6 +222,9 @@ lives in [.env.example](.env.example)):
 ## Running
 
 ```bash
+# the operator UI: every panel above, at http://127.0.0.1:8787
+python -m service.ui.server
+
 # scraper: ingest HackerOne programs into PostgreSQL
 python main.py
 

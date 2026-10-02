@@ -282,8 +282,11 @@ def test_a_uniformly_slow_target_proposes_nothing(build_gate, clock) -> None:
     ).run()
     assert report.counts["findings"] == 0
     assert report.counts["candidates"] == 0
-    # It measured: two rounds of baseline plus every variant, twice.
-    assert report.counts["probes_run"] == grammar.SAMPLES_PER_POPULATION * (
+    # It measured: two rounds of baseline plus every variant, twice — its own
+    # probes, at least. A second timing technique (``command_injection``) now
+    # shares the declared ``delayed_response`` claim and adds its own
+    # populations, so the engine's total is a floor, not an equality.
+    assert report.counts["probes_run"] >= grammar.SAMPLES_PER_POPULATION * (
         1 + len(grammar.PAYLOAD_VARIANTS)
     )
 

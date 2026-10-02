@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "id": "fixture-session",
+  "target": {
+    "compose_service": "fixture_app",
+    "image": "",
+    "build": "./docker/fixture_app",
+    "host": "127.0.0.1",
+    "port": 8080,
+    "health_path": "/healthz"
+  },
+  "session": {
+    "cookies": ["session"],
+    "seeded_cookies": ["session=a1b2c3d4e5f6"],
+    "session_b_cookies": ["session=9f8e7d6c5b4a"],
+    "csrf": false
+  },
+  "declared_surfaces": [
+    {
+      "url": "http://127.0.0.1:8080/api/invoices/4821",
+      "param": "4821",
+      "where": "path",
+      "capability": "access_differs_by_session",
+      "label": "invoice object (owner read vs low-privilege read)"
+    },
+    {
+      "url": "http://127.0.0.1:8080/api/reports/4821",
+      "param": "4821",
+      "where": "path",
+      "capability": "access_differs_by_session",
+      "label": "report object (low-privilege read errors instead of denying)"
+    },
+    {
+      "url": "http://127.0.0.1:8080/api/invoices/99",
+      "param": "99",
+      "where": "path",
+      "capability": "public_param",
+      "label": "invoice object (numeric id)"
+    }
+  ],
+  "campaign_rounds": 6,
+  "ground_truth_coverage": "partial",
+  "notes": "The first case with a declared session boundary, so the engine's differential plan table can fire and the abductive loop can be scored. Session A is the seeded owner (session=a1b2c3d4e5f6), session B the seeded low-privilege identity (session=9f8e7d6c5b4a). Three objects: the invoice is the classic broken-authorization bug (both sessions read it), the report is the *surprise* (the low-privilege read returns 500 instead of denying) — the engine must retain that as an anomaly and settle none, never invent a finding — and invoices/99 is the same broken authorization on a surface whose declared capability is only public_param (no access_differs_by_session), so the deterministic plan table (and idor_differential) skip it: only a model-proposed object-read can cover it. The surface is labelled truthfully as an invoice object; an earlier version carried the role marker method_role=target, which is a marker for the state-change composition — with no victim surface that marker is inert and only misdirects the model toward an unexpressible claim shape, so it was removed. This is a fixture case, not a third-party held-back target: it measures the loop's contribution in a scored pass, not P4 on an unseen app."
+}

@@ -79,8 +79,11 @@ def test_the_real_technique_folders_are_discovered() -> None:
     registry = TechniqueRegistry.discover()
     # Phase 4 adds the DOM-lens technique; the stored lens completes the XSS
     # family; the authorization differential adds the first session-shaped
-    # technique. Alphabetical discovery order.
+    # technique. ``generic_differential`` is the plans-as-data spike: one
+    # technique, a plan table of differential classes. Alphabetical order.
     assert registry.names() == [
+        "command_injection",
+        "generic_differential",
         "idor_differential",
         "oob_fetch",
         "sqli_blind_time",
@@ -100,7 +103,8 @@ def test_the_manifest_table_is_what_a_report_embeds() -> None:
 
 def test_a_lookup_of_an_unknown_technique_says_what_is_known() -> None:
     with pytest.raises(
-        KeyError, match="known: idor_differential, oob_fetch, sqli_blind_time, xss_dom, xss_reflected, xss_stored"
+        KeyError,
+        match="known: command_injection, generic_differential, idor_differential, oob_fetch, sqli_blind_time, xss_dom, xss_reflected, xss_stored",
     ):
         TechniqueRegistry.discover().get("ssti")
 

@@ -70,8 +70,14 @@ def test_every_case_passes_the_schema_gate_and_the_loopback_guard() -> None:
     for path in case_dirs:
         case = load_case(path.name)
         check_loopback(case)
-        assert case["target"]["image"].startswith("sha256:") or "@sha256:" in case["target"]["image"], (
-            f"{path.name}: image must be digest-pinned"
+        # A case is reproducible two ways: a content-addressed remote image, or a
+        # declared in-repo build context (the fixture app). An unpinned remote
+        # image is neither, and is refused.
+        image = str(case["target"]["image"])
+        pinned = image.startswith("sha256:") or "@sha256:" in image
+        local_build = bool(case["target"].get("build"))
+        assert pinned or local_build, (
+            f"{path.name}: image must be digest-pinned or build from a declared context"
         )
 
 

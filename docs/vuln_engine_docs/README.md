@@ -401,7 +401,7 @@ cannot lie) → `llm/client.py` and the smallest junction → any technique fold
 | --- | --- |
 | `phase1_checklist.md` · `phase2_checklist.md` · `phase3_checklist.md` | per-phase build checklists with STATUS blocks, exit criteria and deliberate deviations |
 | `progress.md` | the running build log — dated record of what was built, proved and left open |
-| `target_assumptions_audit.md` | the audit asserting no technique reads a training target; re-run it when a technique gains a graph lookup |
+| `progress.md` § Target-assumptions audit | the audit asserting no technique reads a training target; re-run it when a technique gains a graph lookup |
 
 Producer side of the contract:
 `service/recon_pipeline/pipelines/graph_normalize/README.md`.

@@ -40,6 +40,8 @@ ROOT = Path(__file__).resolve().parent
 from service.recon_pipeline.platform import dispatch, escalation  # noqa: E402
 from service.recon_pipeline.platform.scope import ScopeEngine  # noqa: E402
 from service.recon_pipeline.platform.receipt import Receipt  # noqa: E402
+from service.vuln_engine.abduction.deterministic import abduce  # noqa: E402
+from service.vuln_engine.abduction.validator import Validator  # noqa: E402
 from service.vuln_engine.kernel.technique import (  # noqa: E402
     CAP_INFLUENCE_REMOTE_FETCH,
     EngagementSeed,
@@ -69,7 +71,9 @@ from service.vuln_engine.seed import (  # noqa: E402
 from service.vuln_engine.registry import TechniqueRegistry  # noqa: E402
 from service.vuln_engine.scheduler.campaign import Budget, Campaign, CampaignReport  # noqa: E402
 from service.vuln_engine.scheduler.driver import Engine, RunReport  # noqa: E402
+from service.vuln_engine.scheduler.pool import HypothesisPool  # noqa: E402
 from service.vuln_engine.scheduler.replay import replay  # noqa: E402
+from service.vuln_engine.world.holding_pen import HoldingPen  # noqa: E402
 from service.vuln_engine.world.log import WorldLog  # noqa: E402
 
 #: Where a run writes by default.  One directory per target, holding the log, the
@@ -380,6 +384,12 @@ def run(
     registry = TechniqueRegistry.discover(strict=False)
     _wire_grammars(advisory, registry)
     gate = PolicyGate(dispatcher, log=log, **effects)
+    # The abductive loop is on by default (PRD §6.5): the deterministic abducer
+    # is the control arm, the advisory's model channel attaches through it when a
+    # key is configured, and the pen persists beside the log so a held hypothesis
+    # survives the run. Expressible explanations are *run* by the driver's
+    # bounded abduced round; nothing they produce is a finding until the ordinary
+    # verifier proves it.
     engine = Engine(
         profile.seed,
         gate=gate,
@@ -388,6 +398,10 @@ def run(
         receipt=receipt,
         force=force,
         advisory=advisory,
+        abducer=abduce,
+        validator=Validator(),
+        pen=HoldingPen(output_dir / "holding_pen.jsonl"),
+        pool=HypothesisPool(),
     )
     report = engine.run()
     (output_dir / "report.json").write_text(
@@ -437,6 +451,9 @@ def campaign_run(
         advisory=advisory,
         force=force,
         widening=widening,
+        abducer=abduce,
+        validator=Validator(),
+        pen=HoldingPen(output_dir / "holding_pen.jsonl"),
     )
     return campaign.run(Budget(rounds=rounds))
 

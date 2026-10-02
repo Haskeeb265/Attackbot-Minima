@@ -51,6 +51,20 @@ EVENT_CANDIDATE_JUNCTION = "candidate.junction"
 EVENT_VERDICT = "verdict"
 EVENT_RECEIPT = "receipt"
 EVENT_NOTE = "note"
+#: A retained surprise (PRD §6.3/§6.4): the driver's third interpret outcome.
+#: A hypothesis carried an expectation, measurements came back clean (no
+#: transport error, no refusal), nothing matched a predicate, and the
+#: expectation was violated — a typed Deviation, advisory by definition:
+#: never evidence, never a finding. What the abducer (Phase 4) consumes.
+EVENT_ANOMALY_RETAINED = "anomaly.retained"
+#: An abducer explained a retained anomaly (PRD §6.13). The proposal is advisory
+#: until validated and, above all, until a probe proves it — never a finding.
+EVENT_ABDUCTION_PROPOSED = "abduction.proposed"
+#: The three-valued validator's verdict on a proposal (PRD §6.6): expressible,
+#: held, or invalid. Recorded so a run explains why an explanation was pursued.
+EVENT_ABDUCTION_VALIDATED = "abduction.validated"
+#: A hypothesis entered the holding pen — speakable, but no verifier yet.
+EVENT_HOLDING_PEN_ENTRY = "holding_pen.entry"
 EVENT_END = "run.end"
 
 
@@ -298,8 +312,12 @@ def write_summary(log: WorldLog, keys: Iterable[str] = ()) -> dict[str, Any]:
 
 
 __all__ = [
+    "EVENT_ABDUCTION_PROPOSED",
+    "EVENT_ABDUCTION_VALIDATED",
+    "EVENT_ANOMALY_RETAINED",
     "EVENT_BEGIN",
     "EVENT_CANDIDATE",
+    "EVENT_HOLDING_PEN_ENTRY",
     "EVENT_CANDIDATE_JUNCTION",
     "EVENT_END",
     "EVENT_EFFECT_REQUEST",

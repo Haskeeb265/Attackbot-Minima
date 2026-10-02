@@ -112,6 +112,17 @@ def _session_cookies(case: dict) -> list[str]:
     return cookies
 
 
+def _session_b_cookies(case: dict) -> list[str]:
+    """The declared second identity's cookies, verbatim.
+
+    Session A is the owner (``--cookie``); session B is the low-privilege
+    identity the differential techniques compare against
+    (``--session-b-cookie``). A case that declares none runs single-session,
+    which is the ordinary shape for a non-authorization case.
+    """
+    return [str(cookie) for cookie in case.get("session", {}).get("session_b_cookies", [])]
+
+
 def pass_id(tier: str) -> str:
     """The pass directory name: git SHA + tier, so a scorecard row is keyed."""
     try:
@@ -146,6 +157,8 @@ def run_case(case_id: str, *, tier: str, engine_args: list[str] | None = None) -
     ]
     for cookie in _session_cookies(case):
         command.extend(["--cookie", cookie])
+    for cookie in _session_b_cookies(case):
+        command.extend(["--session-b-cookie", cookie])
     for surface in case.get("declared_surfaces", []):
         fields = [
             f"url={surface['url']}",

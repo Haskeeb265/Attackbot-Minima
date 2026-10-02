@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Attackbot</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <span class="brand">ATTACKBOT</span>
+      <select id="engine-run-select" title="vuln engine run (world.jsonl ledger)"></select>
+      <select id="recon-target-select" title="recon target"></select>
+      <div class="live" id="live-indicator"><span class="dot"></span><span id="live-label">connecting</span></div>
+    </header>
+
+    <nav id="nav">
+      <button data-panel="program"><span class="navnum">1</span>Program</button>
+      <button data-panel="recon"><span class="navnum">2</span>Recon logs</button>
+      <button data-panel="graph"><span class="navnum">3</span>Attack surface</button>
+      <button data-panel="inputs"><span class="navnum">4</span>Engine inputs</button>
+      <button data-panel="engine"><span class="navnum">5</span>Engine log</button>
+      <button data-panel="output"><span class="navnum">6</span>Engine output</button>
+      <button data-panel="run"><span class="navnum">+</span>Run / jobs</button>
+    </nav>
+
+    <main>
+      <!-- 1. Program -->
+      <section class="panel" id="panel-program">
+        <div class="toolbar">
+          <select id="program-handle"></select>
+          <button class="btn" id="program-reload">Reload</button>
+        </div>
+        <div id="program-body" class="muted">Select a program…</div>
+      </section>
+
+      <!-- 2. Recon logs -->
+      <section class="panel" id="panel-recon">
+        <div class="toolbar">
+          <button class="btn" id="recon-refresh">Refresh</button>
+          <label class="muted small"><input type="checkbox" id="recon-autorefresh"> poll while a recon job runs</label>
+          <span id="recon-status" class="muted small"></span>
+        </div>
+        <div id="recon-logs" class="muted">No logs loaded.</div>
+      </section>
+
+      <!-- 3. Attack surface graph -->
+      <section class="panel" id="panel-graph">
+        <div class="toolbar">
+          <input type="text" id="graph-query" placeholder="filter identity…">
+          <select id="graph-kind">
+            <option value="">all kinds</option>
+          </select>
+          <input type="number" id="graph-cap" value="120" min="10" max="500" title="max nodes drawn">
+          <button class="btn" id="graph-reload">Reload</button>
+          <span id="graph-status" class="muted small"></span>
+        </div>
+        <div id="graph-summary"></div>
+        <div id="graph-wrap">
+          <svg id="graph-svg"></svg>
+          <div id="node-detail"></div>
+        </div>
+        <div class="legend" id="graph-legend"></div>
+      </section>
+
+      <!-- 4. Engine inputs -->
+      <section class="panel" id="panel-inputs">
+        <div id="inputs-body" class="muted">Select an engine run…</div>
+      </section>
+
+      <!-- 5. Engine log (realtime) -->
+      <section class="panel" id="panel-engine">
+        <div class="toolbar">
+          <button class="btn" id="engine-follow">Follow: off</button>
+          <label class="muted small"><input type="checkbox" id="engine-filter-verdicts"> verdicts & candidates only</label>
+          <label class="muted small"><input type="checkbox" id="engine-filter-gate"> gate decisions only</label>
+          <span id="engine-status" class="muted small"></span>
+        </div>
+        <div id="engine-overview" class="statgrid"></div>
+        <div id="engine-log" class="logbox" style="max-height: calc(100vh - 320px);"></div>
+      </section>
+
+      <!-- 6. Engine output -->
+      <section class="panel" id="panel-output">
+        <div id="output-body" class="muted">Select an engine run…</div>
+      </section>
+
+      <!-- Run / jobs -->
+      <section class="panel" id="panel-run">
+        <h2>Launch a job</h2>
+        <div class="card">
+          <h3>Recon</h3>
+          <div class="formrow">
+            <label>target</label>
+            <input type="text" id="run-recon-target" placeholder="example.com">
+          </div>
+          <div class="formrow">
+            <label>options</label>
+            <label class="muted small"><input type="checkbox" id="run-recon-converged"> --until-converged</label>
+            <label class="muted small"><input type="checkbox" id="run-recon-skip-sub"> skip subdomain</label>
+            <label class="muted small"><input type="checkbox" id="run-recon-skip-ports"> skip ports</label>
+            <label class="muted small"><input type="checkbox" id="run-recon-skip-url"> skip url</label>
+          </div>
+          <button class="btn primary" id="run-recon-btn">Run recon</button>
+        </div>
+        <div class="card">
+          <h3>Vuln engine</h3>
+          <div class="formrow">
+            <label>target</label>
+            <input type="text" id="run-engine-target" placeholder="example.com (empty = fixture)">
+          </div>
+          <div class="formrow">
+            <label>surfaces (repeat)</label>
+            <input type="text" id="run-engine-surface" placeholder="url=https://…;param=q;capability=public_param  (one per line)">
+          </div>
+          <div class="formrow">
+            <label>cookie A</label>
+            <input type="text" id="run-engine-cookie" placeholder="NAME=VALUE">
+          </div>
+          <div class="formrow">
+            <label>session B cookie</label>
+            <input type="text" id="run-engine-cookie-b" placeholder="NAME=VALUE (idor_differential)">
+          </div>
+          <div class="formrow">
+            <label>campaign rounds</label>
+            <input type="number" id="run-engine-campaign" value="0" min="0" max="50">
+            <label>host budget</label>
+            <input type="number" id="run-engine-budget" value="0" min="0" max="100000">
+          </div>
+          <div class="formrow">
+            <label>options</label>
+            <label class="muted small"><input type="checkbox" id="run-engine-from-graph"> --from-graph</label>
+            <label class="muted small"><input type="checkbox" id="run-engine-llm"> --llm-draft</label>
+            <label class="muted small"><input type="checkbox" id="run-engine-hyp"> --hypothesize-from-recon</label>
+            <label class="muted small"><input type="checkbox" id="run-engine-force"> --force</label>
+          </div>
+          <button class="btn primary" id="run-engine-btn">Run engine</button>
+          <button class="btn" id="run-fixture-btn">Run fixture</button>
+          <button class="btn primary" id="run-demo-btn" title="Seed the demo program, run the fixture engine end to end, stream the log live">Run demo flow</button>
+        </div>
+
+        <h2>Jobs</h2>
+        <div id="jobs-body" class="muted">No jobs this session.</div>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

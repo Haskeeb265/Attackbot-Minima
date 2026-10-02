@@ -28,7 +28,7 @@ What the driver owns, and what it deliberately leaves alone:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -41,6 +41,7 @@ from ..kernel.observation import (
     OBS_SCRIPT_EXECUTION,
     Observation,
 )
+from ..kernel.prediction import Deviation, evaluate
 from ..kernel.technique import (
     KIND_BROWSER,
     KIND_HTTP,
@@ -55,12 +56,17 @@ from ..kernel.verdict import Candidate, Verdict
 from ..policy.gate import EffectRequest, PolicyGate
 from ..registry import Registration, TechniqueRegistry
 from ..verification import VerificationLayer
+from ..world import novelty
 from ..world import views
 from ..world.log import (
+    EVENT_ABDUCTION_PROPOSED,
+    EVENT_ABDUCTION_VALIDATED,
+    EVENT_ANOMALY_RETAINED,
     EVENT_BEGIN,
     EVENT_CANDIDATE,
     EVENT_CANDIDATE_JUNCTION,
     EVENT_END,
+    EVENT_HOLDING_PEN_ENTRY,
     EVENT_NOTE,
     EVENT_RECEIPT,
     EVENT_VERDICT,
@@ -69,7 +75,12 @@ from ..world.log import (
 from ..world.observe import browser_observations, http_observations
 
 if TYPE_CHECKING:
+    from ..abduction.proposal import Proposal
+    from ..abduction.validator import Validator
+    from ..kernel.anomaly import Anomaly
     from ..llm.wiring import Advisory
+    from ..world.holding_pen import HoldingPen
+    from .pool import HypothesisPool
 
 #: The driver's bound on reflected rounds per hypothesis (junction 5). Duplicated
 #: from ``llm/reflect.py``'s ``MAX_REFLECT_ROUNDS`` deliberately — the driver
@@ -148,6 +159,9 @@ class RunReport:
     #: Phase 3: the model's health and say, as plain data. ``{}`` when no
     #: advisory was wired (which is the ordinary no-key run).
     advisory: dict = field(default_factory=dict)
+    #: Phase 9: ``{candidate_id: {level, name, label, reason}}`` for every
+    #: proven finding, computed from the log's own provenance (world/novelty.py).
+    novelty: dict = field(default_factory=dict)
     log_path: str = ""
 
     def to_dict(self) -> dict:
@@ -166,6 +180,7 @@ class RunReport:
             "capabilities": self.capabilities,
             "problems": self.problems,
             "advisory": self.advisory,
+            "novelty": self.novelty,
             "log": self.log_path,
         }
 
@@ -185,6 +200,10 @@ class Engine:
         clock: Callable[[], float] | None = None,
         force: bool = False,
         advisory: Advisory | None = None,
+        abducer: Callable[["Anomaly", Sequence[Surface]], list["Proposal"]] | None = None,
+        validator: "Validator | None" = None,
+        pen: "HoldingPen | None" = None,
+        pool: "HypothesisPool | None" = None,
     ) -> None:
         self.seed = seed
         self.gate = gate
@@ -202,6 +221,18 @@ class Engine:
         #: is identical without one; an advisory can only add a synthesized
         #: probe spec through the same gate every other probe passes.
         self.advisory = advisory
+        #: Phase 4's abductive loop, or ``None``. With no abducer the engine is
+        #: byte-for-byte the one that retains anomalies and stops there; with one,
+        #: a retained surprise is explained, validated, and either logged for the
+        #: pool (Phase 5) or held in the pen. Nothing the abducer produces is ever
+        #: a finding: it must earn one through the ordinary gate and verifier.
+        self.abducer = abducer
+        self.validator = validator
+        self.pen = pen
+        #: The Phase 5 hypothesis pool, or ``None``. Expressible abductions are
+        #: added here; unprovable ones go to the pen. Empty pool = the same
+        #: behavior as no pool at all.
+        self.pool = pool
 
     # ------------------------------------------------------------------ #
     # the run
@@ -244,6 +275,17 @@ class Engine:
             for surface in registration.technique.surfaces(self.seed):
                 self._run_surface(registration, surface, counts)
 
+        # A3's second channel (PRD §6.5, implementation 3): properties proposed
+        # from static context, with no anomaly to trigger them. Pools the
+        # expressible ones so the abduced round runs them exactly like an
+        # anomaly-driven explanation. No advisory/key = a no-op.
+        self._propose_properties(counts)
+        # The loop closes (PRD §6.5): an expressible explanation of a retained
+        # surprise becomes a real experiment. Runs once, after the ordinary
+        # pass, through the ordinary path — same gate, same interpret, same
+        # independent verifier. A surprise here is not re-abduced.
+        self._run_abduced(counts)
+
         finished = self.clock()
         self.log.append(EVENT_END, at=finished, counts=dict(counts))
 
@@ -259,6 +301,7 @@ class Engine:
             gate=audit,
             receipts=views.receipts_by_arm(this_run),
             findings=[finding.to_dict() for finding in found],
+            novelty=novelty.levels_for_log(this_run),
             leads=[str(row.get("id", "")) for row in views.leads(this_run)],
             report_lines=views.report_lines(this_run),
             capabilities=self.gate.capabilities(),
@@ -278,7 +321,12 @@ class Engine:
         for hypothesis in technique.hypotheses(surface):
             counts["arms"] += 1
             counts["hypotheses"] += 1
-            arm = f"{registration.name}@{surface.key}"
+            # The arm names the *hypothesis's* surface, not the loop's: an
+            # adapter may emit seed-level plans from one call (generic_differential
+            # does), and labelling a report-surface hypothesis with the invoice
+            # surface's arm would file the wrong receipt and misattribute the
+            # anomaly the reports surface produced.
+            arm = f"{registration.name}@{hypothesis.surface.key}"
             self.log.append(
                 EVENT_NOTE,
                 at=self.clock(),
@@ -290,7 +338,29 @@ class Engine:
                 counts["skipped_conclusive"] += 1
                 continue
             observations, failures, executed = self._run_probes(registration, hypothesis, counts)
+            # The third interpret outcome (PRD §6.3): before reading the
+            # technique's candidates, run the hypothesis's own expectation
+            # against what was measured. Measurements that matched nothing and
+            # violated a prediction are retained anomalies — advisory data for
+            # the abducer, never evidence, never a finding. The technique's
+            # candidates take priority when they exist: an explained surprise
+            # is not an unexplained one.
+            deviations: list[Deviation] = evaluate(hypothesis.expectation, observations)
             candidates = list(technique.interpret(hypothesis, observations))
+            if deviations and not candidates and observations:
+                counts["anomalies_retained"] = counts.get("anomalies_retained", 0) + 1
+                self.log.append(
+                    EVENT_ANOMALY_RETAINED,
+                    at=self.clock(),
+                    arm=arm,
+                    hypothesis_id=hypothesis.id,
+                    technique=registration.name,
+                    deviations=[deviation.to_dict() for deviation in deviations],
+                )
+                # The loop closes (PRD §6.5): explain the surprise with known
+                # predicates, route the explanation three-valued (PRD §6.6).
+                # Optional — absent an abducer this is the one-pass engine.
+                self._abduce(registration, arm, deviations, counts)
             # Junction 5 (reflect): when the pass measured something but the
             # deterministic interpretation came back empty, the model may
             # direct a bounded re-ask of a probe this pass already ran — a
@@ -379,6 +449,247 @@ class Engine:
                     summary[field_name] = item.payload[field_name]
             summaries.append(summary)
         return summaries
+
+    def _abduce(
+        self,
+        registration: Registration,
+        arm: str,
+        deviations: list[Deviation],
+        counts: dict[str, int],
+    ) -> None:
+        """Explain a just-retained surprise; route the explanation three-valued.
+
+        Advisory throughout: a proposal is logged and validated, an
+        unprovable one is held, and an expressible one is logged for the
+        hypothesis pool. None of it can become a finding without a probe and
+        an independent verifier.
+        """
+        from ..abduction.validator import Validator
+        from ..kernel.anomaly import Anomaly, anomaly_key
+
+        model = self.advisory is not None and self.advisory.available
+        if self.abducer is None and not model:
+            return
+        validator = self.validator or Validator()
+        for deviation in deviations:
+            deviation_dict = deviation.to_dict()
+            key = anomaly_key(registration.name, arm, deviation_dict)
+            anomaly = Anomaly(
+                key=key,
+                technique=registration.name,
+                arm=arm,
+                deviation=deviation_dict,
+                at=self.clock(),
+            )
+            for proposal in self._proposals_for(anomaly, arm, model):
+                self._consider(proposal, arm=arm, anomaly=key, counts=counts, validator=validator)
+
+    def _proposals_for(self, anomaly: "Anomaly", arm: str, model: bool) -> list["Proposal"]:
+        """Every explanation for one anomaly: deterministic first, model second.
+
+        The deterministic abducer is the control arm; the LLM channel (A3) is
+        the primary novelty source. Both emit the same ``Proposal`` shape over
+        the same plan table, so everything downstream — validation, the pool,
+        the pen, the abduced round — cannot tell them apart, which is exactly
+        the point: a model-proposed claim is still an experiment the verifier
+        has seen.
+        """
+        proposals: list[Proposal] = []
+        if self.abducer is not None:
+            proposals.extend(self.abducer(anomaly, self.seed.surfaces))
+        if model:
+            assert self.advisory is not None
+            anomaly_dict = {
+                "technique": anomaly.technique,
+                "arm": anomaly.arm,
+                **dict(anomaly.deviation),
+            }
+            result = self.advisory.abduced(
+                anomaly_dict,
+                self.seed.surfaces,
+                log_handle=self.log,
+                now=self.clock(),
+            )
+            proposals.extend(result.proposals)
+        return proposals
+
+    def _propose_properties(self, counts: dict[str, int]) -> None:
+        """A3's no-anomaly channel: ask the model for properties, unasked.
+
+        Static context only — the declared surfaces, the claim ontology. The
+        junction's contract is the same as the abduction channel's: it may point
+        at a declared surface with a claim shape the engine speaks, and nothing
+        else. Every proposal goes through the same three-valued validator, so an
+        expressible property is pooled for the abduced round to *run* and a
+        model-proposed L3/L4 experiment reaches a finding only through the
+        ordinary verifier. Degraded (no key, a refused answer) is a no-op, so
+        the engine is byte-for-byte the one that never asked.
+        """
+        if self.advisory is None or not self.advisory.available:
+            return
+        from ..abduction.validator import Validator
+
+        result = self.advisory.proposed_properties(
+            self.seed.surfaces, log_handle=self.log, now=self.clock()
+        )
+        validator = self.validator or Validator()
+        for proposal in result.proposals:
+            counts["properties_proposed"] = counts.get("properties_proposed", 0) + 1
+            self._consider(
+                proposal,
+                arm="property",
+                anomaly="",
+                counts=counts,
+                validator=validator,
+                source="property",
+            )
+
+    def _consider(
+        self,
+        proposal: "Proposal",
+        *,
+        arm: str,
+        anomaly: str,
+        counts: dict[str, int],
+        validator: "Validator",
+        source: str = "abduction",
+    ) -> None:
+        """Log one explanation, route it three-valued, and shelve it.
+
+        Nothing here can become a finding: an expressible proposal enters the
+        pool (to be run by :meth:`_run_abduced`), a held one enters the pen,
+        and an invalid one is only on the record. The validator's verdict is
+        the whole influence. ``source`` records which channel asked
+        (``abduction`` for an anomaly-driven explanation, ``property`` for
+        A3's static-context proposal); the routing is identical.
+        """
+        counts["abductions"] = counts.get("abductions", 0) + 1
+        self.log.append(
+            EVENT_ABDUCTION_PROPOSED,
+            at=self.clock(),
+            arm=arm,
+            anomaly=anomaly,
+            source=source,
+            proposal=proposal.to_dict(),
+        )
+        validation = validator.validate(proposal)
+        self.log.append(
+            EVENT_ABDUCTION_VALIDATED,
+            at=self.clock(),
+            arm=arm,
+            proposal_id=proposal.id,
+            verdict=validation.verdict,
+            reason=validation.reason,
+        )
+        if validation.expressible and self.pool is not None:
+            self.pool.add(proposal, arm=arm, verdict=validation.verdict, source=source)
+        if validation.holds and self.pen is not None:
+            self.pen.hold(
+                key=proposal.id,
+                hypothesis=proposal.to_dict(),
+                claim_shape=proposal.claim_shape,
+                needs_verifier=proposal.needs_verifier,
+                at=self.clock(),
+            )
+            counts["held"] = counts.get("held", 0) + 1
+            self.log.append(
+                EVENT_HOLDING_PEN_ENTRY,
+                at=self.clock(),
+                arm=arm,
+                proposal_id=proposal.id,
+                needs_verifier=proposal.needs_verifier,
+            )
+
+    def _run_abduced(self, counts: dict[str, int]) -> None:
+        """Close the loop: an expressible abduction becomes a real experiment.
+
+        The flagged loose end, wired. Every expressible proposal the abducers
+        produced is materialized — through the *technique's own* hook, so the
+        driver never looks inside a plan — into a hypothesis and run through the
+        ordinary path: the same probe grammar, the same gate, the same
+        interpretation, the same independent verifier. A candidate that survives
+        verification is a finding, no differently from one the first pass found;
+        a candidate that does not is a lead. A surprise produced here is *not*
+        re-abduced: the round is deliberately bounded to one extra pass, so the
+        loop cannot spin.
+
+        Skipped by the receipts ledger, like any other arm: an explanation whose
+        experiment was already settled conclusively is not paid for twice. The
+        abduced arm is keyed by the plan id, not the surface — a model that
+        points at a surface the first pass already touched is asking a *different
+        experiment* (`object_read:` vs `method_confusion:`), and the ledger must
+        be able to tell them apart.
+        """
+        if self.pool is None:
+            return
+        from ..abduction.proposal import Proposal
+        from ..kernel.plan import plan_digest
+
+        # The ordinary pass's experiments, by content digest. A *property* that
+        # merely re-proposes one of them is skipped: the ordinary pass already
+        # ran it (and produced whatever it produced), so re-running would spend a
+        # probe and report the same bug twice — once by the plan table, once by
+        # the model. An anomaly-driven abduction is exempt: a surprise is worth
+        # re-measuring.
+        ordinary_digests = {
+            str((row.get("hypothesis") or {}).get("plan_digest", ""))
+            for row in self.log.events("note")
+            if row.get("stage") == "hypothesis"
+        }
+        seen: set[str] = set()
+        for entry in self.pool.expressible():
+            registration = None
+            try:
+                registration = self.registry.get(entry.technique)
+            except KeyError:
+                registration = None
+            materialize = (
+                getattr(registration.technique, "hypothesis_for_proposal", None)
+                if registration is not None
+                else None
+            )
+            if registration is None or materialize is None:
+                counts["abductions_unrunnable"] = counts.get("abductions_unrunnable", 0) + 1
+                continue
+            try:
+                proposal = Proposal.from_dict(entry.proposal)
+            except ValueError:
+                counts["abductions_unrunnable"] = counts.get("abductions_unrunnable", 0) + 1
+                continue
+            if entry.source == "property":
+                digest = plan_digest(entry.proposal.get("plan") or {})
+                if digest in ordinary_digests:
+                    counts["abductions_redundant"] = counts.get("abductions_redundant", 0) + 1
+                    continue
+            hypothesis = materialize(proposal)
+            if hypothesis is None:
+                counts["abductions_unrunnable"] = counts.get("abductions_unrunnable", 0) + 1
+                continue
+            plan = entry.proposal.get("plan")
+            plan_id = str(plan.get("plan_id")) if isinstance(plan, dict) else ""
+            arm = f"{registration.name}@{plan_id or hypothesis.surface.key}"
+            if arm in seen:
+                continue
+            seen.add(arm)
+            self.log.append(
+                EVENT_NOTE,
+                at=self.clock(),
+                stage="hypothesis.abduced",
+                arm=arm,
+                proposal_id=str(entry.proposal.get("id", "")),
+                witness=proposal.witness,
+                rule=proposal.rule,
+                claim_shape=proposal.claim_shape,
+                hypothesis=hypothesis.to_dict(),
+            )
+            if self._already_settled(arm, registration.name):
+                counts["skipped_conclusive"] += 1
+                continue
+            counts["abductions_run"] = counts.get("abductions_run", 0) + 1
+            observations, failures, executed = self._run_probes(registration, hypothesis, counts)
+            candidates = list(registration.technique.interpret(hypothesis, observations))
+            counts["candidates"] += len(candidates)
+            self._judge(arm, registration.name, candidates, failures, counts, executed=executed)
 
     def _run_probes(
         self, registration: Registration, hypothesis: Hypothesis, counts: dict[str, int]

@@ -250,6 +250,9 @@ def test_technique_folders_declare_the_four_contract_modules() -> None:
     for folder in sorted(path for path in TECHNIQUES.iterdir() if path.is_dir()):
         if folder.name.startswith("_"):
             continue
+        # ``plan.py`` is the generic_differential spike's fifth module: its
+        # hypotheses are plan rows, and the plan table is data that lives in
+        # the folder like every other contract half.
         expected = {"manifest.py", "hypothesis.py", "probes.py", "interpret.py", "__init__.py"}
         present = {path.name for path in folder.glob("*.py")}
         assert expected <= present, f"{folder.name} is missing {expected - present}"

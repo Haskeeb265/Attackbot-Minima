@@ -18,8 +18,8 @@ not add a conclusion.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 
 from ..kernel.technique import (
     KIND_HTTP,
@@ -31,14 +31,18 @@ from ..kernel.technique import (
     ProbeSpec,
     Surface,
 )
+from ..abduction.deterministic import proposal_for as abduction_proposal
+from ..abduction.proposal import Proposal
 from ..techniques.common import with_parameter
-from . import graph_nav, hypothesize, reflect, synthesize
+from . import abduce, graph_nav, hypothesize, reflect, synthesize
 from .client import LLMClient
 
 NAME = "synthesize"
 HYPOTHESIZE_NAME = "hypothesize"
 REFLECT_NAME = "reflect"
 GRAPH_NAV_NAME = "graph.navigate"
+ABDUCE_NAME = "abduce"
+PROPERTY_NAME = "propose.properties"
 
 
 @dataclass(frozen=True)
@@ -461,11 +465,159 @@ class GraphNavigator:
         )
 
 
+# --------------------------------------------------------------------------- #
+# junction 7 — abduce: explain a retained surprise (A3's primary source)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class AbductionResult:
+    """One abduction (or property) call's outcome, as the loop needs it."""
+
+    #: The proposals the model's validated answer turned into, plan attached.
+    proposals: tuple[Proposal, ...] = ()
+    #: ``live`` | ``cached`` | ``degraded``.
+    source: str = "degraded"
+    reason: str = ""
+
+    @property
+    def proposed(self) -> int:
+        return len(self.proposals)
+
+    def to_dict(self) -> dict:
+        return {
+            "proposals": [proposal.to_dict() for proposal in self.proposals],
+            "source": self.source,
+            "reason": self.reason,
+        }
+
+
+class AbductionJunction:
+    """Ask the model to explain a typed surprise, or to propose a property.
+
+    Both channels go through the same shape: a bounded JSON answer naming a
+    declared surface and a claim shape the ontology offers. The junction turns
+    each validated row into a :class:`~...abduction.proposal.Proposal` over a
+    real plan-table row; the three-valued validator downstream decides whether
+    any verifier can prove it. Degraded (no key, refused answer, an invented
+    surface) is an empty result — the deterministic abducer's control arm is
+    unaffected.
+    """
+
+    def __init__(self, client: LLMClient) -> None:
+        self.client = client
+
+    @property
+    def available(self) -> bool:
+        return self.client.available
+
+    def explain(
+        self,
+        anomaly: dict,
+        surfaces: Sequence[Surface],
+        *,
+        memory: dict | None = None,
+        world=None,
+        now: float = 0.0,
+    ) -> AbductionResult:
+        """Explain one retained anomaly, or return nothing (degraded)."""
+        if not self.client.available:
+            return AbductionResult(source="degraded", reason=self.client.health.reason)
+        known_keys = {surface.key for surface in surfaces}
+        input = abduce.build_abduce_input(anomaly, surfaces, memory=memory)
+        prompt, system = abduce.build_abduce_prompt(input)
+        opinion = self.client.ask(
+            junction=ABDUCE_NAME,
+            input=input,
+            prompt=prompt,
+            system=system,
+            validate=abduce.validate_answer("hypotheses", abduce.MAX_ABDUCED, known_keys),
+            world=world,
+            now=now,
+        )
+        if not opinion.validated:
+            return AbductionResult(source=opinion.source, reason=opinion.reason)
+        rows = abduce.extract(
+            opinion.answer, list_name="hypotheses", cap=abduce.MAX_ABDUCED, known_surface_keys=known_keys
+        )
+        return AbductionResult(
+            proposals=tuple(_proposals_from(rows, surfaces, witness=str(anomaly.get("arm", "")))),
+            source=opinion.source,
+            reason=opinion.validation,
+        )
+
+    def propose_properties(
+        self,
+        surfaces: Sequence[Surface],
+        *,
+        world=None,
+        now: float = 0.0,
+    ) -> AbductionResult:
+        """A3's no-anomaly channel: properties from static context alone."""
+        if not self.client.available:
+            return AbductionResult(source="degraded", reason=self.client.health.reason)
+        known_keys = {surface.key for surface in surfaces}
+        input = abduce.build_property_input(surfaces)
+        prompt, system = abduce.build_property_prompt(input)
+        opinion = self.client.ask(
+            junction=PROPERTY_NAME,
+            input=input,
+            prompt=prompt,
+            system=system,
+            validate=abduce.validate_answer("properties", abduce.MAX_PROPERTIES, known_keys),
+            world=world,
+            now=now,
+        )
+        if not opinion.validated:
+            return AbductionResult(source=opinion.source, reason=opinion.reason)
+        rows = abduce.extract(
+            opinion.answer, list_name="properties", cap=abduce.MAX_PROPERTIES, known_surface_keys=known_keys
+        )
+        # A property has no anomaly to witness it, so its witness names the
+        # property itself (surface + plan) — a constant witness would let the
+        # pool collapse several distinct properties into one entry, and only the
+        # first would ever run.
+        proposals = tuple(
+            replace(proposal, witness=f"property:{proposal.plan.get('plan_id', proposal.id)}")
+            for proposal in _proposals_from(rows, surfaces, witness="property")
+        )
+        return AbductionResult(
+            proposals=proposals,
+            source=opinion.source,
+            reason=opinion.validation,
+        )
+
+
+def _proposals_from(rows: list[dict], surfaces: Sequence[Surface], *, witness: str) -> list[Proposal]:
+    """Turn validated rows into proposals over real plan rows, in order."""
+    by_key = {surface.key: surface for surface in surfaces}
+    out: list[Proposal] = []
+    for row in rows:
+        surface = by_key.get(str(row.get("surface_key", "")))
+        if surface is None:
+            continue
+        proposal = abduction_proposal(
+            surface=surface,
+            surfaces=surfaces,
+            claim_shape=str(row.get("claim_shape", "")),
+            witness=witness,
+            vuln_class=str(row.get("vuln_class", "")),
+            summary=str(row.get("summary", "")),
+        )
+        if proposal is not None:
+            out.append(proposal)
+    return out
+
+
 __all__ = [
+    "ABDUCE_NAME",
     "GRAPH_NAV_NAME",
     "NAME",
     "HYPOTHESIZE_NAME",
+    "PROPERTY_NAME",
     "REFLECT_NAME",
+    "AbductionJunction",
+    "AbductionResult",
     "GraphNavigation",
     "GraphNavigator",
     "HypothesisJunction",

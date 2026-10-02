@@ -34,6 +34,18 @@ from ..kernel.technique import EngagementSeed, Surface
 REWARD_FOUND = 1.0
 REWARD_NONE = 0.0
 
+#: Novelty reward, bounded by construction (PRD §6.8, A2). A novelty payout can
+#: never outrank a conclusive ``found`` at equal throws: the total the term can
+#: add to an arm is strictly below :data:`REWARD_FOUND` — exploration re-orders
+#: ties, a measured answer still wins. The two constants below are the whole
+#: mechanism; there is nothing to tune, which is the point.
+NOVELTY_REWARD_CAP = 0.9
+#: What the first entry into a fresh cell pays.
+NOVELTY_CELL_REWARD = 0.5
+#: Each further entry multiplies that cell's payout — re-entering counted
+#: territory pays ≈ 0, so a cheap abducer cannot farm the term.
+NOVELTY_CELL_DECAY = 0.5
+
 #: Exploration weight. §7.2's value; deliberately the only knob, and one the
 #: replay can freeze per campaign.
 DEFAULT_EXPLORATION = 1.4
@@ -59,6 +71,9 @@ class Arm:
     prior: float = 0.0
     #: Consecutive conclusive ``none`` outcomes, most recent last.
     none_streak: int = 0
+    #: The novelty term (A2): bounded below :data:`REWARD_FOUND`, receipts-based
+    #: and cell-decaying. Zero unless something was actually retained here.
+    novelty: float = 0.0
 
     def ucb(self, total_throws: int, c: float = DEFAULT_EXPLORATION) -> float:
         """Optimistic estimate. Pure: same inputs, same number, always.
@@ -81,7 +96,7 @@ class Arm:
         if self.throws == 0 and self.none_streak == 0:
             return float("inf")  # an untried arm always wins once
         throws = max(self.throws, 1)
-        mean = (self.rewards + self.prior) / throws
+        mean = (self.rewards + self.prior + self.novelty) / throws
         optimism = c * math.sqrt(math.log(max(total_throws, 1)) / throws)
         if self.none_streak >= NONE_STREAK_DEMOTION:
             optimism *= 0.5
@@ -100,6 +115,7 @@ class Arm:
             "throws": self.throws,
             "rewards": round(self.rewards, 3),
             "prior": round(self.prior, 3),
+            "novelty": round(self.novelty, 3),
             "none_streak": self.none_streak,
         }
 
@@ -167,14 +183,40 @@ def pick(
             reason="untried: an untried arm always wins once (UCB optimism)",
         )
     advisory = f" + advisory prior {best.prior:.2g}" if best.prior else ""
+    novelty = f" + novelty {best.novelty:.2g}" if best.novelty else ""
     return Pick(
         arm=best,
         score=best_score,
         reason=(
-            f"optimistic bound {best.ucb(total, c):.3g}{advisory} ÷ noise cost "
+            f"optimistic bound {best.ucb(total, c):.3g}{advisory}{novelty} ÷ noise cost "
             f"{_cost(best, noise):.3g} = {best_score:.3g}"
         ),
     )
+
+
+def cell_novelty(times_entered: int) -> float:
+    """The payout for a cell entered *times_entered* times (A2, cell-decaying).
+
+    Zero before the first entry, the full cell reward on the first, and a
+    geometric decay afterwards: the tenth visit to counted territory pays
+    ≈ 0.0. Pure arithmetic — no clock, no ledger read.
+    """
+    if times_entered <= 0:
+        return 0.0
+    return NOVELTY_CELL_REWARD * (NOVELTY_CELL_DECAY ** (times_entered - 1))
+
+
+def novelty_reward(cells: Mapping[str, int]) -> float:
+    """One arm's novelty payout from its entered cells, capped below ``found``.
+
+    *cells* maps a derived cell key (see ``kernel.anomaly.anomaly_key``, which
+    is surface-scoped and predicate-family-shaped) to how many times that cell
+    has been entered. The sum is capped at :data:`NOVELTY_REWARD_CAP`, which is
+    strictly below :data:`REWARD_FOUND` — no pile of "new territory" can add up
+    to a measured answer.
+    """
+    total = sum(cell_novelty(count) for count in cells.values())
+    return min(total, NOVELTY_REWARD_CAP)
 
 
 def _cost(arm: Arm, noise: Mapping[str, NoiseProfile | None] | None) -> float:
@@ -187,6 +229,7 @@ def arms_from_receipts(
     receipts_by_arm: Mapping[str, Mapping[str, int]],
     *,
     priors: Mapping[str, float] | None = None,
+    novelty: Mapping[str, float] | None = None,
 ) -> list[Arm]:
     """Build the arm set from the ledger and the *declared* eligible surfaces.
 
@@ -209,6 +252,7 @@ def arms_from_receipts(
     exactly Phase 2's.
     """
     priors_map = dict(priors or {})
+    novelty_map = dict(novelty or {})
     arms: list[Arm] = []
     seen: set[str] = set()
     for technique, surface_keys in eligible.items():
@@ -220,14 +264,20 @@ def arms_from_receipts(
             outcomes = receipts_by_arm.get(arm_name, {})
             found = int(outcomes.get("found", 0))
             none = int(outcomes.get("none", 0))
+            throws = found + none
+            # A2, receipts-based: novelty is credited only to an arm that
+            # actually ran — never for proposed-but-unexecuted territory, so an
+            # arm cannot farm the term by emitting cheap explanations.
+            reward = novelty_map.get(arm_name, 0.0) if throws > 0 else 0.0
             arms.append(
                 Arm(
                     technique=technique,
                     surface=arm_name,
-                    throws=found + none,
+                    throws=throws,
                     rewards=found * REWARD_FOUND,
                     none_streak=none,
                     prior=priors_map.get(arm_name, 0.0),
+                    novelty=reward,
                 )
             )
     return arms
@@ -236,10 +286,15 @@ def arms_from_receipts(
 __all__ = [
     "DEFAULT_EXPLORATION",
     "NONE_STREAK_DEMOTION",
+    "NOVELTY_CELL_DECAY",
+    "NOVELTY_CELL_REWARD",
+    "NOVELTY_REWARD_CAP",
     "REWARD_FOUND",
     "REWARD_NONE",
     "Arm",
     "Pick",
     "arms_from_receipts",
+    "cell_novelty",
+    "novelty_reward",
     "pick",
 ]

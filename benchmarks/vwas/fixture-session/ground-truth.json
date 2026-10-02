@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "case_id": "fixture-session",
+  "vulns": [
+    {
+      "id": "fixture-session/invoices/4821",
+      "vuln_class": "object-access",
+      "surface": {"path": "/api/invoices/4821", "param": "4821", "in": "path"},
+      "tier": "T1",
+      "expected_evidence": "differential",
+      "reachable_by_declaration": true,
+      "source": "reproduced by hand: the invoice endpoint resolves an authenticated session and never asks whether its role may read the object, so both seeded identities (admin, user) read it. Proven by the flipped two-session re-measure at grade differential."
+    },
+    {
+      "id": "fixture-session/invoices-99/99",
+      "vuln_class": "object-access",
+      "surface": {"path": "/api/invoices/99", "param": "99", "in": "path"},
+      "tier": "T1",
+      "expected_evidence": "differential",
+      "reachable_by_declaration": true,
+      "source": "reproduced by hand: the same broken authorization as invoices/4821 (the fixture serves any id to any authenticated session), but declared with capability public_param only (no access_differs_by_session), so the deterministic plan table and idor_differential both skip it — only a model-proposed object-read can cover it."
+    },
+    {
+      "id": "fixture-session/reports/4821",
+      "vuln_class": "none",
+      "surface": {"path": "/api/reports/4821", "param": "4821", "in": "path"},
+      "tier": "T1",
+      "expected_evidence": "none",
+      "reachable_by_declaration": true,
+      "source": "hand-verified negative for the loop: the owner reads the report (200) and the authenticated low-privilege session gets a 500 (the boundary check throws instead of denying). This is a *surprise*, not a finding — the object-read plan retains it as an anomaly and the run must settle none here without inventing a vuln."
+    }
+  ]
+}

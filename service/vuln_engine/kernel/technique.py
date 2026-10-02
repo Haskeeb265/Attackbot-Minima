@@ -36,6 +36,8 @@ from typing import Protocol, runtime_checkable
 
 from .manifest import TechniqueManifest
 from .observation import Observation
+from .plan import PLAN_DIGEST_FIELD, PLAN_EVENT_FIELD, canonical_plan, plan_digest
+from .prediction import Expectation
 from .verdict import Candidate
 
 # --------------------------------------------------------------------------- #
@@ -244,15 +246,32 @@ class Hypothesis:
     rests_on: str = ""
     #: Preconditions the world must satisfy for this to be worth trying at all.
     preconditions: tuple[str, ...] = ()
+    #: What "nothing is broken" looks like (kernel/prediction.py). Optional:
+    #: a hypothesis without one can only settle, never come back unexplained —
+    #: the third interpret outcome (PRD §6.3) needs a prediction to deviate
+    #: from, and no technique is required to have one.
+    expectation: Expectation | None = None
+    #: The experiment, serialized (PRD §6.11). A hypothesis whose claim is data
+    #: carries its plan here so the world log can *explain* the experiment, not
+    #: merely re-derive it. Empty for a hypothesis that has no plan row.
+    plan: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {
+        data: dict[str, object] = {
             "id": self.id,
             "technique": self.technique,
             "claim": self.claim,
             "rests_on": self.rests_on,
             "surface": self.surface.to_dict(),
         }
+        if self.expectation is not None:
+            data["expectation"] = self.expectation.to_dict()
+        if self.plan:
+            # Canonical, whitelisted, digested: the same plan always yields the
+            # same bytes and the same digest, so a replay can check them.
+            data[PLAN_EVENT_FIELD] = canonical_plan(self.plan)
+            data[PLAN_DIGEST_FIELD] = plan_digest(self.plan)
+        return data
 
 
 @dataclass(frozen=True)

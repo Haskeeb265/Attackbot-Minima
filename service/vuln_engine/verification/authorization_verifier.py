@@ -29,6 +29,11 @@ import statistics
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from ..kernel.claim import (
+    CLAIM_SHAPES,
+    STATE_CHANGE_CAP_REASON,
+    is_differential_provable,
+)
 from ..kernel.evidence import (
     DIFFERENTIAL_SESSIONS,
     EVIDENCE_DIFFERENTIAL,
@@ -74,6 +79,27 @@ class AuthorizationVerifier:
                 f"the confirmation spec's oracle is {oracle!r}, not "
                 f"{DIFFERENTIAL_SESSIONS!r}: the two sides cannot drift silently",
             )
+
+        # The claim-shape cap (NOVELTY.md §7.2, kernel/claim.py). This
+        # verifier's flipped re-measure observes the read under two sessions;
+        # it never re-executes a change. A state_change claim ("the change at
+        # T reaches V") is therefore weaker than what a ``proven`` verdict
+        # here would advertise, so the shape is refused outright — loudly,
+        # with the cap's reason, never silently downgraded. The cap lifts by
+        # deleting one entry from ``DIFFERENTIAL_PROVABLE`` when a
+        # setup-re-executing confirm kind exists — one place, no technique
+        # edits. Legacy specs with no shape are grandfathered: every
+        # hand-written technique (IDOR) predates shapes and proves exactly
+        # what this verifier measures.
+        claim_shape = str(confirm.get("claim_shape") or "")
+        if claim_shape and claim_shape not in CLAIM_SHAPES:
+            return refuse(
+                candidate,
+                f"the confirmation spec's claim_shape {claim_shape!r} is not one "
+                f"the engine speaks: {', '.join(CLAIM_SHAPES)}",
+            )
+        if claim_shape and not is_differential_provable(claim_shape):
+            return refuse(candidate, STATE_CHANGE_CAP_REASON)
 
         # Flipped order, deliberately: the proposer measured A then B; the
         # verifier measures B then A. Fresh requests, fresh identities.

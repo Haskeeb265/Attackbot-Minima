@@ -142,6 +142,11 @@ class Finding:
     proposer_grade: str
     repro_url: str = ""
     payload: str = ""
+    #: The arm that proved this finding. The ordinary pass keys it by the
+    #: surface, the abduced round by the plan id, so novelty can tell a
+    #: plan-table finding from a model-proven one even when both share a
+    #: plan id (``object_read:{key}``).
+    arm: str = ""
     surface: dict = field(default_factory=dict)
     #: Verifier evidence payload, e.g. the dialogs and markers that proved it.
     evidence: dict = field(default_factory=dict)
@@ -163,6 +168,7 @@ class Finding:
             "independent": self.independent,
             "repro_url": self.repro_url,
             "payload": self.payload,
+            "arm": self.arm,
             "surface": dict(self.surface),
             "evidence": dict(self.evidence),
             "reason": self.reason,
@@ -193,6 +199,7 @@ def findings(log: LogView) -> list[Finding]:
                 ),
                 repro_url=str(source.get("repro_url", "")),
                 payload=str(source.get("payload", "")),
+                arm=str(row.get("arm", "")),
                 surface=dict(source.get("surface") or {}),
                 evidence=dict(evidence.get("payload") or {}),
                 reason=str(row.get("reason", "")),

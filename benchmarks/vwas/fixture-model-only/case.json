@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "id": "fixture-model-only",
+  "target": {
+    "compose_service": "fixture_app",
+    "image": "",
+    "build": "./docker/fixture_app",
+    "host": "127.0.0.1",
+    "port": 8080,
+    "health_path": "/healthz"
+  },
+  "session": {
+    "cookies": ["session"],
+    "seeded_cookies": ["session=a1b2c3d4e5f6"],
+    "session_b_cookies": ["session=9f8e7d6c5b4a"],
+    "csrf": false
+  },
+  "declared_surfaces": [
+    {
+      "url": "http://127.0.0.1:8080/api/invoices/4821",
+      "param": "4821",
+      "where": "path",
+      "capability": "public_param",
+      "label": "invoice object (numeric id)"
+    },
+    {
+      "url": "http://127.0.0.1:8080/api/invoices/99",
+      "param": "99",
+      "where": "path",
+      "capability": "public_param",
+      "label": "invoice object (numeric id)"
+    },
+    {
+      "url": "http://127.0.0.1:8080/api/reports/4821",
+      "param": "4821",
+      "where": "path",
+      "capability": "public_param",
+      "label": "report object (numeric id)"
+    }
+  ],
+  "campaign_rounds": 6,
+  "ground_truth_coverage": "partial",
+  "notes": "The model-only companion to fixture-session. Every surface is declared with capability public_param and none declares access_differs_by_session, so the deterministic plan table is inert by its own gate: generic_differential's object-read / session-role rows require a declared two-session fact, and idor_differential keys on access_differs_by_session too. So the ordinary pass can cover none of these objects, while the model channel (A3's property proposal) may still compose the two declared sessions with a public parameter into an object-read experiment the plan table could not generate — the one path to a finding here. The two invoices are genuinely broken authorization (both sessions read them); the report is the *surprise* (the low-privilege read returns 500, so the object-read plan must retain an anomaly and settle none). The two invoices' ground-truth class is `id-enumeration`, the *novel* class the model channel names for this bug: the scorer does not silently credit a novel class, it queues the finding as unadjudicated for the human ruling, and this GT entry is that adjudicated ruling. That makes the class model-chosen, which is an honest fragility of the novel-class channel, recorded rather than hidden. This is a fixture case we wrote, not a third-party held-back target: it measures the abductive loop's *contribution* in a scored pass (the deterministic tier scores 0.0, the model tier recovers both objects at L3), not P4 on an unseen app."
+}

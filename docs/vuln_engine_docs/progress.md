@@ -333,7 +333,7 @@ not a silent grammar edit.
 
 ## Target-assumptions audit (2026-09-24) — is the engine being molded around Juice Shop?
 
-Full record in `target_assumptions_audit.md`.
+Full record in this section, below.
 Method: grep sweeps for target identity, read-throughs of every grammar,
 observation, verifier and scheduler constant, plus one empirical probe. The
 falsifiable test: *delete the fixture and Juice Shop; no engine code may change
@@ -1125,7 +1125,7 @@ carried the same three errors:
 * `manifest.json`, which is `manifest.py`;
 * no `seed/`, `abduction/` or `memory/` in the maps, although all three exist.
 
-**Added: [`graph_seed_bridge.md`](graph_seed_bridge.md, consolidated).** The graph→`Surface`
+**Added: `graph_seed_bridge.md` (consolidated; now [`README.md`](./README.md) §7).** The graph→`Surface`
 path had zero prose anywhere in the repo, and it is the seam that decides what
 the engine can actually *do*. It now documents the four-module path, the two
 rules that make the derivation trustworthy (code navigates / the model does not;

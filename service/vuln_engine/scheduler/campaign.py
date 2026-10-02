@@ -35,10 +35,18 @@ from ..policy.gate import PolicyGate
 from ..registry import TechniqueRegistry
 from ..world.log import EVENT_NOTE, WorldLog, read_rows
 from .driver import Engine, RunReport
+from .pool import HypothesisPool, novelty_cells_from_log
 from .ucb import Arm, arms_from_receipts, pick
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from ..abduction.proposal import Proposal
+    from ..abduction.validator import Validator
+    from ..kernel.anomaly import Anomaly
+    from ..kernel.technique import Surface
     from ..llm.wiring import Advisory
+    from ..world.holding_pen import HoldingPen
 
 
 @dataclass
@@ -122,6 +130,9 @@ class Campaign:
         advisory: "Advisory | None" = None,
         force: bool = False,
         widening: dict | None = None,
+        abducer: "Callable[[Anomaly, Sequence[Surface]], list[Proposal]] | None" = None,
+        validator: "Validator | None" = None,
+        pen: "HoldingPen | None" = None,
     ) -> None:
         self.seed = seed
         self.gate = gate
@@ -129,6 +140,13 @@ class Campaign:
         self.log = log if log is not None else gate.log
         self.receipt = receipt
         self.clock = clock or _wall_clock
+        #: The abductive loop (PRD §6.5), threaded to every round's engine so a
+        #: campaign exercises it exactly as a single pass does. The pen is the
+        #: one shared, persistent piece (a held hypothesis outlives a round);
+        #: the pool is per-round, because it is per-*run* (``pool.py``).
+        self.abducer = abducer
+        self.validator = validator
+        self.pen = pen
         #: The hypothesize junction's provenance (``HypothesizeResult.to_dict()``
         #: shape) or ``None``. Accepted as plain data on purpose: the campaign
         #: records what it was told, it does not import the llm layer — the same
@@ -246,6 +264,9 @@ class Campaign:
         }
         receipts = _receipts_by_arm_from_ledger(self.log)
         priors = self._advisory_priors()
+        # The novelty term (A2), read from the ledger's retained anomalies: only
+        # arms that ran are paid (receipts-based), and re-entered cells decay.
+        novelty = novelty_cells_from_log(self.log)
         # Eligibility from the techniques themselves, exactly as the driver reads
         # it — one authority, so the scheduler can never send a technique where
         # the technique itself would refuse to go.
@@ -257,7 +278,9 @@ class Campaign:
         }
         arms = [
             arm
-            for arm in arms_from_receipts(eligible, receipts, priors=priors)
+            for arm in arms_from_receipts(
+                eligible, receipts, priors=priors, novelty=novelty
+            )
             if arm.surface not in (excluded or set())
             and (self.force or not _settled(receipts.get(arm.surface, {})))
         ]
@@ -325,6 +348,10 @@ class Campaign:
             clock=self.clock,
             force=self.force,
             advisory=self.advisory,
+            abducer=self.abducer,
+            validator=self.validator,
+            pen=self.pen,
+            pool=HypothesisPool(),
         )
         return engine.run()
 
