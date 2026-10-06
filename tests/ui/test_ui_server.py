@@ -367,6 +367,21 @@ def post_unguarded(url: str, payload: dict) -> tuple[int, dict]:
         headers={"Content-Type": "application/json"}, method="POST",
     )
     try:
+        return _post_once(request)
+    except ConnectionAbortedError:
+        # Windows (WinError 10053) sometimes aborts a loopback connection whose
+        # peer responds-and-closes in the same segment — the server's answer is
+        # complete on the wire but the client's read loses the race. That is
+        # the OS racing *itself*, not the guard being wrong: the request is
+        # replayed once and its verdict stands. Retrying a GET is never
+        # idempotent-sensitive here because the refused POST never dispatched
+        # (the guard fires before the body is read), and the retry gets the
+        # same 403 for the same reason.
+        return _post_once(request)
+
+
+def _post_once(request: urllib.request.Request) -> tuple[int, dict]:
+    try:
         with urllib.request.urlopen(request, timeout=30) as res:
             return res.status, json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:

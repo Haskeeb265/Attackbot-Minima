@@ -119,7 +119,9 @@ class UiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The client hanging up mid-headers is its problem, not a 500:
+            # the response was refused/completed on our side either way.
             pass
 
     def _static(self, rel: str) -> None:
@@ -151,7 +153,7 @@ class UiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
     def _fail(self, exc: Exception) -> None:
