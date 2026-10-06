@@ -124,6 +124,36 @@ def build_command(kind: str, params: dict) -> tuple[list[str], str]:
             argv.append("--force")
         label = "engine fixture"
         return argv, label
+    if kind in ("twogate", "twogate_fixture"):
+        # The two-gate flow (run_twogate.py): measured capabilities, the model
+        # advisors, and a declarative confirmation runner. Its ledger is
+        # twogate.jsonl; the UI's trace view classifies a run directory by which
+        # ledger it holds, so this reuses the engine output root.
+        argv = [PYTHON, "-u", "run_twogate.py"]
+        if kind == "twogate_fixture" or not target:
+            argv.append("--fixture")
+        else:
+            argv.extend(["-t", target])
+        if output_dir:
+            argv.extend(["--output-dir", _engine_output_dir(output_dir)])
+        for token in params.get("surfaces") or []:
+            token = str(token).strip()
+            if token:
+                argv.extend(["--surface", token])
+        for cookie in params.get("cookies") or []:
+            cookie = str(cookie).strip()
+            if cookie:
+                argv.extend(["--cookie", cookie])
+        if params.get("session_b_cookie"):
+            argv.extend(["--session-b-cookie", str(params["session_b_cookie"])])
+        if params.get("max_rounds"):
+            argv.extend(["--max-rounds", str(int(params["max_rounds"]))])
+        if params.get("host_budget"):
+            argv.extend(["--host-budget", str(int(params["host_budget"]))])
+        if params.get("llm"):
+            argv.append("--llm")
+        label = f"twogate {target or 'fixture'}"
+        return argv, label
     raise ValueError(f"unknown job kind: {kind!r}")
 
 

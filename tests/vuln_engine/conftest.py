@@ -317,6 +317,7 @@ def build_gate(made_dispatcher, fake_http, fake_browser, fake_collaborator, cloc
         oob=UNSET,
         log: WorldLog | None = None,
         dispatcher=None,
+        session_b_headers: dict[str, str] | None = None,
     ) -> PolicyGate:
         return PolicyGate(
             dispatcher or made_dispatcher(),
@@ -325,6 +326,7 @@ def build_gate(made_dispatcher, fake_http, fake_browser, fake_collaborator, cloc
             oob=fake_collaborator if oob is UNSET else oob,
             log=log if log is not None else WorldLog(),
             clock=clock,
+            session_b_headers=session_b_headers,
         )
 
     return build

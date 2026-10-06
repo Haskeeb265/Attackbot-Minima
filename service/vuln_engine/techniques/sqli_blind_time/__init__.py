@@ -32,21 +32,29 @@ class SqliBlindTime:
 
     manifest = MANIFEST
 
+    #: What ``surfaces()`` actually reads — the manifest's ``preconditions``
+    #: names ``public_param`` (the cheap door this technique does NOT fire on,
+    #: deliberately), so the closure pass needs this declared separately to
+    #: know which claims open *this* technique's gate.
+    gate_capabilities = (CAP_DELAYED_RESPONSE,)
+
     def surfaces(self, seed: EngagementSeed) -> list[Surface]:
-        """Only surfaces whose *declared claim* is the timing influence.
+        """Surfaces with an established timing influence — declared or measured.
 
         Unlike the cheap techniques, this one does not fire on ``public_param``:
         six bursty, distinctive requests per surface is the loudest probe set in
         the engine, and spending it on a surface whose declared purpose is an
         ordinary search box would be exactly the spend the noise budget exists
-        to prevent. The operator's ``delayed_response`` claim is what makes the
-        spend legitimate — the same discipline ``oob_fetch`` applies to the
-        remote-fetch claim.
+        to prevent. The claim is what makes the spend legitimate — and since
+        Capability Closure it no longer has to be the operator's word: a
+        surface the elicitor measured (``delayed_response`` established at
+        differential grade by the dose-response probe) carries it in its
+        ``capabilities`` set, and this gate reads both sources.
         """
         return [
             surface
             for surface in seed.with_param()
-            if surface.capability == CAP_DELAYED_RESPONSE
+            if surface.claims(CAP_DELAYED_RESPONSE)
         ]
 
     def hypotheses(self, surface: Surface) -> list[Hypothesis]:

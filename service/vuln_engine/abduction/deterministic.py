@@ -35,9 +35,12 @@ GENERIC_DIFFERENTIAL = "generic_differential"
 
 #: The confirm kind the object-read row already has.
 CONFIRM_AUTHORIZATION_DIFFERENTIAL = "authorization.differential"
-#: The confirm kind a state-change claim would need — one that re-executes the
-#: setup, not merely re-measures the read. Naming it is the pen's whole job.
-CONFIRM_STATE_CHANGE_REPLAY = "state_change.replay"
+#: The confirm kind a state-change claim needs — the verifier that re-executes
+#: the setup rather than merely re-measuring the read. It used to name an
+#: aspirational spelling (``state_change.replay``) because no such verifier
+#: existed and the claim rode to the holding pen; the kind landed as
+#: ``authorization.state_change``, so the proposal names a verifier that runs.
+CONFIRM_STATE_CHANGE_REPLAY = "authorization.state_change"
 
 #: Rule names, so a reviewer can see why a proposal exists.
 RULE_OBJECT_READ = "object_read_boundary_unexplained"

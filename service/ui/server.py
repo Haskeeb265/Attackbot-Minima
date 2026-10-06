@@ -44,6 +44,7 @@ from service.ui import engine as engine_view
 from service.ui import jobs as jobs_mod
 from service.ui import programs as programs_mod
 from service.ui import recon as recon_view
+from service.ui import trace as trace_view
 from service.ui.artifacts import ArtifactError, ROOT, safe_resolve
 from service.ui.jobs import MANAGER
 
@@ -176,6 +177,10 @@ class UiHandler(BaseHTTPRequestHandler):
                 self._engine_inputs(query)
             elif path == "/api/engine/report":
                 self._engine_report(query)
+            elif path == "/api/trace":
+                self._trace(query)
+            elif path == "/api/trace/output":
+                self._trace_output(query)
             elif path == "/api/jobs":
                 self._json({"jobs": MANAGER.list()})
             elif path == "/api/jobs/output":
@@ -218,6 +223,9 @@ class UiHandler(BaseHTTPRequestHandler):
             "programs_error": "",
             "engine_runs": engine_view.list_run_dirs(),
             "recon_targets": recon_view.list_known_targets(),
+            # Both engine flows, as run keys (a path relative to output/): the
+            # detailed step-by-step view's selector reads this.
+            "traces": trace_view.discover(),
             "jobs": MANAGER.list(),
         }
         try:
@@ -307,6 +315,18 @@ class UiHandler(BaseHTTPRequestHandler):
     def _engine_report(self, query: dict) -> None:
         run = _name(query.get("run", ""))
         self._json(engine_view.report_view(run))
+
+    def _trace(self, query: dict) -> None:
+        # A trace key is a path relative to output/ ("vuln_engine/target" or a
+        # bare run name), so it is checked by trace.resolve — not the
+        # single-segment _name allowlist — and an escape is a 400.
+        key = query.get("key", "")
+        cursor = _int_or(query.get("cursor"), 0, 0, 10_000_000)
+        limit = _int_or(query.get("limit"), trace_view.DEFAULT_ROWS, 1, trace_view.MAX_ROWS)
+        self._json(trace_view.trace_view(key, cursor=cursor, limit=limit))
+
+    def _trace_output(self, query: dict) -> None:
+        self._json(trace_view.output_view(query.get("key", "")))
 
     def _job_output(self, query: dict) -> None:
         job_id = _name(query.get("id", ""))

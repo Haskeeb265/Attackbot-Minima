@@ -150,3 +150,133 @@ def test_merge_lets_the_operator_win_on_a_collision(tmp_path: Path) -> None:
     winner = next(s for s in merged if s.param == "q")
     assert winner.label == "operator"
     assert winner.capability == CAP_INFLUENCE_REMOTE_FETCH
+
+
+# --------------------------------------------------------------------------- #
+# locations on the edge, capabilities in the set, evidence as a filter
+# --------------------------------------------------------------------------- #
+
+
+def _located_document() -> dict:
+    """A graph whose parameter edges carry locations and evidence states.
+
+    One URL observed a body parameter, one a path parameter, one an unknown
+    location (skipped, never guessed), and three carry the evidence states the
+    scoring pass writes: dead, historical, and actively verified.
+    """
+    def url(node_id: str, url: str, score: int, evidence_state: str = "") -> dict:
+        node = {
+            "id": node_id,
+            "kind": "url",
+            "identity": url,
+            "score": score,
+            "band": "high",
+            "trust": "observed",
+            "props": {"url": url},
+        }
+        if evidence_state:
+            node["evidence_state"] = evidence_state
+        return node
+
+    nodes = [
+        url("url:https://www.acme.test/api/users", "https://www.acme.test/api/users", 90, "actively_verified"),
+        {"id": "parameter:user_id", "kind": "parameter", "identity": "user_id", "score": 40},
+        url("url:https://www.acme.test/upload", "https://www.acme.test/upload", 85, "actively_verified"),
+        {"id": "parameter:file", "kind": "parameter", "identity": "file", "score": 40},
+        url("url:https://www.acme.test/gone", "https://www.acme.test/gone", 80, "dead"),
+        {"id": "parameter:q", "kind": "parameter", "identity": "q", "score": 40},
+        url("url:https://www.acme.test/archive", "https://www.acme.test/archive", 75, "historical"),
+        {"id": "parameter:page", "kind": "parameter", "identity": "page", "score": 40},
+        url("url:https://www.acme.test/form", "https://www.acme.test/form", 70),
+        {"id": "parameter:payload", "kind": "parameter", "identity": "payload", "score": 40},
+        url("url:https://www.acme.test/proxy?target=x", "https://www.acme.test/proxy?target=x", 65),
+        {"id": "parameter:target", "kind": "parameter", "identity": "target", "score": 40},
+    ]
+    edges = [
+        {"type": "observed_parameter", "from": "url:https://www.acme.test/api/users", "to": "parameter:user_id", "props": {"location": "path"}},
+        {"type": "observed_parameter", "from": "url:https://www.acme.test/upload", "to": "parameter:file", "props": {"location": "body"}},
+        {"type": "observed_parameter", "from": "url:https://www.acme.test/gone", "to": "parameter:q", "props": {"location": "query"}},
+        {"type": "observed_parameter", "from": "url:https://www.acme.test/archive", "to": "parameter:page", "props": {"location": "query"}},
+        {"type": "observed_parameter", "from": "url:https://www.acme.test/form", "to": "parameter:payload", "props": {"location": "websocket"}},
+        {"type": "observed_parameter", "from": "url:https://www.acme.test/proxy?target=x", "to": "parameter:target", "props": {"location": "query"}},
+    ]
+    return {"target": "acme.test", "nodes": nodes, "edges": edges}
+
+
+def _located_backend(tmp_path: Path) -> JsonFileBackend:
+    path = tmp_path / "located_graph_state.json"
+    path.write_text(json.dumps(_located_document()), encoding="utf-8")
+    return JsonFileBackend(path)
+
+
+def test_the_edge_location_becomes_the_surface_where(tmp_path: Path) -> None:
+    derived = derive_surfaces(_located_backend(tmp_path))
+
+    by_key = {(s.url, s.param): s for s in derived.surfaces}
+    assert by_key[("https://www.acme.test/api/users", "user_id")].where == "path"
+    assert by_key[("https://www.acme.test/upload", "file")].where == "body"
+    assert by_key[("https://www.acme.test/proxy?target=x", "target")].where == "query"
+    assert derived.report["locations"] == {"body": 1, "path": 1, "query": 1}
+
+
+def test_an_unknown_location_is_skipped_and_counted_not_guessed(tmp_path: Path) -> None:
+    derived = derive_surfaces(_located_backend(tmp_path))
+
+    assert not any(s.param == "payload" for s in derived.surfaces)
+    assert derived.report["skipped_unknown_location"] == 1
+
+
+def test_dead_evidence_never_becomes_a_surface(tmp_path: Path) -> None:
+    derived = derive_surfaces(_located_backend(tmp_path))
+
+    assert not any(s.param == "q" for s in derived.surfaces), "a dead URL is untestable"
+    assert derived.report["skipped_dead_evidence"] == 1
+
+
+def test_historical_evidence_is_an_operator_opt_in(tmp_path: Path) -> None:
+    skipped = derive_surfaces(_located_backend(tmp_path))
+    included = derive_surfaces(_located_backend(tmp_path), include_historical=True)
+
+    assert not any(s.param == "page" for s in skipped.surfaces)
+    assert skipped.report["skipped_historical_evidence"] == 1
+    assert any(s.param == "page" for s in included.surfaces)
+    assert included.report["skipped_historical_evidence"] == 0
+    # The dead node stays refused even with the opt-in: a dead URL cannot
+    # host an experiment, whatever the operator asked for.
+    assert included.report["skipped_dead_evidence"] == 1
+    assert not any(s.param == "q" for s in included.surfaces)
+
+
+def test_a_parameter_carries_every_capability_it_supports(tmp_path: Path) -> None:
+    """The strongest-wins merge used to drop one of two true claims: a
+    URL-shaped parameter is an ordinary public parameter *and* a remote-fetch
+    claim, and both techniques' doors must open."""
+    derived = derive_surfaces(_located_backend(tmp_path))
+
+    proxy = next(s for s in derived.surfaces if s.param == "target")
+    assert proxy.capability == CAP_INFLUENCE_REMOTE_FETCH  # the strongest spelling
+    assert proxy.capabilities == frozenset({CAP_PUBLIC_PARAM, CAP_INFLUENCE_REMOTE_FETCH})
+    assert proxy.claims(CAP_PUBLIC_PARAM) and proxy.claims(CAP_INFLUENCE_REMOTE_FETCH)
+    assert derived.report["remote_fetch_claims"] == 1
+
+
+def test_merge_unions_derived_capabilities_into_the_declared_surface(tmp_path: Path) -> None:
+    from service.vuln_engine.kernel.technique import Surface
+
+    declared = [
+        Surface(
+            url="https://www.acme.test/proxy?target=x",
+            host="www.acme.test",
+            param="target",
+            capability=CAP_PUBLIC_PARAM,
+            label="operator",
+        )
+    ]
+    derived = derive_surfaces(_located_backend(tmp_path)).surfaces
+
+    merged = merge_surfaces(declared, derived)
+    winner = next(s for s in merged if s.param == "target")
+    assert winner.label == "operator"  # the operator's wording stands
+    assert winner.capability == CAP_PUBLIC_PARAM  # and so does their claim
+    assert CAP_INFLUENCE_REMOTE_FETCH in winner.capabilities  # the graph widened it
+    assert winner.claims(CAP_PUBLIC_PARAM) and winner.claims(CAP_INFLUENCE_REMOTE_FETCH)

@@ -191,6 +191,17 @@ class PolicyGate:
         """
         return self._clock()
 
+    @property
+    def session_b_wired(self) -> bool:
+        """True when the run declared a second identity.
+
+        A claim whose experiment needs the victim's view (the state-change
+        verifier's) checks this *before* measuring: the gate would refuse every
+        ``_session="b"`` request anyway, and a refusal that names the missing
+        declaration up front costs nothing and tells the operator what to do.
+        """
+        return bool(self._session_b_headers)
+
     def capabilities(self) -> dict:
         """What each transport reports it can do.  Asked, never assumed."""
         report: dict = {}

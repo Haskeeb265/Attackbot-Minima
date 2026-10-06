@@ -77,6 +77,7 @@ from ..world.observe import browser_observations, http_observations
 if TYPE_CHECKING:
     from ..abduction.proposal import Proposal
     from ..abduction.validator import Validator
+    from ..elicit.registry import ElicitorRegistry
     from ..kernel.anomaly import Anomaly
     from ..llm.wiring import Advisory
     from ..world.holding_pen import HoldingPen
@@ -162,6 +163,9 @@ class RunReport:
     #: Phase 9: ``{candidate_id: {level, name, label, reason}}`` for every
     #: proven finding, computed from the log's own provenance (world/novelty.py).
     novelty: dict = field(default_factory=dict)
+    #: Capability Closure's report (``ClosureReport.to_dict()``), or ``{}`` when
+    #: the closure pass did not run.
+    closure: dict = field(default_factory=dict)
     log_path: str = ""
 
     def to_dict(self) -> dict:
@@ -181,6 +185,7 @@ class RunReport:
             "problems": self.problems,
             "advisory": self.advisory,
             "novelty": self.novelty,
+            "closure": self.closure,
             "log": self.log_path,
         }
 
@@ -204,6 +209,8 @@ class Engine:
         validator: "Validator | None" = None,
         pen: "HoldingPen | None" = None,
         pool: "HypothesisPool | None" = None,
+        elicit: bool = False,
+        elicit_registry: "ElicitorRegistry | None" = None,
     ) -> None:
         self.seed = seed
         self.gate = gate
@@ -233,6 +240,15 @@ class Engine:
         #: added here; unprovable ones go to the pen. Empty pool = the same
         #: behavior as no pool at all.
         self.pool = pool
+        #: Capability Closure (``elicit/closure.py``), off by default: when on,
+        #: the run first *measures* the preconditions the techniques gate on
+        #: (through the ordinary gate, via the elicitor corpus) and widens each
+        #: surface's ``capabilities`` with the measured facts before the ordinary
+        #: pass enumerates. A technique's gate then reads a measured fact instead
+        #: of only an operator's declaration. With the flag off the run is
+        #: byte-for-byte the declared-claims-only engine.
+        self.elicit = elicit
+        self.elicit_registry = elicit_registry
 
     # ------------------------------------------------------------------ #
     # the run
@@ -271,6 +287,28 @@ class Engine:
             "skipped_conclusive": 0,
         }
 
+        closure_report: dict = {}
+        if self.elicit:
+            # Capability Closure runs *before* the ordinary pass: elicitors ask
+            # the cheap questions the techniques' gates depend on, and the
+            # enriched seed is what every ``surfaces()`` call below reads. The
+            # closure answers are ordinary log rows (``capability.measured``),
+            # so a replay sees exactly what was measured and why a door opened.
+            from ..elicit.closure import run_closure
+
+            self.seed, closure = run_closure(
+                self.seed,
+                gate=self.gate,
+                registry=self.registry,
+                log=self.log,
+                clock=self.clock,
+                elicit_registry=self.elicit_registry,
+            )
+            closure_report = closure.to_dict()
+            counts["closure_established"] = len(closure.established)
+            counts["closure_negatives"] = len(closure.negatives)
+            counts["closure_refused"] = closure.refused
+
         for registration in self.registry.all():
             for surface in registration.technique.surfaces(self.seed):
                 self._run_surface(registration, surface, counts)
@@ -307,6 +345,7 @@ class Engine:
             capabilities=self.gate.capabilities(),
             problems=self.registry.problems,
             advisory=self._advisory_report(),
+            closure=closure_report,
             log_path=self.log.path.as_posix() if self.log.path else "",
         )
 
@@ -327,6 +366,13 @@ class Engine:
             # surface's arm would file the wrong receipt and misattribute the
             # anomaly the reports surface produced.
             arm = f"{registration.name}@{hypothesis.surface.key}"
+            # The *receipt* is scoped to the hypothesis, not the arm: a technique
+            # that emits several hypotheses on one surface (the plan tables do)
+            # must not have its second question silenced by the first one's
+            # conclusive answer. The UCB arm stays surface-scoped (the selector's
+            # economics), while the ledger's settle rule is exactly as wide as
+            # the question that was asked.
+            operation = f"{registration.name}:{hypothesis.id}"
             self.log.append(
                 EVENT_NOTE,
                 at=self.clock(),
@@ -334,7 +380,7 @@ class Engine:
                 arm=arm,
                 hypothesis=hypothesis.to_dict(),
             )
-            if self._already_settled(arm, registration.name):
+            if self._already_settled(arm, operation):
                 counts["skipped_conclusive"] += 1
                 continue
             observations, failures, executed = self._run_probes(registration, hypothesis, counts)
@@ -427,7 +473,7 @@ class Engine:
                     if candidates:
                         break  # the re-ask produced something to judge
             counts["candidates"] += len(candidates)
-            self._judge(arm, registration.name, candidates, failures, counts, executed=executed)
+            self._judge(arm, operation, candidates, failures, counts, executed=executed)
             self._synthesize(arm, registration, hypothesis, observations, counts)
 
     @staticmethod
@@ -682,14 +728,21 @@ class Engine:
                 claim_shape=proposal.claim_shape,
                 hypothesis=hypothesis.to_dict(),
             )
-            if self._already_settled(arm, registration.name):
+            if self._already_settled(arm, f"{registration.name}:{hypothesis.id}"):
                 counts["skipped_conclusive"] += 1
                 continue
             counts["abductions_run"] = counts.get("abductions_run", 0) + 1
             observations, failures, executed = self._run_probes(registration, hypothesis, counts)
             candidates = list(registration.technique.interpret(hypothesis, observations))
             counts["candidates"] += len(candidates)
-            self._judge(arm, registration.name, candidates, failures, counts, executed=executed)
+            self._judge(
+                arm,
+                f"{registration.name}:{hypothesis.id}",
+                candidates,
+                failures,
+                counts,
+                executed=executed,
+            )
 
     def _run_probes(
         self, registration: Registration, hypothesis: Hypothesis, counts: dict[str, int]
@@ -961,6 +1014,12 @@ class Engine:
         attempt for it would be the receipt inventing knowledge, the same mistake
         as treating an error as an answer, and it would let the ledger claim the
         target was examined when the gate never let anything through.
+
+        ``operation`` is hypothesis-scoped (``technique:hypothesis id``): the
+        ledger's settle rule must be as wide as the question asked, never wider —
+        a sibling hypothesis on the same surface is a different experiment, and
+        skipping it on its neighbour's answer is the starvation the surface-level
+        arm used to allow.
         """
         outcome = OUTCOME_NONE
         for candidate in candidates:

@@ -21,6 +21,7 @@
       <button data-panel="inputs"><span class="navnum">4</span>Engine inputs</button>
       <button data-panel="engine"><span class="navnum">5</span>Engine log</button>
       <button data-panel="output"><span class="navnum">6</span>Engine output</button>
+      <button data-panel="trace"><span class="navnum">7</span>Trace (step by step)</button>
       <button data-panel="run"><span class="navnum">+</span>Run / jobs</button>
     </nav>
 
@@ -85,6 +86,24 @@
         <div id="output-body" class="muted">Select an engine run…</div>
       </section>
 
+      <!-- 7. Trace: exactly how the engine did the work, step by step -->
+      <section class="panel" id="panel-trace">
+        <div class="toolbar">
+          <select id="trace-run-select" title="engine run (classic world.jsonl or two-gate twogate.jsonl)"></select>
+          <button class="btn" id="trace-follow">Follow: off</button>
+          <label class="muted small"><input type="checkbox" id="trace-only-ai"> AI reasoning only</label>
+          <label class="muted small"><input type="checkbox" id="trace-only-gate"> gate only</label>
+          <label class="muted small"><input type="checkbox" id="trace-only-findings"> findings only</label>
+          <button class="btn" id="trace-raw-toggle">Show raw rows</button>
+          <span id="trace-status" class="muted small"></span>
+        </div>
+        <div id="trace-summary" class="statgrid"></div>
+        <div id="trace-legend" class="legend"></div>
+        <div id="trace-steps" class="steps"><span class="muted">Select a run…</span></div>
+        <h2>Output</h2>
+        <div id="trace-output" class="muted">Select a run…</div>
+      </section>
+
       <!-- Run / jobs -->
       <section class="panel" id="panel-run">
         <h2>Launch a job</h2>
@@ -137,6 +156,37 @@
           <button class="btn primary" id="run-engine-btn">Run engine</button>
           <button class="btn" id="run-fixture-btn">Run fixture</button>
           <button class="btn primary" id="run-demo-btn" title="Seed the demo program, run the fixture engine end to end, stream the log live">Run demo flow</button>
+        </div>
+        <div class="card">
+          <h3>Vuln engine — two-gate flow (run_twogate.py)</h3>
+          <div class="formrow">
+            <label>target</label>
+            <input type="text" id="run-twogate-target" placeholder="example.com (empty = fixture)">
+          </div>
+          <div class="formrow">
+            <label>surfaces (repeat)</label>
+            <input type="text" id="run-twogate-surface" placeholder="url=https://…;param=q;capability=public_param  (one per line)">
+          </div>
+          <div class="formrow">
+            <label>cookie A</label>
+            <input type="text" id="run-twogate-cookie" placeholder="NAME=VALUE">
+          </div>
+          <div class="formrow">
+            <label>session B cookie</label>
+            <input type="text" id="run-twogate-cookie-b" placeholder="NAME=VALUE (access_differs_by_session)">
+          </div>
+          <div class="formrow">
+            <label>max rounds / surface</label>
+            <input type="number" id="run-twogate-rounds" value="3" min="1" max="20">
+            <label>host budget</label>
+            <input type="number" id="run-twogate-budget" value="0" min="0" max="100000">
+          </div>
+          <div class="formrow">
+            <label>options</label>
+            <label class="muted small"><input type="checkbox" id="run-twogate-llm"> --llm (model advisors; uses your .env key)</label>
+          </div>
+          <button class="btn primary" id="run-twogate-btn">Run two-gate</button>
+          <button class="btn" id="run-twogate-fixture-btn">Run two-gate fixture</button>
         </div>
 
         <h2>Jobs</h2>

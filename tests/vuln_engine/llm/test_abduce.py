@@ -169,7 +169,7 @@ def test_proposal_for_state_change_finds_the_composition() -> None:
     )
     assert proposal is not None
     assert proposal.claim_shape == "state_change"
-    assert proposal.needs_verifier == "state_change.replay"
+    assert proposal.needs_verifier == "authorization.state_change"
 
 
 # --------------------------------------------------------------------------- #

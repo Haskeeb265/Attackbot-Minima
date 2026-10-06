@@ -18,8 +18,10 @@ are about the *seam*:
 from __future__ import annotations
 
 from service.recon_pipeline.platform.receipt import Receipt
+from service.vuln_engine.kernel.observation import OBS_REFLECTION
 from service.vuln_engine.registry import TechniqueRegistry
 from service.vuln_engine.scheduler.campaign import Budget, Campaign, replay_round_order
+from service.vuln_engine.scheduler.tree import AndNode, OrNode, Tree
 from service.vuln_engine.scheduler.ucb import arms_from_receipts, pick
 from service.vuln_engine.world.log import WorldLog
 
@@ -232,3 +234,133 @@ def test_a_failed_attempt_does_not_settle_its_arm(
         "oob_fetch@http://127.0.0.1:8080/fetch#url",
         "xss_reflected@http://127.0.0.1:8080/search#q",
     )
+
+
+# --------------------------------------------------------------------------- #
+# the attack tree: where the campaign may spend
+# --------------------------------------------------------------------------- #
+
+
+def _reflection_gated_tree() -> Tree:
+    """An AND root whose precondition is an observation kind: the tree is
+    parked until the log holds a reflection, then its OR unlocks."""
+    return Tree(
+        root="after_reflection",
+        nodes=(
+            AndNode(
+                name="after_reflection",
+                requires=(OBS_REFLECTION,),
+                objective=OrNode(name="then", techniques=("oob_fetch",)),
+            ),
+        ),
+    )
+
+
+def test_a_parked_tree_spends_no_rounds_and_logs_its_decision(
+    build_gate, build_engine, clock
+) -> None:
+    gate = build_gate()
+    campaign = Campaign(
+        build_engine(gate=gate).seed,
+        gate=gate,
+        registry=_phase1_registry(),
+        log=gate.log,
+        clock=clock,
+        tree=_reflection_gated_tree(),
+    )
+    report = campaign.run(Budget(rounds=3))
+
+    # Nothing was observed yet, so the AND node parks: no pick, no round, and
+    # the campaign says why it stopped rather than spending into a subtree
+    # that cannot pay off.
+    assert report.rounds_run == 0
+    assert report.rounds == []
+    assert any("no unsettled eligible arm" in problem for problem in report.problems)
+    notes = [
+        row for row in gate.log.events("note") if row.get("stage") == "scheduler.tree"
+    ]
+    assert notes
+    assert notes[0]["decision"]["active"] is None
+    assert "after_reflection" in notes[0]["decision"]["parked"]
+
+
+def test_an_unlocked_or_node_confines_the_rounds_to_its_techniques(
+    build_gate, build_engine, clock
+) -> None:
+    """The tree narrows *where* the campaign may spend: an OR naming one
+    technique hides every other technique's arms from the selector, without
+    re-ranking the ones it allows."""
+    gate = build_gate()
+    tree = Tree(
+        root="reflected_only",
+        nodes=(OrNode(name="reflected_only", techniques=("xss_reflected",)),),
+    )
+    campaign = Campaign(
+        build_engine(gate=gate).seed,
+        gate=gate,
+        registry=_phase1_registry(),
+        log=gate.log,
+        clock=clock,
+        tree=tree,
+    )
+    report = campaign.run(Budget(rounds=2))
+
+    picks = [row for row in gate.log.events("scheduler.pick")]
+    assert picks, "the unlocked OR node must be spendable"
+    assert all(row["technique"] == "xss_reflected" for row in picks)
+    # Only one xss_reflected arm exists on this seed; it ran, was settled, and
+    # the oob_fetch arm — unsettled, but outside the OR node — was never picked.
+    assert report.rounds_run == 1
+    assert any("no unsettled eligible arm" in problem for problem in report.problems)
+
+
+def test_a_tree_parked_on_an_observation_unlocks_once_the_log_holds_it(
+    build_gate, build_engine, clock
+) -> None:
+    """The park is computed from the world log each pick, not stored: the same
+    tree that refuses to spend on an empty log opens once the observation the
+    AND names is on file — and a replay re-derives both decisions."""
+    gate = build_gate()
+    seed = build_engine(gate=gate).seed
+    registry = _phase1_registry()
+    locked_tree = _reflection_gated_tree()
+
+    # 1. Parked: the log holds no reflection yet.
+    parked = Campaign(
+        seed,
+        gate=gate,
+        registry=registry,
+        log=gate.log,
+        clock=clock,
+        tree=locked_tree,
+    )
+    assert parked.run(Budget(rounds=2)).rounds_run == 0
+
+    # 2. A tree-confined round lands the reflection in the same log.
+    confining = Tree(
+        root="reflected_only",
+        nodes=(OrNode(name="reflected_only", techniques=("xss_reflected",)),),
+    )
+    Campaign(
+        seed,
+        gate=gate,
+        registry=registry,
+        log=gate.log,
+        clock=clock,
+        tree=confining,
+    ).run(Budget(rounds=1))
+    assert any(item.kind == OBS_REFLECTION for item in gate.log.observations())
+
+    # 3. The same AND tree now unlocks — onto the technique it names.
+    unlocked = Campaign(
+        seed,
+        gate=gate,
+        registry=registry,
+        log=gate.log,
+        clock=clock,
+        tree=locked_tree,
+    )
+    report = unlocked.run(Budget(rounds=1))
+    picks = [row for row in gate.log.events("scheduler.pick")]
+    assert picks and picks[-1]["technique"] == "oob_fetch"
+    assert report.rounds_run == 1

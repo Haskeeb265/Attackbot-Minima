@@ -33,21 +33,22 @@ class IdorDifferential:
     manifest = MANIFEST
 
     def surfaces(self, seed: EngagementSeed) -> list[Surface]:
-        """Only surfaces the operator claimed differ by session.
+        """Surfaces established to differ by session — declared or measured.
 
         Unlike the parameter techniques, ``with_param()`` does not apply: an
         object reference lives in the *path* (``/api/invoices/4821``), not in
         a query parameter, and requiring a param would silently exclude the
         technique's whole surface class. The capability claim is the only
-        gate — the operator's statement that two identities exist here and
-        that their access should differ — the same discipline that gates
-        ``oob_fetch`` behind the remote-fetch claim and ``sqli_blind_time``
-        behind the timing claim.
+        gate — and since Capability Closure it no longer has to be only the
+        operator's statement: the sessions elicitor reads one object under
+        both declared identities and a status-or-content difference
+        establishes the claim at ``differential`` grade on the surface's
+        ``capabilities`` set.
         """
         return [
             surface
             for surface in seed.surfaces
-            if surface.capability == CAP_ACCESS_DIFFERS_BY_SESSION
+            if surface.claims(CAP_ACCESS_DIFFERS_BY_SESSION)
         ]
 
     def hypotheses(self, surface: Surface) -> list[Hypothesis]:

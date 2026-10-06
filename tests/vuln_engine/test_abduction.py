@@ -100,9 +100,16 @@ def _proposal(claim_shape: str, needs: str) -> Proposal:
 def test_the_validator_is_three_valued() -> None:
     validator = Validator()
     assert validator.validate(_proposal("object_read", "k")).verdict == EXPRESSIBLE_NOW
-    held = validator.validate(_proposal("state_change", "state_change.replay"))
+    # The state_change shape used to be the held case; landing the
+    # setup-re-executing verifier (``authorization.state_change``) freed it.
+    freed = validator.validate(_proposal("state_change", "authorization.state_change"))
+    assert freed.verdict == EXPRESSIBLE_NOW
+    # The held branch, exercised against a validator whose vocabulary predates
+    # the state_change kind — what every pre-landing run saw.
+    older = Validator(provable=frozenset({"object_read"}))
+    held = older.validate(_proposal("state_change", "authorization.state_change"))
     assert held.verdict == NOT_YET_EXPRESSIBLE and held.holds
-    assert "state_change.replay" in held.reason
+    assert "authorization.state_change" in held.reason
     assert validator.validate(_proposal("teleportation", "k")).verdict == INVALID
 
 
@@ -133,7 +140,7 @@ def test_the_object_read_rule_explains_a_boundary_surprise() -> None:
     assert abduce(anomaly, [surface]) == proposals
 
 
-def test_the_composition_rule_holds_a_state_change_claim() -> None:
+def test_the_composition_rule_produces_a_runnable_state_change_claim() -> None:
     target = Surface(
         url="http://127.0.0.1:8080/api/admin/promote",
         host="127.0.0.1",
@@ -154,7 +161,9 @@ def test_the_composition_rule_holds_a_state_change_claim() -> None:
     assert proposals[0].rule == RULE_ROLE_COMPOSITION
     assert proposals[0].claim_shape == "state_change"
     assert proposals[0].needs_verifier == CONFIRM_STATE_CHANGE_REPLAY
-    assert Validator().validate(proposals[0]).verdict == NOT_YET_EXPRESSIBLE
+    # The cap lifted when the setup-re-executing confirm kind landed: the
+    # explanation is pooled for the abduced round instead of parked in the pen.
+    assert Validator().validate(proposals[0]).verdict == EXPRESSIBLE_NOW
 
 
 def test_an_unknown_predicate_is_not_abduced() -> None:
@@ -193,7 +202,10 @@ def _seed() -> EngagementSeed:
     )
 
 
-def _engine(responder, log, clock, made_dispatcher, fake_http, fake_browser, fake_collaborator, pen):
+def _engine(
+    responder, log, clock, made_dispatcher, fake_http, fake_browser, fake_collaborator, pen,
+    pool=None,
+):
     fake_http.respond = responder
     gate = PolicyGate(
         made_dispatcher(),
@@ -212,6 +224,7 @@ def _engine(responder, log, clock, made_dispatcher, fake_http, fake_browser, fak
         clock=clock,
         abducer=abduce,
         pen=pen,
+        pool=pool,
     )
 
 
@@ -237,9 +250,16 @@ def test_an_expressible_explanation_is_logged_not_held(
     assert pen.entries() == []  # expressible: nothing needed a verifier
 
 
-def test_an_unprovable_explanation_is_held(
+def test_an_expressible_state_change_explanation_runs_in_the_abduced_round(
     made_dispatcher, fake_http, fake_browser, fake_collaborator, clock, tmp_path
 ) -> None:
+    """The loop closes end to end now that the state_change claim is provable:
+    the victim read fails (a boundary surprise), the composition rule explains
+    it, the validator pools it, and the abduced round *runs* it — through the
+    setup-re-executing verifier, whose verdict lands like any other. Here the
+    victim read errors (500), so the verifier's before-measurement is
+    incomplete: an inconclusive refusal, logged as a lead — not a finding, and
+    not a hold either."""
     def responder(url: str, *, content: bytes | None = None) -> RawHttpExchange:
         if "/api/admin/" in url:
             return RawHttpExchange(url=url, status=200, body=b"ok", headers={})
@@ -249,15 +269,16 @@ def test_an_unprovable_explanation_is_held(
 
     log = WorldLog()
     pen = HoldingPen(tmp_path / "holding_pen.jsonl")
-    _engine(
-        responder, log, clock, made_dispatcher, fake_http, fake_browser, fake_collaborator, pen
+    from service.vuln_engine.scheduler.pool import HypothesisPool
+
+    report = _engine(
+        responder, log, clock, made_dispatcher, fake_http, fake_browser, fake_collaborator, pen,
+        pool=HypothesisPool(),
     ).run()
 
     verdicts = {row["verdict"] for row in log.events(EVENT_ABDUCTION_VALIDATED)}
-    assert NOT_YET_EXPRESSIBLE in verdicts
-    assert log.events(EVENT_HOLDING_PEN_ENTRY)
-    held = pen.held()
-    assert len(held) == 1
-    assert held[0]["status"] == PEN_HELD
-    assert held[0]["needs_verifier"] == CONFIRM_STATE_CHANGE_REPLAY
-    assert held[0]["claim_shape"] == "state_change"
+    assert verdicts == {EXPRESSIBLE_NOW}  # the composition rule is runnable now
+    assert pen.entries() == []  # nothing needed a verifier that does not exist
+    abduced = [row for row in log.events("note") if row.get("stage") == "hypothesis.abduced"]
+    assert abduced, "the pooled explanation became a real experiment"
+    assert report.counts.get("abductions_run", 0) >= 1

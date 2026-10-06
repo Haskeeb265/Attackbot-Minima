@@ -143,7 +143,13 @@ def decide(
             child = walk(requirement)
             if child is not None:
                 return child
-        return walk(node.objective.name)
+        # The AndNode *carries* its objective as a value: descend into it
+        # directly rather than looking its name up in ``tree.nodes``. A tree
+        # whose objective is nested only — exactly what a loader that reads
+        # ``{"kind": "and", "objective": {...}}`` produces — would otherwise
+        # unlock the AND and then dead-end silently ("nothing unlocked",
+        # parked empty): the worst failure mode a scheduler can have.
+        return node.objective
 
     active = walk(tree.root)
     if active is None:

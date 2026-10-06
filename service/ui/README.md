@@ -60,7 +60,18 @@ other panel reads files and degrades honestly when an artifact is absent.
 | 4 | **Engine inputs** | What entered the vuln engine: the seed's surfaces (url/param/where/capability/label), techniques loaded, transport capabilities, the scheduler's picks with reasons, every hypothesis | `world.jsonl` (`run.begin` / `scheduler.pick` / hypothesis notes) |
 | 5 | **Engine log** | **Realtime**: every row of the world log as it grows — picks, hypotheses, gated requests (ALLOW/DENY/DEFER), raw results, observations, candidates, verdicts, receipts, LLM junction rows. Follow mode polls with a cursor; filters for verdicts-only and gate-only | `world.jsonl`, tailed |
 | 6 | **Engine output** | The run's report: findings with class/grade/summary/repro, leads, gate audit, counts | `report.json` |
-| + | **Run / jobs** | Launch recon or an engine run (the same CLIs, whitelisted flags, no shell), watch each job's captured stdout, stop a running job | spawns `run_recon.py` / `run_engine.py` |
+| 7 | **Trace (step by step)** | *Exactly how the engine did the work*: every ledger row normalized into an ordered **step** with a **phase** (input → measure → propose → **reason** → plan → spec → request → gate → result → judge → candidate → verdict → output). The AI-reasoning steps show each model junction's **input** (what the agent was shown), the **answer**, the model, and whether it was validated or degraded. Follow mode streams live; filters isolate AI reasoning / gate / findings; a raw toggle shows the untouched row | `trace.py` over `world.jsonl` **or** `twogate.jsonl` |
+| + | **Run / jobs** | Launch recon, an engine run, or a **two-gate** run (`run_twogate.py`, including `--llm`) — the same CLIs, whitelisted flags, no shell — watch each job's captured stdout, stop a running job | spawns `run_recon.py` / `run_engine.py` / `run_twogate.py` |
+
+### The trace view shows both engines
+
+The two-gate flow (`run_twogate.py`) is the one that most needs this view: its
+ledger carries the capability measurements, the LLM junction prompts/answers
+(the agents' reasoning), the confirmation specs and the oracle results — none of
+which appear in panels 4–6. A run directory is classified by **which ledger it
+holds** (`twogate.jsonl` → two-gate; `world.jsonl` → classic), so a run is
+traceable wherever it lives under `output/`. The selector is read from
+`/api/state` and labels each run with its flow and whether the model was used.
 
 ## The realtime contract
 
@@ -106,16 +117,24 @@ row index stable. A walk of the 241-row DVWA ledger at `limit=100` yields
 | GET | `/api/engine/log?run=&cursor=&limit=` | world-log rows after the cursor (the realtime feed) |
 | GET | `/api/engine/inputs?run=` | seed surfaces, techniques, capabilities, picks, hypotheses |
 | GET | `/api/engine/report?run=` | the run's `report.json` |
+| GET | `/api/trace?key=&cursor=&limit=` | normalized steps (phase, title, raw row) for one run, either flow; paged by the same append-only cursor |
+| GET | `/api/trace/output?key=` | the run's output: `twogate_report.json`, `report.json`, or a ledger derivation |
 | GET | `/api/jobs` · `/api/jobs/output?id=&offset=` | job table · a job's streamed output |
-| POST | `/api/run` | start a job: `{"kind": "recon\|engine\|engine_fixture", "params": {...}}` |
+| POST | `/api/run` | start a job: `{"kind": "recon\|engine\|engine_fixture\|twogate\|twogate_fixture", "params": {...}}` |
 | POST | `/api/jobs/stop` | stop a running job: `{"id": "..."}` |
 
 ## Tests
 
 ```bash
-python -m pytest tests/ui -q      # 35 hermetic tests: temp-tree artifacts,
+python -m pytest tests/ui -q      # 54 hermetic tests: temp-tree artifacts,
                                   # real HTTP over loopback, no Docker
 ```
+
+The trace views are pinned against a faithful two-gate ledger excerpt (measured
+capabilities, a live model junction, a planned routine, a spec, the oracle's
+answer, the proven verdict), so the phase mapping and the AI-reasoning payload
+are tested against the shape the ledger actually has — plus a path-escape test
+that `?key=../../.env` is a 400, not a file read.
 
 The DB-backed program views are tested through their failure path (a missing
 database is a degrade, not a crash) and through an injected `_fetch` that

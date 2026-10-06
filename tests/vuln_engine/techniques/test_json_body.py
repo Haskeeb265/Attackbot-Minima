@@ -136,15 +136,19 @@ def test_the_query_grammar_is_unchanged_by_the_body_table() -> None:
 
 
 def test_the_engine_proves_a_json_body_timing_claim(build_gate, clock) -> None:
-    numeric = grammar.variant_payload("numeric")
-    json_numeric = numeric  # the body family's SQL text is the same family
+    import re
 
     def injectable_api(url: str, *, method: str = "GET", headers=None, content=None, **_: object) -> RawHttpExchange:
+        # A SQL interpreter fake: the delay tracks the sleep argument wherever
+        # it arrives, the same dose-response signature the verifier's
+        # discriminator demands. A flat delay on the exact payload would now
+        # fail the finding, which is the verifier working as built.
         delay = 0.1
         if content:
             body = json.loads(content)
-            if body.get("filter") == json_numeric:
-                delay = 0.1 + MARGIN_SECONDS + 1.0
+            match = re.search(r"SLEEP\(([0-9.]+)\)", str(body.get("filter", "")))
+            if match:
+                delay += float(match.group(1))
         return RawHttpExchange(url=url, status=200, body=b"ok", headers={}, elapsed=delay)
 
     gate = build_gate(http=FakeHttpEffect(respond=injectable_api))
@@ -205,8 +209,15 @@ def test_a_json_echo_is_not_an_xss_candidate(build_gate, clock) -> None:
     echoes the canary through a JSON content type, and the reflected technique
     must produce no finding: a JSON response is the non-executable
     ``json_value`` context by the F1 gate, so an executable claim cannot even
-    be proposed."""
+    be proposed.
+
+    The registry is restricted to ``xss_reflected`` on purpose: the corrected
+    OR-gate admits a *declared* reflection claim (the manifest's own
+    precondition), and the DOM technique's browser lens is a different
+    question answered elsewhere — this test isolates the wire-lens F1 gate.
+    """
     from service.vuln_engine.kernel.technique import CAP_RESPONSE_REFLECTS_INPUT
+    from service.vuln_engine.registry import TechniqueRegistry
 
     CANARY_ECHO = 've-canary-<script>xss-marker</script>'
 
@@ -220,11 +231,17 @@ def test_a_json_echo_is_not_an_xss_candidate(build_gate, clock) -> None:
         )
 
     gate = build_gate(http=FakeHttpEffect(respond=json_echo))
+    registry = TechniqueRegistry.discover(strict=False)
+    reflected_only = TechniqueRegistry(
+        [registration for registration in registry.all() if registration.name == "xss_reflected"]
+    )
     engine = Engine(
         _query_seed(CAP_RESPONSE_REFLECTS_INPUT),
         gate=gate,
+        registry=reflected_only,
         log=gate.log,
         clock=clock,
     )
     report = engine.run()
+    assert report.counts["candidates"] == 0, "a JSON context proposes nothing executable"
     assert report.counts["findings"] == 0

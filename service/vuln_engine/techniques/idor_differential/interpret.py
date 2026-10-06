@@ -90,7 +90,12 @@ def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[
                 id=f"idor:{surface.host}:{surface.url}:{surface.param or 'object'}",
                 technique=NAME,
                 vuln_class="idor",
-                surface={"url": surface.url, "param": surface.param, "where": surface.where},
+                surface={
+                    "url": surface.url,
+                    "param": surface.param,
+                    "where": surface.where,
+                    "host": surface.host,
+                },
                 summary=(
                     f"the object at {surface.url} answered {status_b} to the "
                     f"low-privilege session (session A: {status_a}); the declared "

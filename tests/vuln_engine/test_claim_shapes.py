@@ -5,9 +5,10 @@ The spike's scar, pinned as invariants (NOVELTY.md §7.2, kernel/claim.py):
 
 * an ``object_read`` claim is exactly what a flipped two-session re-measure
   proves — it passes;
-* a ``state_change`` claim ("the change at T reaches V") is *weaker* than what
-  the verifier's measurement establishes, so it is refused outright — loudly,
-  with the cap's reason, never silently downgraded;
+* a ``state_change`` claim ("the change at T reaches V") is provable by the
+  setup-re-executing confirm kind (``authorization.state_change``) — and is
+  refused *here* with the misroute reason, because a flipped two-session
+  re-measure proves only the read, never the change;
 * a shape nobody speaks is refused, not squinted at;
 * legacy specs with no shape (the hand-written techniques, which predate
   shapes and prove exactly what the verifier measures) are grandfathered.
@@ -18,7 +19,7 @@ from __future__ import annotations
 import pytest
 
 from service.vuln_engine.kernel import claim
-from service.vuln_engine.kernel.claim import STATE_CHANGE_CAP_REASON
+from service.vuln_engine.kernel.claim import STATE_CHANGE_MISROUTE_REASON
 from service.vuln_engine.kernel.evidence import EVIDENCE_HYPOTHESIS, Evidence
 from service.vuln_engine.kernel.observation import OBS_HTTP_RESPONSE
 from service.vuln_engine.kernel.verdict import Candidate
@@ -66,8 +67,9 @@ def _candidate(claim_shape: str) -> Candidate:
 def gate(
     made_dispatcher, fake_http, fake_browser, fake_collaborator, clock
 ) -> PolicyGate:
-    """A gate whose target answers 200 to both sessions: the cap is the only
-    thing standing between this verifier's verdict and a proven finding."""
+    """A gate whose target answers 200 to both sessions: the routing rule is
+    the only thing standing between this verifier's verdict and a proven
+    finding for a shape its measurement cannot prove."""
     fake_http.respond = _broken_authz_responder
     return PolicyGate(
         made_dispatcher(),
@@ -87,13 +89,15 @@ def test_an_object_read_claim_is_provable_at_differential(gate) -> None:
     assert verdict.grade == "differential"
 
 
-def test_a_state_change_claim_is_refused_with_the_caps_reason(gate) -> None:
-    """The cap: the verifier re-measures the read, never the change — so the
-    state_change shape is refused outright, and the refusal names the cap."""
+def test_a_state_change_claim_is_refused_with_the_misroute_reason(gate) -> None:
+    """Routing, not a cap: the shape is provable today — by the
+    setup-re-executing verifier — but *this* verifier re-measures the read and
+    never the change, so a state_change spec routed here is refused, and the
+    refusal names the verifier that does prove it."""
     verdict = AuthorizationVerifier(gate).verify(_candidate(claim.CLAIM_STATE_CHANGE))
     assert not verdict.proven
     assert verdict.evidence is None, "a refusal carries no verifier evidence"
-    assert STATE_CHANGE_CAP_REASON in verdict.reason
+    assert STATE_CHANGE_MISROUTE_REASON in verdict.reason
 
 
 def test_an_unspeakable_claim_shape_is_refused_not_squinted_at(gate) -> None:
@@ -121,10 +125,15 @@ def test_a_legacy_spec_without_a_shape_is_grandfathered(gate) -> None:
     assert verdict.proven
 
 
-def test_the_cap_is_one_entry_not_a_spreadsheet() -> None:
-    """The cap lifts by removing one entry from DIFFERENTIAL_PROVABLE — the
-    one-place rule the PRD's Phase 0 deliverable promises."""
-    assert claim.DIFFERENTIAL_PROVABLE == frozenset({claim.CLAIM_OBJECT_READ})
+def test_state_change_is_provable_now_the_setup_reexecuting_kind_exists() -> None:
+    """The cap lifted by *landing a verifier*, not by editing callers: the
+    setup-re-executing confirm kind (``authorization.state_change``) proves the
+    shape, so it joins DIFFERENTIAL_PROVABLE — one place, no technique edits,
+    exactly as the PRD's Phase 0 deliverable promised."""
+    assert claim.DIFFERENTIAL_PROVABLE == frozenset(
+        {claim.CLAIM_OBJECT_READ, claim.CLAIM_STATE_CHANGE}
+    )
+    assert claim.is_differential_provable(claim.CLAIM_STATE_CHANGE)
     assert claim.CLAIM_STATE_CHANGE in claim.CLAIM_SHAPES
 
 

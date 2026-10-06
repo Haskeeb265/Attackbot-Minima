@@ -56,6 +56,24 @@ SAMPLES = 2
 _BASELINE_PAYLOAD = "ve-noop0"
 _INJECTED_PAYLOAD = "1 AND SLEEP(4.0)"
 
+#: The dose-response discriminator. A timing separation alone proves "this input
+#: changed how long the target took" — which rate limiting, a WAF's regex
+#: backtracking, or a load blip can each produce without any SQL being
+#: interpreted. SQL that reaches an interpreter answers to the *dose*: the
+#: sleep argument is an input the interpreter reads, so the measured delay must
+#: scale with it. Both doses are measured fresh, after the main separation, so
+#: the discrimination is the verifier's own second experiment — not a re-reading
+#: of the proposer's populations. A target whose delay does not track the dose
+#: is refused: the effect was observed, the cause was not established.
+DOSE_SHORT_SECONDS = 2.0
+DOSE_LONG_SECONDS = 6.0
+#: Samples per dose population; two per side survives one outlier.
+DOSE_SAMPLES = 2
+#: The long dose's median must beat the short's by at least this fraction of
+#: the dose gap (4s gap × 0.4 = 1.6s) before the delay is credited to the
+#: interpreter rather than to noise.
+DOSE_MARGIN_FRACTION = 0.4
+
 
 @dataclass
 class TimingVerifier:
@@ -99,6 +117,46 @@ class TimingVerifier:
                 "claim is inconclusive rather than refuted",
             )
         difference = statistics.median(injected) - statistics.median(baseline)
+        if difference < margin:
+            return refuse(
+                candidate,
+                (
+                    f"fresh populations differ by {difference:.2f}s, below the "
+                    f"declared margin of {margin:.2f}s: a slow target is not a finding"
+                ),
+            )
+        # The causal discriminator (a second, fresh experiment). The separation
+        # above proves the *effect* — this input made the target slower. It does
+        # not prove the *cause* — that the input was interpreted as SQL. The
+        # dose-response pair does: a delay that scales with the sleep argument
+        # is the signature of an interpreter reading the value, and it is the
+        # one signature rate limiting, WAF heuristics and load variance cannot
+        # produce. An incomplete dose measurement is inconclusive, never a
+        # refutation; a complete one that does not track the dose is a refusal
+        # naming both medians.
+        dose = self._measure_dose(
+            url,
+            param,
+            where=where,
+            companions=companions,
+            dose_short=str(
+                confirm.get("dose_short_payload")
+                or f"1 AND SLEEP({DOSE_SHORT_SECONDS})"
+            ),
+            dose_long=str(
+                confirm.get("dose_long_payload") or f"1 AND SLEEP({DOSE_LONG_SECONDS})"
+            ),
+        )
+        if dose is None:
+            return refuse(
+                candidate,
+                "the populations separated, but a dose-response measurement failed "
+                "before both doses were complete, so the claim is inconclusive: "
+                "the effect was observed, the cause was not established",
+            )
+        dose_gap = DOSE_LONG_SECONDS - DOSE_SHORT_SECONDS
+        dose_margin = DOSE_MARGIN_FRACTION * dose_gap
+        dose_difference = dose[1] - dose[0]
         at = self.gate.now()
         evidence = Evidence(
             kind=OBS_HTTP_RESPONSE,
@@ -114,16 +172,27 @@ class TimingVerifier:
                 "injected_samples": len(injected),
                 "baseline_payload": baseline_payload,
                 "injected_payload": injected_payload,
+                "dose_short_median": round(dose[0], 4),
+                "dose_long_median": round(dose[1], 4),
+                "dose_gap_seconds": dose_gap,
+                "dose_margin": round(dose_margin, 4),
+                "dose_tracks": dose_difference >= dose_margin,
                 "variant": str(confirm.get("variant") or ""),
-                "reason": "fresh differential measurement through the policy gate",
+                "reason": (
+                    "fresh differential measurement through the policy gate, with a "
+                    "dose-response discrimination of the delay's cause"
+                ),
             },
         )
-        if difference < margin:
+        if dose_difference < dose_margin:
             return refuse(
                 candidate,
                 (
-                    f"fresh populations differ by {difference:.2f}s, below the "
-                    f"declared margin of {margin:.2f}s: a slow target is not a finding"
+                    f"the populations separated, but the delay does not track the "
+                    f"SQL dose (dose {DOSE_LONG_SECONDS}s - {DOSE_SHORT_SECONDS}s moved "
+                    f"the median {dose_difference:.2f}s, wanted >= {dose_margin:.2f}s): "
+                    "a timing effect without an interpreter behind it is not a "
+                    "SQL finding"
                 ),
             )
         Verdict.check_independence(candidate.proposer_grade, evidence)
@@ -133,7 +202,8 @@ class TimingVerifier:
             evidence=evidence,
             reason=(
                 f"fresh differential measurement separated the populations by "
-                f"{difference:.2f}s (margin {margin:.2f}s)"
+                f"{difference:.2f}s (margin {margin:.2f}s) and the delay tracked "
+                f"the SQL dose ({dose_difference:.2f}s across a {dose_gap:.1f}s gap)"
             ),
             proposer_grade=candidate.proposer_grade,
         )
@@ -141,6 +211,48 @@ class TimingVerifier:
     # ------------------------------------------------------------------ #
     # measurement
     # ------------------------------------------------------------------ #
+
+    def _measure_dose(
+        self,
+        url: str,
+        param: str,
+        *,
+        where: str = "query",
+        companions: dict[str, str] | None = None,
+        dose_short: str = "",
+        dose_long: str = "",
+    ) -> tuple[float, float] | None:
+        """Fresh medians for the short and long sleep doses, or ``None``.
+
+        The payloads travel on the confirmation spec — the winning variant's
+        own shape at the two declared doses, so the dose experiment asks *this*
+        injection and never a second copy of a grammar that could drift. The
+        SQL fallbacks below exist only for specs that name no dose payloads,
+        and are pinned to the technique's table by the test suite.
+        """
+        short = self._measure(
+            url,
+            param,
+            dose_short or f"1 AND SLEEP({DOSE_SHORT_SECONDS})",
+            f"{url}#dose-short",
+            where=where,
+            companions=companions,
+            count=DOSE_SAMPLES,
+        )
+        if short is None:
+            return None
+        long = self._measure(
+            url,
+            param,
+            dose_long or f"1 AND SLEEP({DOSE_LONG_SECONDS})",
+            f"{url}#dose-long",
+            where=where,
+            companions=companions,
+            count=DOSE_SAMPLES,
+        )
+        if long is None:
+            return None
+        return (statistics.median(short), statistics.median(long))
 
     def _measure(
         self,
@@ -151,6 +263,7 @@ class TimingVerifier:
         *,
         where: str = "query",
         companions: dict[str, str] | None = None,
+        count: int = SAMPLES,
     ) -> list[float] | None:
         """One population's fresh elapsed times, or ``None`` if any request failed."""
         if where == "body":
@@ -179,7 +292,7 @@ class TimingVerifier:
         else:
             detail = {"url": with_parameter(url, param, payload), "method": "GET"}
         samples: list[float] = []
-        for _ in range(SAMPLES):
+        for _ in range(count):
             outcome = self.gate.run(
                 EffectRequest(
                     kind="http.request",
@@ -198,4 +311,11 @@ class TimingVerifier:
         return samples
 
 
-__all__ = ["CONFIRM_KIND", "TimingVerifier"]
+__all__ = [
+    "CONFIRM_KIND",
+    "DOSE_LONG_SECONDS",
+    "DOSE_MARGIN_FRACTION",
+    "DOSE_SAMPLES",
+    "DOSE_SHORT_SECONDS",
+    "TimingVerifier",
+]

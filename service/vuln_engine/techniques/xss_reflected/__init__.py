@@ -15,6 +15,7 @@ from __future__ import annotations
 from ...kernel.observation import Observation
 from ...kernel.technique import (
     CAP_PUBLIC_PARAM,
+    CAP_RESPONSE_REFLECTS_INPUT,
     EngagementSeed,
     Hypothesis,
     ProbeGrammar,
@@ -33,19 +34,34 @@ class XssReflected:
 
     manifest = MANIFEST
 
+    #: What ``surfaces()`` actually reads — the OR-gate in full. The manifest's
+    #: ``preconditions`` names only the declared claim (``public_param``); the
+    #: *measured* route (Capability Closure's reflection elicitor, or a graph
+    #: derivation that carries the claim in the surface's capabilities set) is
+    #: the second half of the gate. Closure reads this attribute to know which
+    #: capabilities it must be able to measure — declaring it here is what makes
+    #: the measured route reachable instead of a silent dead arm.
+    gate_capabilities = (CAP_PUBLIC_PARAM, CAP_RESPONSE_REFLECTS_INPUT)
+
     def surfaces(self, seed: EngagementSeed) -> list[Surface]:
         """Parameterised surfaces, in the order the operator declared them.
 
-        A surface the operator declared with a *different* capability is left
-        alone. That is what keeps a capability claim meaningful in both directions:
-        ``oob_fetch`` fires only where the surface claims the server fetches, and
-        this technique does not spend a canary on a parameter whose declared purpose
-        is to carry a URL somebody else fetches.
+        A surface whose *declared* claim is another technique's territory is
+        left alone — that is what keeps a capability claim meaningful in both
+        directions: ``oob_fetch`` fires where the surface claims the server
+        fetches, and this technique does not spend a canary on a parameter the
+        operator declared for that purpose. Every other route in is open: an
+        undeclared parameter, a declared ``public_param``, a *derived* or
+        *measured* ``public_param`` riding the surface's capabilities set, and a
+        surface the reflection elicitor measured as reflecting (Capability
+        Closure). ``claims()`` is the one accessor that reads both sources.
         """
         return [
             surface
             for surface in seed.with_param()
             if surface.capability in ("", CAP_PUBLIC_PARAM)
+            or surface.claims(CAP_PUBLIC_PARAM)
+            or surface.claims(CAP_RESPONSE_REFLECTS_INPUT)
         ]
 
     def hypotheses(self, surface: Surface) -> list[Hypothesis]:

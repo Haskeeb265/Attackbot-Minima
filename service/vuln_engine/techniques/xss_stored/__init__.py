@@ -36,16 +36,20 @@ class XssStored:
     manifest = MANIFEST
 
     def surfaces(self, seed: EngagementSeed) -> list[Surface]:
-        """Surfaces the operator declared as *storing*, with a body parameter.
+        """Surfaces established as *storing* — declared, or measured by the
+        storage elicitor.
 
         A stored technique on an ordinary form surface would double-probe it for
         half the information; the capability claim is what separates the two
-        classes' territories.
+        classes' territories. Since Capability Closure the claim can also come
+        from the engine itself: the storage elicitor submits a unique canary
+        and the read-back carrying it establishes the claim at ``reflection``
+        grade on the surface's ``capabilities`` set.
         """
         return [
             surface
             for surface in seed.with_param()
-            if surface.capability == CAP_PERSISTENT_STORAGE
+            if surface.claims(CAP_PERSISTENT_STORAGE)
         ]
 
     def hypotheses(self, surface: Surface) -> list[Hypothesis]:

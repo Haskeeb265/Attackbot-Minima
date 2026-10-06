@@ -73,6 +73,7 @@ from service.vuln_engine.scheduler.campaign import Budget, Campaign, CampaignRep
 from service.vuln_engine.scheduler.driver import Engine, RunReport  # noqa: E402
 from service.vuln_engine.scheduler.pool import HypothesisPool  # noqa: E402
 from service.vuln_engine.scheduler.replay import replay  # noqa: E402
+from service.vuln_engine.scheduler.tree import AndNode, OrNode, Tree  # noqa: E402
 from service.vuln_engine.world.holding_pen import HoldingPen  # noqa: E402
 from service.vuln_engine.world.log import WorldLog  # noqa: E402
 
@@ -357,6 +358,7 @@ def run(
     output_dir: Path,
     force: bool = False,
     advisory: Advisory | None = None,
+    elicit: bool = False,
 ) -> RunReport:
     """Wire the engine and run it.  The only function in this file that sends traffic."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -402,6 +404,7 @@ def run(
         validator=Validator(),
         pen=HoldingPen(output_dir / "holding_pen.jsonl"),
         pool=HypothesisPool(),
+        elicit=elicit,
     )
     report = engine.run()
     (output_dir / "report.json").write_text(
@@ -418,6 +421,8 @@ def campaign_run(
     force: bool = False,
     advisory: Advisory | None = None,
     widening: dict | None = None,
+    elicit: bool = False,
+    tree: "Tree | None" = None,
 ) -> CampaignReport:
     """Wire the campaign and spend its round budget.  Phase 2's runner, CLI-exposed."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -454,8 +459,51 @@ def campaign_run(
         abducer=abduce,
         validator=Validator(),
         pen=HoldingPen(output_dir / "holding_pen.jsonl"),
+        elicit=elicit,
+        tree=tree,
     )
     return campaign.run(Budget(rounds=rounds))
+
+
+def load_attack_tree(path: str) -> Tree:
+    """Parse ``--attack-tree``'s JSON into a :class:`Tree`.
+
+    The file is data, not code: ``{"root": name, "nodes": [{"kind": "or",
+    "name", "techniques"} | {"kind": "and", "name", "requires", "objective"}]}``.
+    Malformed shapes fail loudly here, before a campaign spends anything — the
+    same loudness a manifest that validates badly gets at discovery.
+    """
+    document = json.loads(Path(path).read_text(encoding="utf-8"))
+    nodes: list[OrNode | AndNode] = []
+    for entry in document.get("nodes") or []:
+        kind = str(entry.get("kind") or "or")
+        if kind == "or":
+            nodes.append(
+                OrNode(
+                    name=str(entry.get("name") or ""),
+                    techniques=tuple(str(name) for name in entry.get("techniques") or ()),
+                )
+            )
+        elif kind == "and":
+            objective = entry.get("objective") or {}
+            nodes.append(
+                AndNode(
+                    name=str(entry.get("name") or ""),
+                    requires=tuple(str(name) for name in entry.get("requires") or ()),
+                    objective=OrNode(
+                        name=str(objective.get("name") or ""),
+                        techniques=tuple(
+                            str(name) for name in objective.get("techniques") or ()
+                        ),
+                    ),
+                )
+            )
+        else:
+            raise ValueError(f"attack tree node {entry.get('name')!r} has unknown kind {kind!r}")
+    root = str(document.get("root") or "")
+    if not root or not nodes:
+        raise ValueError("an attack tree needs a root name and at least one node")
+    return Tree(root=root, nodes=tuple(nodes))
 
 
 def parse_surface(token: str) -> Surface:
@@ -547,6 +595,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--driver", default="auto", choices=("auto", "playwright", "cdp"))
     parser.add_argument("--output-dir", default="", help="where the run writes (default: per target)")
     parser.add_argument("--force", action="store_true", help="ignore the receipts ledger")
+    parser.add_argument(
+        "--elicit",
+        action="store_true",
+        help=(
+            "Capability Closure: before the ordinary pass, measure the "
+            "preconditions the techniques gate on (reflection, remote fetch, "
+            "timing, sessions, storage) with the elicitor corpus, and let the "
+            "measured facts open the technique gates a declared claim alone "
+            "used to have to open"
+        ),
+    )
     parser.add_argument("--campaign", type=int, default=0, metavar="ROUNDS", help="run the Phase 2 campaign for ROUNDS rounds instead of one pass")
     parser.add_argument("--llm-draft", action="store_true", help="draft advisory report prose via the LLM junctions (no-op without a key)")
     parser.add_argument(
@@ -595,6 +654,25 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "do not claim can_influence_remote_fetch from URL-shaped parameter "
             "names (the claim only arms an SSRF hypothesis; verification proves it)"
+        ),
+    )
+    parser.add_argument(
+        "--graph-include-historical",
+        action="store_true",
+        help=(
+            "propose surfaces from URL nodes recon marked historical (dead nodes "
+            "are always skipped; historical ones are an operator opt-in)"
+        ),
+    )
+    parser.add_argument(
+        "--attack-tree",
+        default="",
+        metavar="JSON",
+        help=(
+            "gate each campaign round's arm pick through the AND/OR attack tree "
+            "described in the file ({root, nodes: [{kind: or, name, techniques} | "
+            "{kind: and, name, requires, objective}]}); parked subtrees are not "
+            "spent on"
         ),
     )
     parser.add_argument(
@@ -761,6 +839,7 @@ def main(argv: list[str] | None = None) -> int:
             scope_state=lambda host: profile.scope.check_host(host).state,
             max_surfaces=max(1, args.max_surfaces),
             infer_remote_fetch=not args.no_infer_remote_fetch,
+            include_historical=args.graph_include_historical,
         )
         graph_seed = derived.report
         if args.hypothesize_from_recon:
@@ -772,6 +851,7 @@ def main(argv: list[str] | None = None) -> int:
                 scope_state=lambda host: profile.scope.check_host(host).state,
                 max_rows=MAX_GRAPH_CONTEXT,
                 infer_remote_fetch=not args.no_infer_remote_fetch,
+                include_historical=args.graph_include_historical,
             )
         declared = list(profile.seed.surfaces)
         profile.seed = EngagementSeed(
@@ -841,6 +921,7 @@ def main(argv: list[str] | None = None) -> int:
                 navigation.selected_nodes,
                 scope_state=lambda host: profile.scope.check_host(host).state,
                 infer_remote_fetch=not args.no_infer_remote_fetch,
+                include_historical=args.graph_include_historical,
             )
             existing = list(profile.seed.surfaces)
             profile.seed = EngagementSeed(
@@ -894,6 +975,13 @@ def main(argv: list[str] | None = None) -> int:
             _out(f"  junction: {widening_result.reason}")
 
     if args.campaign > 0:
+        attack_tree: Tree | None = None
+        if args.attack_tree:
+            try:
+                attack_tree = load_attack_tree(args.attack_tree)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                print(f"attack tree: {exc}", file=sys.stderr)
+                return 2
         campaign_report = campaign_run(
             profile,
             output_dir=output_dir,
@@ -901,6 +989,8 @@ def main(argv: list[str] | None = None) -> int:
             force=args.force,
             advisory=advisory,
             widening=widening,
+            elicit=args.elicit,
+            tree=attack_tree,
         )
         campaign_payload = campaign_report.to_dict()
         # Same provenance the single-run report carries: what the graph-derived
@@ -954,7 +1044,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if campaign_report.findings else 1
 
-    report = run(profile, output_dir=output_dir, force=args.force, advisory=advisory)
+    report = run(
+        profile, output_dir=output_dir, force=args.force, advisory=advisory, elicit=args.elicit
+    )
     payload = report.to_dict()
     if graph_seed is not None:
         payload["graph_seed"] = graph_seed
@@ -1012,6 +1104,18 @@ def main(argv: list[str] | None = None) -> int:
         f"uncleared effects: {gate['uncleared_effects']}; "
         f"out of scope: {gate['out_of_scope_requests']}"
     )
+    if report.closure:
+        established = report.closure.get("established", [])
+        _out(
+            f"  closure:    {len(established)} capability fact(s) established, "
+            f"{len(report.closure.get('negatives', []))} negative(s), "
+            f"{report.closure.get('refused', 0)} refused"
+        )
+        for fact in established:
+            _out(
+                f"    + {fact.get('capability')} on {fact.get('surface_key')} "
+                f"(grade {fact.get('grade')})"
+            )
     _out(f"  counts:     {report.counts}")
     _out(f"  findings:   {len(report.findings)}")
     for line in report.report_lines:

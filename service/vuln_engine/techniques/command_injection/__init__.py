@@ -31,21 +31,25 @@ class CommandInjection:
 
     manifest = MANIFEST
 
+    #: What ``surfaces()`` actually reads (see sqli_blind_time's note: the
+    #: manifest's ``preconditions`` names the cheap door, not this one).
+    gate_capabilities = (CAP_DELAYED_RESPONSE,)
+
     def surfaces(self, seed: EngagementSeed) -> list[Surface]:
-        """Only surfaces whose *declared claim* is the timing influence.
+        """Surfaces with an established timing influence — declared or measured.
 
         The same deliberate narrowness the SQLi timing technique applies: the
         loudest probe set in the engine is not spent on a surface whose declared
-        purpose is an ordinary search box. The operator's ``delayed_response``
-        claim is what makes the spend legitimate — and it is the *same* claim
-        the SQLi technique reads, because both are explanations of one declared
-        fact ("time depends on this parameter"). Which of them is right is the
-        measurement's job, not the operator's.
+        purpose is an ordinary search box. The claim is what makes the spend
+        legitimate — and it is the *same* claim the SQLi technique reads, because
+        both are explanations of one measured fact ("time depends on this
+        parameter"). Which of them is right is the verifier's job, not the
+        operator's.
         """
         return [
             surface
             for surface in seed.with_param()
-            if surface.capability == CAP_DELAYED_RESPONSE
+            if surface.claims(CAP_DELAYED_RESPONSE)
         ]
 
     def hypotheses(self, surface: Surface) -> list[Hypothesis]:

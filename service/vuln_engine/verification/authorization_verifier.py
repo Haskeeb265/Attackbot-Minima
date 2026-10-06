@@ -25,13 +25,15 @@ a refutation — the same honesty rule the timing verifier applies.
 
 from __future__ import annotations
 
+import hashlib
 import statistics
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from ..kernel.claim import (
     CLAIM_SHAPES,
-    STATE_CHANGE_CAP_REASON,
+    CLAIM_STATE_CHANGE,
+    STATE_CHANGE_MISROUTE_REASON,
     is_differential_provable,
 )
 from ..kernel.evidence import (
@@ -51,6 +53,18 @@ CONFIRM_KIND = "authorization.differential"
 #: Status buckets, shared spelling with the technique's interpret module.
 _ALLOWED = range(200, 300)
 _DENIED = {301, 302, 303, 307, 308, 401, 403, 404}
+
+#: Content comparison. A 200 that carries a *different representation* than the
+#: owner's is not access to the object — generic success envelopes, redacted
+#: bodies and empty shells are all "200". The verifier therefore compares B's
+#: body against A's on the same object by exact hash first and length second:
+#: identical content is the strongest corroboration (the same bytes crossed the
+#: boundary), and a materially shorter body is the classic partial/redacted
+#: answer, refused rather than promoted. Length changes below the fraction are
+#: treated as representation noise (dynamic tokens, timestamps), not as
+#: evidence either way.
+_EMPTY_LENGTH = 0
+_LENGTH_DELTA_FRACTION = 0.5
 
 
 @dataclass
@@ -80,17 +94,17 @@ class AuthorizationVerifier:
                 f"{DIFFERENTIAL_SESSIONS!r}: the two sides cannot drift silently",
             )
 
-        # The claim-shape cap (NOVELTY.md §7.2, kernel/claim.py). This
+        # The claim-shape routing rule (NOVELTY.md §7.2, kernel/claim.py). This
         # verifier's flipped re-measure observes the read under two sessions;
         # it never re-executes a change. A state_change claim ("the change at
-        # T reaches V") is therefore weaker than what a ``proven`` verdict
-        # here would advertise, so the shape is refused outright — loudly,
-        # with the cap's reason, never silently downgraded. The cap lifts by
-        # deleting one entry from ``DIFFERENTIAL_PROVABLE`` when a
-        # setup-re-executing confirm kind exists — one place, no technique
-        # edits. Legacy specs with no shape are grandfathered: every
-        # hand-written technique (IDOR) predates shapes and proves exactly
-        # what this verifier measures.
+        # T reaches V") is provable today — by the setup-re-executing confirm
+        # kind (``authorization.state_change``) — but *not by this verifier*:
+        # a ``proven`` verdict here would score the weaker, often-legitimate
+        # claim "B can read V" at the strongest grade. So the shape is refused
+        # with the misroute reason, which names the verifier that does prove
+        # it — loudly, never silently downgraded. Legacy specs with no shape
+        # are grandfathered: every hand-written technique (IDOR) predates
+        # shapes and proves exactly what this verifier measures.
         claim_shape = str(confirm.get("claim_shape") or "")
         if claim_shape and claim_shape not in CLAIM_SHAPES:
             return refuse(
@@ -98,20 +112,37 @@ class AuthorizationVerifier:
                 f"the confirmation spec's claim_shape {claim_shape!r} is not one "
                 f"the engine speaks: {', '.join(CLAIM_SHAPES)}",
             )
+        if claim_shape == CLAIM_STATE_CHANGE:
+            return refuse(candidate, STATE_CHANGE_MISROUTE_REASON)
         if claim_shape and not is_differential_provable(claim_shape):
-            return refuse(candidate, STATE_CHANGE_CAP_REASON)
+            return refuse(
+                candidate,
+                f"no verifier proves the {claim_shape!r} claim shape at "
+                "differential today",
+            )
 
         # Flipped order, deliberately: the proposer measured A then B; the
-        # verifier measures B then A. Fresh requests, fresh identities.
-        status_b = self._measure(url, session="b", probe=candidate.id)
-        status_a = self._measure(url, session=None, probe=candidate.id)
-        if status_b is None or status_a is None:
+        # verifier measures B then A. Fresh requests, fresh identities — and,
+        # since the status code alone cannot tell "the object" from "a generic
+        # 200 envelope", each measurement keeps its body long enough to hash
+        # and size it, then drops it. The bodies are never logged, never
+        # carried on the evidence: only their hashes and lengths are.
+        b_response = self._measure(url, session="b", probe=candidate.id)
+        a_response = self._measure(url, session=None, probe=candidate.id)
+        if b_response is None or a_response is None:
             return refuse(
                 candidate,
                 "a flipped measurement failed before both identities answered, so "
                 "the claim is inconclusive rather than refuted",
             )
+        status_b = b_response.status
+        status_a = a_response.status
         at = self.gate.now()
+        length_a = len(a_response.body)
+        length_b = len(b_response.body)
+        hash_a = hashlib.sha256(a_response.body).hexdigest()
+        hash_b = hashlib.sha256(b_response.body).hexdigest()
+        same_content = hash_a == hash_b
         evidence = Evidence(
             kind=OBS_HTTP_RESPONSE,
             grade=EVIDENCE_DIFFERENTIAL,
@@ -122,12 +153,44 @@ class AuthorizationVerifier:
                 "flipped_session_a_status": status_a,
                 "flipped_session_b_status": status_b,
                 "url": url,
-                "reason": "fresh two-session measurement through the policy gate, flipped order",
+                "session_a_body_length": length_a,
+                "session_b_body_length": length_b,
+                "session_a_body_hash": hash_a,
+                "session_b_body_hash": hash_b,
+                "same_content": same_content,
+                "reason": (
+                    "fresh two-session measurement through the policy gate, flipped "
+                    "order, compared by status and by content hash/length"
+                ),
             },
         )
         b_allowed = status_b in _ALLOWED
         a_allowed = status_a in _ALLOWED
         if b_allowed and a_allowed:
+            # Both 200 — now the content question, the one a status-only
+            # verifier could not ask. B's 200 must carry the *object*, not an
+            # empty shell or a generic envelope.
+            if length_b == _EMPTY_LENGTH:
+                return refuse(
+                    candidate,
+                    (
+                        f"session B answered {status_b} with an empty body: a 200 that "
+                        "carries nothing is not access to the object — partial, "
+                        "redacted or generic responses are not a boundary failure"
+                    ),
+                )
+            if not same_content:
+                fraction = abs(length_a - length_b) / max(length_a, length_b, 1)
+                if fraction >= _LENGTH_DELTA_FRACTION:
+                    return refuse(
+                        candidate,
+                        (
+                            f"session B's body differs materially from session A's "
+                            f"({length_b} vs {length_a} bytes, {fraction:.0%}): a 200 "
+                            "that carries a different representation is not proven "
+                            "access to the object"
+                        ),
+                    )
             Verdict.check_independence(candidate.proposer_grade, evidence)
             return Verdict(
                 candidate_id=candidate.id,
@@ -135,8 +198,13 @@ class AuthorizationVerifier:
                 evidence=evidence,
                 reason=(
                     f"fresh flipped measurement: session B answered {status_b} and "
-                    f"session A answered {status_a} for the same object — the "
-                    "declared access boundary is absent"
+                    f"session A answered {status_a} for the same object with "
+                    + (
+                        "identical content"
+                        if same_content
+                        else f"equivalent content ({length_b} vs {length_a} bytes)"
+                    )
+                    + " — the declared access boundary is absent"
                 ),
                 proposer_grade=candidate.proposer_grade,
             )
@@ -161,8 +229,15 @@ class AuthorizationVerifier:
     # measurement
     # ------------------------------------------------------------------ #
 
-    def _measure(self, url: str, *, session: str | None, probe: str) -> int | None:
-        """One fresh request under one identity; the status, or ``None``."""
+    def _measure(
+        self, url: str, *, session: str | None, probe: str
+    ) -> RawHttpExchange | None:
+        """One fresh request under one identity; the exchange, or ``None``.
+
+        The exchange (not just the status) is what the content comparison
+        needs; the bodies it carries live exactly as long as hashing takes and
+        are then dropped — the evidence carries hashes and lengths only.
+        """
         detail: dict = {"url": url, "method": "GET"}
         if session:
             detail["_session"] = session
@@ -180,7 +255,7 @@ class AuthorizationVerifier:
         exchange: RawHttpExchange = outcome.effect
         if not exchange.ok:
             return None
-        return exchange.status
+        return exchange
 
 
 __all__ = ["CONFIRM_KIND", "AuthorizationVerifier"]

@@ -76,6 +76,14 @@ SLEEP_PAYLOADS: tuple[str, ...] = tuple(
 #: the family, and the first row is the family's representative.
 SLEEP_PAYLOAD = SLEEP_PAYLOADS[0]
 
+#: The dose-response discriminator's two doses, seconds. SQL that reaches an
+#: interpreter answers to the dose — the sleep argument is an input the
+#: interpreter reads — so a real finding's delay scales between these two
+#: payloads while a WAF/rate-limit artifact does not. The timing verifier's
+#: own constants are pinned to these by the test suite.
+DOSE_SHORT_SECONDS = 2.0
+DOSE_LONG_SECONDS = 6.0
+
 TIMING_BASELINE = "baseline"
 TIMING_INJECTED = "injected"
 
@@ -103,6 +111,24 @@ def variant_payload(variant: str) -> str:
         if name == variant:
             return template.replace("{d}", str(SLEEP_SECONDS))
     return ""
+
+
+def dose_payloads(variant: str) -> tuple[str, str]:
+    """The variant's shape at the two discriminator doses, ``(short, long)``.
+
+    The same interpolation shape the winning variant used — only the sleep
+    argument changes — because the dose question is about *the same* injection:
+    if the target parsed this shape once, a delay that scales with the argument
+    is the interpreter's signature. Empty strings when the variant is unknown;
+    the verifier then falls back to its own declared spelling.
+    """
+    for name, template in PAYLOAD_VARIANTS + BODY_VARIANTS:
+        if name == variant:
+            return (
+                template.replace("{d}", str(DOSE_SHORT_SECONDS)),
+                template.replace("{d}", str(DOSE_LONG_SECONDS)),
+            )
+    return ("", "")
 
 
 def _detail(hypothesis: Hypothesis, payload: str, timing_class: str) -> dict:
@@ -188,6 +214,8 @@ def probes(hypothesis: Hypothesis) -> list[ProbeSpec]:
 
 __all__ = [
     "BODY_VARIANTS",
+    "DOSE_LONG_SECONDS",
+    "DOSE_SHORT_SECONDS",
     "NAME",
     "PAYLOAD_VARIANTS",
     "QUIET_PAYLOAD",
@@ -197,6 +225,7 @@ __all__ = [
     "SLEEP_SECONDS",
     "TIMING_BASELINE",
     "TIMING_INJECTED",
+    "dose_payloads",
     "probe_id",
     "probes",
     "variant_payload",

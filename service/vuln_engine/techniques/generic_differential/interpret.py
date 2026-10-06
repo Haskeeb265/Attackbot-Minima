@@ -17,13 +17,15 @@ The honesty rules, in the order the code applies them:
 * anything ambiguous (a 5xx, a transport zero) proposes nothing — a
   measurement problem is not an authorization fact.
 
-The candidate's confirmation spec asks for ``authorization.differential`` —
-the existing verifier, unchanged. The verifier re-measures the *target* URL
-under both sessions, flipped; for the object-read plan that is exactly the
-claim; for the role-composition plan it re-measures the victim read, which is
-the half the claim rests on. The actor's state-change is the proposer's
-experiment, not the verifier's re-measure — the spec names the victim URL,
-which is the measurement a finding needs.
+The candidate's confirmation spec depends on the plan's own claim shape. An
+``object_read`` plan asks for ``authorization.differential`` — the existing
+verifier, unchanged: the flipped two-session re-measure of the target URL is
+exactly the claim. A ``state_change`` plan asks for
+``authorization.state_change`` — the setup-re-executing verifier: the claim is
+"the change at T reaches V", so the spec carries the change itself (the actor
+URL and method) for the verifier to execute fresh, between two unchanged
+victim reads under session B. The proposer's own actor run is *its* experiment;
+what travels on the spec is what to execute, never a conclusion.
 """
 
 from __future__ import annotations
@@ -109,17 +111,34 @@ def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[
                 f"target {plan.target.name} answered {target_status})"
             ),
             evidence=evidence,
-            confirm={
-                "kind": "authorization.differential",
-                "url": plan.target.url,
-                "param": hypothesis.surface.param,
-                "oracle": "two_sessions_one_object",
-                "probe": hypothesis.id,
-                # The claim's shape travels on the spec (NOVELTY.md §7.2): the
-                # verifier refuses to prove at differential what this shape
-                # does not license, instead of scoring the weaker proof.
-                "claim_shape": claim_shape,
-            },
+            confirm=(
+                {
+                    "kind": "authorization.state_change",
+                    "probe": hypothesis.id,
+                    "claim_shape": claim_shape,
+                    # The change travels as *what to execute*: the actor's URL
+                    # and method, for the verifier to run fresh as session A
+                    # between its own unchanged victim reads. The victim URL is
+                    # what the before/after reads measure.
+                    "actor": {
+                        "url": plan.actor.url,
+                        "method": plan.actor.method,
+                    },
+                    "victim_url": plan.target.url,
+                }
+                if claim_shape == claim.CLAIM_STATE_CHANGE
+                else {
+                    "kind": "authorization.differential",
+                    "url": plan.target.url,
+                    "param": hypothesis.surface.param,
+                    "oracle": "two_sessions_one_object",
+                    "probe": hypothesis.id,
+                    # The claim's shape travels on the spec (NOVELTY.md §7.2):
+                    # the verifier refuses to prove a shape its measurement
+                    # does not license, instead of scoring the weaker proof.
+                    "claim_shape": claim_shape,
+                }
+            ),
             payload="",
             repro_url=plan.target.url,
         )

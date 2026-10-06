@@ -22,6 +22,14 @@ const state = {
   following: false,
   jobTimer: null,
   jobView: null,
+  traces: [],
+  traceKey: null,
+  traceCursor: 0,
+  traceSteps: [],
+  traceSummary: null,
+  traceFollowing: false,
+  traceTimer: null,
+  traceRaw: false,
 };
 
 // ------------------------------------------------------------------ //
@@ -63,6 +71,7 @@ function showPanel(name) {
   if (name === "inputs") loadInputs();
   if (name === "engine") { renderEngineLog(); if (state.following) pollEngineLog(); }
   if (name === "output") loadOutput();
+  if (name === "trace") { renderTrace(); if (state.traceFollowing) pollTrace(); }
   if (name === "run") renderJobs();
 }
 
@@ -80,11 +89,33 @@ async function loadState() {
       state.program ? state.program.handle : null);
     fillSelect($("engine-run-select"), state.engineRuns.map((r) => r.run), state.engineRun);
     fillSelect($("recon-target-select"), state.reconTargets, state.reconTarget);
-    setLive(true, `polling · ${state.programs.length} programs · ${state.engineRuns.length} engine runs`);
+    fillTraceSelect(data.traces || []);
+    setLive(true, `polling · ${state.programs.length} programs · ${state.engineRuns.length} engine runs · ${state.traces.length} traces`);
     renderJobsIfVisible();
   } catch (err) {
     setLive(false, err.message);
   }
+}
+
+function fillTraceSelect(traces) {
+  state.traces = traces;
+  const sel = $("trace-run-select");
+  if (!sel) return;
+  const current = state.traceKey ?? sel.value;
+  sel.innerHTML = "";
+  if (!traces.length) {
+    const opt = document.createElement("option");
+    opt.value = ""; opt.textContent = "no engine runs yet";
+    sel.appendChild(opt);
+    return;
+  }
+  for (const t of traces) {
+    const opt = document.createElement("option");
+    opt.value = t.key;
+    opt.textContent = t.label;
+    sel.appendChild(opt);
+  }
+  if (current && traces.some((t) => t.key === current)) sel.value = current;
 }
 
 function fillSelect(sel, values, selected) {
@@ -511,6 +542,264 @@ function renderRow(row) {
 }
 
 // ------------------------------------------------------------------ //
+// 7. trace — exactly how the engine did the work, step by step
+// ------------------------------------------------------------------ //
+
+const PHASE_LABEL = {
+  input: "input", measure: "capability measurement", propose: "proposal",
+  reason: "AI reasoning", plan: "planning", spec: "confirmation spec",
+  request: "request sent", gate: "policy gate", result: "response received",
+  internal: "internal effect", observe: "observation", judge: "oracle judgement",
+  candidate: "candidate", verdict: "verdict", lead: "lead", receipt: "receipt",
+  note: "note", stop: "stop", output: "output", other: "other",
+};
+const PHASE_COLOR = {
+  input: "#58a6ff", measure: "#bc8cff", propose: "#d2a8ff", reason: "#f0883e",
+  plan: "#79c0ff", spec: "#56d364", request: "#8b949e", gate: "#e3b341",
+  result: "#8b949e", internal: "#8b949e", observe: "#a5d6ff", judge: "#3fb950",
+  candidate: "#f0883e", verdict: "#3fb950", lead: "#d29922", receipt: "#8b949e",
+  note: "#8b949e", stop: "#d29922", output: "#58a6ff", other: "#8b949e",
+};
+const jpretty = (o) => esc(JSON.stringify(o, null, 2));
+
+function traceKeyValue() {
+  const sel = $("trace-run-select");
+  return sel ? sel.value : "";
+}
+
+async function loadTrace() {
+  const key = traceKeyValue();
+  const box = $("trace-steps");
+  if (!key) { box.innerHTML = '<span class="muted">No engine run selected.</span>'; return; }
+  state.traceKey = key;
+  state.traceCursor = 0;
+  state.traceSteps = [];
+  state.traceSummary = null;
+  box.innerHTML = '<span class="muted">loading…</span>';
+  await pollTrace();
+  loadTraceOutput();
+}
+
+async function pollTrace() {
+  const key = traceKeyValue();
+  if (!key) return;
+  try {
+    const data = await api(`/api/trace?key=${encodeURIComponent(key)}&cursor=${state.traceCursor}&limit=500`);
+    if (!data.available) {
+      $("trace-steps").innerHTML = `<span class="muted">${esc(data.reason || "not available")}</span>`;
+      return;
+    }
+    state.traceSummary = data.summary;
+    if (data.steps.length) {
+      state.traceSteps.push(...data.steps);
+      state.traceCursor = data.next_index;
+    }
+    renderTrace();
+    setLive(true, `trace ${key} · ${data.total_rows} rows`);
+  } catch (err) {
+    setLive(false, err.message);
+  }
+}
+
+function traceStepBody(step) {
+  const r = step.raw || {};
+  const t = step.type;
+  if (t === "run.begin") {
+    const surfaces = r.surfaces || [];
+    const caps = r.capabilities || {};
+    const capRows = Object.entries(caps).map(([name, cap]) =>
+      `<span class="badge ${cap.available ? "in-scope" : "out-of-scope"}">${esc(name)}: ${cap.available ? "available" : "unavailable"}</span>`).join(" ");
+    return `
+      <div class="kv">
+        <div class="k">target</div><div class="v">${esc(r.target)}</div>
+        ${r.criteria ? `<div class="k">criteria</div><div class="v">${jpretty(r.criteria)}</div>` : ""}
+        ${r.techniques ? `<div class="k">techniques</div><div class="v">${esc((r.techniques || []).join(", "))}</div>` : ""}
+      </div>
+      <div class="muted small">the initial input the engine was handed</div>
+      <table><thead><tr><th>url</th><th>param</th><th>where</th><th>capability</th><th>label</th></tr></thead>
+      <tbody>${surfaces.map((s) => `<tr><td>${esc(s.url)}</td><td>${esc(s.param || "")}</td><td>${esc(s.where || "")}</td><td><span class="badge">${esc(s.capability || "")}</span></td><td class="muted small">${esc(s.label || "")}</td></tr>`).join("")}</tbody></table>
+      <div class="small">transports: ${capRows}</div>`;
+  }
+  if (t === "capability.measured") {
+    return `<span class="badge ${r.measured ? "in-scope" : "out-of-scope"}">${r.measured ? "measured" : "not measured"}</span>
+      <b>${esc(r.capability)}</b> on <code>${esc(r.surface_key)}</code>`;
+  }
+  if (t === "loop.round") {
+    return `round <b>${esc(r.round)}</b> on <code>${esc(r.surface_key)}</code> — ${esc(r.proposed)} proposed, ${esc(r.fresh)} fresh` +
+      (r.history && r.history.length ? `<div class="muted small">already tried: ${esc(r.history.join(", "))}</div>` : "");
+  }
+  if (t === "llm.junction") {
+    const mode = r.degraded ? "<span class=\"badge out-of-scope\">degraded</span>" : "<span class=\"badge in-scope\">live</span>";
+    return `
+      <div>${mode} junction <b>${esc(r.junction)}</b> · model ${esc(r.model || "—")} · validated: ${esc(r.validated)} (${esc(r.validation || "")})</div>
+      ${r.reason ? `<div class="muted small">reason: ${esc(r.reason)}</div>` : ""}
+      <div class="jgrid">
+        <div><h4>Model input (what the agent was shown)</h4><pre class="mini">${jpretty(r.junction_input || {})}</pre></div>
+        <div><h4>Model answer</h4><pre class="mini">${jpretty(r.answer || {})}</pre></div>
+      </div>`;
+  }
+  if (t === "confirmation.planned") {
+    return `<span class="badge">${esc(r.label)}</span> routine <b>${esc(r.routine_id)}</b>
+      · confirm kind ${esc(r.confirm_kind)} · oracle <b>${esc(r.oracle)}</b> on <code>${esc(r.surface_key)}</code>`;
+  }
+  if (t === "confirmation.spec") {
+    const s = r.spec || {};
+    return `oracle <b>${esc(s.oracle)}</b> · samples ${esc(s.samples)} · margin ${esc(s.margin)}
+      <div class="small">injected: <code>${esc(s.injected_payload || "")}</code></div>
+      <div class="small muted">baseline: <code>${esc(s.baseline_payload || "")}</code> · control: <code>${esc(s.control_payload || "")}</code></div>
+      <div class="muted small">spec digest ${esc(s.spec_digest || "")}</div>`;
+  }
+  if (t === "effect.request") {
+    return `→ ${esc(r.kind)} · <code>${esc((r.detail || {}).url || r.operation || "")}</code> <span class="muted small">(${esc(r.technique || "")})</span>`;
+  }
+  if (t === "gate.decision") {
+    return `<span class="badge ${String(r.verb).toLowerCase()}">${esc(r.verb)}</span> ${esc(r.host)} · ${esc(r.kind)} · ${esc(r.technique || "")} · ${esc(r.reason || "")}`;
+  }
+  if (t === "effect.result") {
+    return `← ${esc(r.kind)} status ${esc(r.status ?? "—")} · ${esc(r.bytes ?? "")}B · ${esc(r.elapsed ?? "")}s ${esc(r.error || "")}
+      ${r.markers_true && Object.keys(r.markers_true).length ? `<div class="small">markers: ${jpretty(r.markers_true)}</div>` : ""}`;
+  }
+  if (t === "effect.internal") {
+    return `internal ${esc(r.kind)} ${esc(r.verb || "")} <code>${esc(r.url || "")}</code> · interactions ${esc(r.interactions ?? 0)} ${esc(r.error || r.reason || "")}`;
+  }
+  if (t === "confirmation.executed") {
+    const f = r.features || {};
+    const inj = (f.injected || []).map((x) => x.elapsed_ms != null ? `${x.elapsed_ms}ms` : "").filter(Boolean);
+    return `<span class="badge ${r.oracle_true ? "proven" : "refused"}">${r.oracle_true ? "oracle held" : "oracle did not hold"}</span>
+      routine <b>${esc(r.routine_id)}</b> on <code>${esc(r.surface_key)}</code>
+      <div class="muted small">proven: ${esc(r.proven)} · injected elapsed: ${esc(inj.join(", ") || "—")}</div>`;
+  }
+  if (t === "confirmation.refused") {
+    return `<span class="badge refused">refused</span> <b>${esc(r.routine_id)}</b> — ${esc(r.reason)}`;
+  }
+  if (t === "candidate" || t === "candidate.junction") {
+    return `<b>${esc(r.vuln_class || "")}</b> ${esc(r.summary || "")}
+      <div class="small">payload: <code>${esc(r.payload || "")}</code></div>
+      <div class="small">repro: <code>${esc(r.repro_url || "")}</code></div>
+      <div class="muted small">technique ${esc(r.technique || "")} · origin ${esc(r.origin || "")}</div>`;
+  }
+  if (t === "verdict") {
+    return `${r.proven ? '<span class="badge proven">PROVEN</span>' : '<span class="badge refused">REFUSED</span>'}
+      grade ${esc(r.grade || "")} · candidate ${esc(r.candidate || "")}
+      <div>${esc(r.reason || "")}</div>
+      ${r.proposer_grade ? `<div class="muted small">proposed on ${esc(r.proposer_grade)} · confirmed by ${esc(r.grade || "")}</div>` : ""}`;
+  }
+  if (t === "lead.classified") {
+    return `<span class="badge">${esc(r.label)}</span> ${esc(r.reason)}
+      <div class="muted small">proposal ${esc(r.proposal_id || "")} on <code>${esc(r.surface_key || "")}</code></div>`;
+  }
+  if (t === "loop.stopped") {
+    return `stopped on <code>${esc(r.surface_key)}</code> (round ${esc(r.round)}) — <b>${esc(r.reason)}</b>
+      <div class="muted small">${esc(r.detail || "")}</div>`;
+  }
+  if (t === "run.end") {
+    return `run finished<br><pre class="mini">${jpretty(r.counts || {})}</pre>`;
+  }
+  if (t === "scheduler.pick") {
+    return `${esc(r.technique)} on <code>${esc(r.surface || "")}</code> — ${esc(r.reason || "")}`;
+  }
+  if (t === "note") {
+    const h = r.hypothesis || {};
+    return `<span class="badge">${esc(r.stage || "")}</span> ${esc(h.claim || r.reason || "")}
+      ${h.id ? `<div class="muted small">id ${esc(h.id)} · rests on ${esc(h.rests_on || "")}</div>` : ""}`;
+  }
+  if (t === "observation") {
+    return `${esc(r.kind)} <pre class="mini">${jpretty(r.payload || {})}</pre>`;
+  }
+  if (t === "receipt") {
+    return `${esc(r.arm)} → ${esc(r.outcome)}${r.conclusive ? " (conclusive)" : ""}`;
+  }
+  return `<pre class="mini">${jpretty(r)}</pre>`;
+}
+
+function renderTrace() {
+  const box = $("trace-steps");
+  const onlyAI = $("trace-only-ai").checked;
+  const onlyGate = $("trace-only-gate").checked;
+  const onlyFindings = $("trace-only-findings").checked;
+  let steps = state.traceSteps;
+  if (onlyAI) steps = steps.filter((s) => s.phase === "reason");
+  if (onlyGate) steps = steps.filter((s) => s.phase === "gate");
+  if (onlyFindings) steps = steps.filter((s) => ["candidate", "verdict", "judge", "lead"].includes(s.phase));
+  if (!steps.length) {
+    box.innerHTML = state.traceSteps.length
+      ? '<span class="muted">No steps match the filter.</span>'
+      : '<span class="muted">No steps yet — the run may not have started writing its ledger.</span>';
+  } else {
+    box.innerHTML = steps.map((s) => {
+      const color = PHASE_COLOR[s.phase] || PHASE_COLOR.other;
+      const raw = state.traceRaw ? `<pre class="mini raw">${jpretty(s.raw)}</pre>` : "";
+      return `<div class="step phase-${esc(s.phase)}" style="border-left-color:${color}">
+        <div class="shead">
+          <span class="phase-chip" style="background:${color}22;color:${color};border-color:${color}">${esc(PHASE_LABEL[s.phase] || s.phase)}</span>
+          <span class="wtype">${esc(s.type)}</span>
+          <span class="wat">#${s.index} · ${fmtTime(s.at)}</span>
+        </div>
+        <div class="stitle">${esc(s.title)}</div>
+        <div class="sbody">${traceStepBody(s)}</div>
+        ${raw}
+      </div>`;
+    }).join("");
+  }
+  renderTraceSummary();
+  $("trace-status").textContent = `${steps.length} of ${state.traceSteps.length} step(s)`;
+  $("trace-raw-toggle").textContent = state.traceRaw ? "Hide raw rows" : "Show raw rows";
+}
+
+function renderTraceSummary() {
+  const s = state.traceSummary;
+  const grid = $("trace-summary");
+  if (!s) { grid.innerHTML = ""; $("trace-legend").innerHTML = ""; return; }
+  grid.innerHTML = `
+    <div class="stat"><div class="num">${esc(s.flow)}</div><div class="lbl">flow</div></div>
+    <div class="stat"><div class="num">${s.rows}</div><div class="lbl">log rows</div></div>
+    <div class="stat good"><div class="num">${s.findings}</div><div class="lbl">proven findings</div></div>
+    <div class="stat"><div class="num">${Object.values(s.capabilities).reduce((a, b) => a + b.length, 0)}</div><div class="lbl">capabilities measured</div></div>
+    <div class="stat good"><div class="num">${s.gate.ALLOW}</div><div class="lbl">gate allow</div></div>
+    <div class="stat bad"><div class="num">${s.gate.DENY}</div><div class="lbl">gate deny</div></div>`;
+  $("trace-legend").innerHTML = Object.entries(s.by_phase)
+    .map(([p, n]) => `<span><span class="swatch" style="background:${PHASE_COLOR[p] || PHASE_COLOR.other}"></span>${esc(PHASE_LABEL[p] || p)} (${n})</span>`)
+    .join("");
+}
+
+async function loadTraceOutput() {
+  const key = traceKeyValue();
+  const body = $("trace-output");
+  if (!key) return;
+  body.innerHTML = '<span class="muted">loading…</span>';
+  try {
+    const data = await api(`/api/trace/output?key=${encodeURIComponent(key)}`);
+    if (!data.available) {
+      body.innerHTML = `<span class="muted">${esc(data.reason)}</span>`;
+      return;
+    }
+    const r = data.report || {};
+    const findings = r.findings || [];
+    body.innerHTML = `
+      <div class="muted small">source: ${esc(data.source)}</div>
+      <div class="statgrid">
+        <div class="stat good"><div class="num">${findings.length}</div><div class="lbl">findings</div></div>
+        <div class="stat"><div class="num">${(r.leads || []).length}</div><div class="lbl">leads</div></div>
+        <div class="stat"><div class="num">${Object.keys(((r.gate || {}).by_verb) || {}).length}</div><div class="lbl">gate verbs</div></div>
+      </div>
+      ${findings.length ? findings.map((f) => `
+        <div class="finding">
+          <b>${esc(f.vuln_class || "?")}</b> — grade ${esc(f.grade || "?")}
+          <div>${esc(f.summary || "")}</div>
+          ${f.payload ? `<div class="small">payload: <code>${esc(f.payload)}</code></div>` : ""}
+          ${f.repro_url ? `<div class="small">repro: <code>${esc(f.repro_url)}</code></div>` : ""}
+          ${f.reason ? `<div class="muted small">${esc(f.reason)}</div>` : ""}
+        </div>`).join("") : '<div class="muted card">No findings in this run.</div>'}
+      <h3>Report lines</h3>
+      <div class="logbox">${esc((r.report_lines || []).join("\n"))}</div>
+      <h3>Raw report</h3>
+      <pre class="mini">${jpretty(r)}</pre>`;
+  } catch (err) {
+    body.innerHTML = `<span class="error-text">${esc(err.message)}</span>`;
+  }
+}
+
+// ------------------------------------------------------------------ //
 // 6. engine output
 // ------------------------------------------------------------------ //
 
@@ -667,6 +956,34 @@ $("engine-follow").addEventListener("click", () => {
   }
 });
 
+$("trace-run-select").addEventListener("change", () => {
+  state.traceKey = $("trace-run-select").value;
+  state.traceCursor = 0;
+  state.traceSteps = [];
+  state.traceSummary = null;
+  renderTrace();
+  loadTrace();
+});
+$("trace-follow").addEventListener("click", () => {
+  state.traceFollowing = !state.traceFollowing;
+  $("trace-follow").textContent = `Follow: ${state.traceFollowing ? "on" : "off"}`;
+  $("trace-follow").classList.toggle("primary", state.traceFollowing);
+  if (state.traceFollowing) {
+    pollTrace();
+    state.traceTimer = setInterval(pollTrace, 1200);
+  } else if (state.traceTimer) {
+    clearInterval(state.traceTimer);
+    state.traceTimer = null;
+  }
+});
+for (const id of ["trace-only-ai", "trace-only-gate", "trace-only-findings"]) {
+  $(id).addEventListener("change", renderTrace);
+}
+$("trace-raw-toggle").addEventListener("click", () => {
+  state.traceRaw = !state.traceRaw;
+  renderTrace();
+});
+
 $("run-recon-btn").addEventListener("click", () => startJob("recon", {
   target: $("run-recon-target").value.trim(),
   until_converged: $("run-recon-converged").checked,
@@ -689,6 +1006,19 @@ $("run-engine-btn").addEventListener("click", () => startJob("engine", {
 $("run-fixture-btn").addEventListener("click", () => startJob("engine_fixture", {
   campaign: parseInt($("run-engine-campaign").value, 10) || 0,
   force: $("run-engine-force").checked,
+}));
+$("run-twogate-btn").addEventListener("click", () => startJob("twogate", {
+  target: $("run-twogate-target").value.trim(),
+  surfaces: $("run-twogate-surface").value.split("\n").map((s) => s.trim()).filter(Boolean),
+  cookies: [$("run-twogate-cookie").value.trim()].filter(Boolean),
+  session_b_cookie: $("run-twogate-cookie-b").value.trim(),
+  max_rounds: parseInt($("run-twogate-rounds").value, 10) || 3,
+  host_budget: parseInt($("run-twogate-budget").value, 10) || 0,
+  llm: $("run-twogate-llm").checked,
+}));
+$("run-twogate-fixture-btn").addEventListener("click", () => startJob("twogate_fixture", {
+  max_rounds: parseInt($("run-twogate-rounds").value, 10) || 3,
+  llm: $("run-twogate-llm").checked,
 }));
 $("run-demo-btn").addEventListener("click", async () => {
   // The guided flow in one click: seed the demo program, then run the

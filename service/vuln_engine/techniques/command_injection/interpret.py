@@ -122,6 +122,9 @@ def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[
         return []
 
     winner_payload = probe_grammar.variant_payload(winner)
+    # The causal discriminator travels with the claim (see sqli_blind_time's
+    # interpreter): the winning shape at the two declared doses.
+    dose_short, dose_long = probe_grammar.dose_payloads(winner)
     difference = winner_median - baseline
     return [
         Candidate(
@@ -173,6 +176,8 @@ def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[
                 "companions": dict(surface.companions or {}),
                 "baseline_payload": probe_grammar.QUIET_PAYLOAD,
                 "injected_payload": winner_payload,
+                "dose_short_payload": dose_short,
+                "dose_long_payload": dose_long,
                 "variant": winner,
             },
             payload=winner_payload,

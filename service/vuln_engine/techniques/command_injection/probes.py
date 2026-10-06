@@ -51,6 +51,13 @@ QUIET_PAYLOAD = "ve-noop0"
 #: margin (the interpreter's) and the target's latency both read against it.
 SLEEP_SECONDS = 4.0
 
+#: The dose-response discriminator's two doses, seconds — the shell grammar's
+#: answer to "does the delay track the dose?" (the timing verifier pins its own
+#: constants to these). Same reasoning as the SQLi grammar's: the sleep argument
+#: is an input the shell reads, so a real injection's delay scales with it.
+DOSE_SHORT_SECONDS = 2.0
+DOSE_LONG_SECONDS = 6.0
+
 #: Samples per population, alternating.
 SAMPLES_PER_POPULATION = 2
 
@@ -97,6 +104,23 @@ def variant_payload(variant: str) -> str:
         if name == variant:
             return _render(template)
     return ""
+
+
+def dose_payloads(variant: str) -> tuple[str, str]:
+    """The variant's shape at the two discriminator doses, ``(short, long)``.
+
+    The same interpolation shape the winning variant used — only the sleep
+    argument changes — so the verifier's dose experiment asks *this* injection
+    whether the delay tracks the dose. Empty strings when the variant is
+    unknown; the verifier then falls back to its own declared spelling.
+    """
+    for name, template in PAYLOAD_VARIANTS + BODY_VARIANTS:
+        if name == variant:
+            return (
+                template.replace("{b}", BASE_VALUE).replace("{d}", str(DOSE_SHORT_SECONDS)),
+                template.replace("{b}", BASE_VALUE).replace("{d}", str(DOSE_LONG_SECONDS)),
+            )
+    return ("", "")
 
 
 def _detail(hypothesis: Hypothesis, payload: str, timing_class: str) -> dict:

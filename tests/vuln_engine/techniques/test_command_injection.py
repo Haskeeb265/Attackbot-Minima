@@ -204,12 +204,16 @@ def test_an_incomplete_variant_population_is_not_a_winner() -> None:
 
 
 def test_the_engine_proves_a_command_injection_on_the_fakes(build_gate, clock) -> None:
-    semicolon = grammar.variant_payload("semicolon")
+    import re
 
     def injectable_backend(url: str) -> RawHttpExchange:
+        # A shell-interpreter fake: the delay tracks the sleep argument — the
+        # dose-response signature the verifier's discriminator demands (a flat
+        # delay on the exact payload would now fail the finding).
         delay = 0.1
-        if semicolon in unquote(url):
-            delay = 0.1 + MARGIN_SECONDS + 1.0
+        match = re.search(r"sleep ([0-9.]+)", unquote(url))
+        if match:
+            delay += float(match.group(1))
         return RawHttpExchange(url=url, status=200, body=b"ok", headers={}, elapsed=delay)
 
     gate = build_gate(http=FakeHttpEffect(respond=injectable_backend))

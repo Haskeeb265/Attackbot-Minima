@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field as _field
 
-from ..kernel.claim import CLAIM_SHAPES, DIFFERENTIAL_PROVABLE
+from ..kernel.claim import CLAIM_OBJECT_READ, CLAIM_SHAPES, CLAIM_STATE_CHANGE
 
 
 @dataclass(frozen=True)
@@ -69,8 +69,15 @@ VERIFIER_KINDS: tuple[VerifierKind, ...] = (
         name="authorization",
         confirm_kind="authorization.differential",
         measurement="differential",
-        claim_shapes=frozenset(DIFFERENTIAL_PROVABLE),
+        claim_shapes=frozenset({CLAIM_OBJECT_READ}),
         re_executes_setup=False,
+    ),
+    VerifierKind(
+        name="state_change",
+        confirm_kind="authorization.state_change",
+        measurement="differential",
+        claim_shapes=frozenset({CLAIM_STATE_CHANGE}),
+        re_executes_setup=True,
     ),
     VerifierKind(
         name="timing",

@@ -72,6 +72,30 @@ def test_an_observed_context_unlocks_the_and() -> None:
     assert decision.active.techniques == ("sqli_blind_time",)
 
 
+def test_a_nested_only_objective_unlocks_the_and() -> None:
+    """The objective is a value the AND carries, not a name to look up: a tree
+    whose OrNode is nested only — the shape a JSON loader produces — must
+    unlock onto it once the precondition holds, not dead-end silently."""
+    tree = Tree(
+        root="prove_impact",
+        nodes=(
+            AndNode(
+                name="prove_impact",
+                requires=("script_execution",),
+                objective=OrNode(name="foothold", techniques=("sqli_blind_time",)),
+            ),
+        ),
+    )
+    decision = decide(
+        tree, _arms(), proven_classes=set(), observed_kinds={"script_execution"}
+    )
+    assert decision.active is not None
+    assert decision.active.techniques == ("sqli_blind_time",)
+    assert [arm.technique for arm in filter_arms(decision.active, _arms())] == [
+        "sqli_blind_time"
+    ]
+
+
 def test_a_proven_class_also_unlocks_the_and() -> None:
     decision = decide(
         _chained_tree(), _arms(), proven_classes={"script_execution"}, observed_kinds=set()

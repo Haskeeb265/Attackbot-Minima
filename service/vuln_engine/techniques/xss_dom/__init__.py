@@ -11,7 +11,14 @@ running exactly as before.
 from __future__ import annotations
 
 from ...kernel.observation import Observation
-from ...kernel.technique import EngagementSeed, Hypothesis, ProbeSpec, Surface
+from ...kernel.technique import (
+    CAP_PUBLIC_PARAM,
+    CAP_RESPONSE_REFLECTS_INPUT,
+    EngagementSeed,
+    Hypothesis,
+    ProbeSpec,
+    Surface,
+)
 from ...kernel.verdict import Candidate
 from . import hypothesis as hypothesis_mod
 from . import interpret as interpret_mod
@@ -24,6 +31,11 @@ class XssDom:
 
     manifest = MANIFEST
 
+    #: What ``surfaces()`` actually reads — the OR-gate in full, exactly as
+    #: ``xss_reflected`` declares it (see that technique's note): the declared
+    #: claim and the measured/derived alternative, both readable by Closure.
+    gate_capabilities = (CAP_PUBLIC_PARAM, CAP_RESPONSE_REFLECTS_INPUT)
+
     def surfaces(self, seed: EngagementSeed) -> list[Surface]:
         """Parameterised surfaces, deliberately overlapping xss_reflected's.
 
@@ -31,12 +43,16 @@ class XssDom:
         server echo?" vs. "did the page render?"). On an SPA the first settles
         ``none`` and this technique gets to work; the scheduler's noise
         division keeps the loud question from being asked where the cheap one
-        already answered it.
+        already answered it. The gate reads the declared claim *and* the
+        surface's capabilities set (derived or measured), like every cheap
+        technique's gate; the loud techniques keep their narrow doors.
         """
         return [
             surface
             for surface in seed.with_param()
-            if surface.capability in ("", "public_param")
+            if surface.capability in ("", CAP_PUBLIC_PARAM)
+            or surface.claims(CAP_PUBLIC_PARAM)
+            or surface.claims(CAP_RESPONSE_REFLECTS_INPUT)
         ]
 
     def hypotheses(self, surface: Surface) -> list[Hypothesis]:

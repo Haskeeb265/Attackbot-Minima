@@ -249,9 +249,18 @@ def test_the_engine_proves_a_timing_claim_on_the_fakes(build_gate, clock) -> Non
     def injectable_backend(url: str) -> RawHttpExchange:
         # The grammar's URLs are percent-encoded (spaces and parens in SQL); a
         # backend sees the *decoded* value, so this fake decodes too.
+        #
+        # The fake models a SQL *interpreter*, not just "a delay happened": the
+        # response time tracks the sleep argument, wherever it appears — the same
+        # signature the verifier's dose-response discriminator demands. A fake
+        # that answered any matching payload with one flat delay would now fail
+        # its own finding, which is the verifier working as built.
+        import re
+
         delay = 0.1
-        if numeric in unquote(url):
-            delay = 0.1 + MARGIN_SECONDS + 1.0
+        match = re.search(r"SLEEP\(([0-9.]+)\)", unquote(url))
+        if match:
+            delay += float(match.group(1))
         return RawHttpExchange(url=url, status=200, body=b"ok", headers={}, elapsed=delay)
 
     gate = build_gate(http=FakeHttpEffect(respond=injectable_backend))

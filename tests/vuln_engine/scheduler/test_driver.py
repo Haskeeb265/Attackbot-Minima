@@ -185,6 +185,60 @@ def _gated_registry() -> TechniqueRegistry:
     )
 
 
+class _TwoHypothesesTechnique:
+    """A technique that asks two different questions of one surface.
+
+    The receipt tests need a technique whose hypotheses share a surface key —
+    the shape the plan tables (``generic_differential``) emit — so the ledger's
+    per-hypothesis scoping is exercised where the starvation used to happen.
+    """
+
+    manifest = TechniqueManifest(
+        name="doubled",
+        vuln_class="test",
+        preconditions=("public_param",),
+        postconditions=("nothing",),
+        produces=(EVIDENCE_REFLECTION,),
+        verification_needs=EVIDENCE_EXECUTION,
+        noise=NoiseProfile(requests_per_surface=2),
+    )
+
+    def surfaces(self, seed):  # noqa: ANN001, ANN201
+        return [Surface(url="http://127.0.0.1:8080/search", host="127.0.0.1", param="q")]
+
+    def hypotheses(self, surface):  # noqa: ANN001, ANN201
+        return [
+            Hypothesis(id="doubled:one", technique="doubled", surface=surface, claim="first question"),
+            Hypothesis(id="doubled:two", technique="doubled", surface=surface, claim="second question"),
+        ]
+
+    def probes(self, hypothesis):  # noqa: ANN001, ANN201
+        return [
+            ProbeSpec(
+                id=f"{hypothesis.id}:canary",
+                kind=KIND_HTTP,
+                host="127.0.0.1",
+                detail={
+                    "url": with_parameter("http://127.0.0.1:8080/search", "q", CANARY),
+                    "method": "GET",
+                },
+                oracle="reflection_at_least_once",
+                canary=CANARY,
+                mark="ab1c2d3",
+                produces="reflection",
+            )
+        ]
+
+    def interpret(self, hypothesis, observations):  # noqa: ANN001, ANN201
+        return []
+
+
+def _doubled_registry() -> TechniqueRegistry:
+    return TechniqueRegistry(
+        [Registration(name="doubled", manifest=_TwoHypothesesTechnique.manifest, technique=_TwoHypothesesTechnique(), module=None)]
+    )
+
+
 def test_a_probe_whose_context_was_never_observed_is_not_run(build_gate, clock, fixture_seed, fake_http) -> None:
     from service.vuln_engine.scheduler.driver import Engine
 
@@ -307,6 +361,68 @@ def test_a_gate_refusal_is_not_recorded_as_an_attempt(build_gate, build_engine) 
     assert report.gate["by_verb"] == {"DENY": 1, "DEFER": 1}
     assert report.gate["uncleared_effects"] == 0
     assert not [row for row in gate.log.events("receipt") if row["outcome"] in ("found", "none")]
+
+
+def test_a_second_hypothesis_on_one_surface_is_not_starved_by_the_first(
+    build_gate, clock, fixture_seed, fake_http
+) -> None:
+    """The receipt is scoped to the *question*, not the surface (R&D gap G7):
+    a technique that emits several hypotheses on one surface must have every
+    one of them answered — the second question is a different experiment, and
+    skipping it on its neighbour's conclusive receipt is the starvation the
+    surface-level operation key used to allow."""
+    from service.vuln_engine.scheduler.driver import Engine
+
+    gate = build_gate()
+    engine = Engine(
+        fixture_seed, gate=gate, registry=_doubled_registry(), log=gate.log, clock=clock
+    )
+    report = engine.run()
+
+    # Both hypotheses ran: each got its own probe against the same surface.
+    assert report.counts["probes"] == 2
+    assert report.counts["probes_run"] == 2
+    assert report.counts["skipped_conclusive"] == 0
+    assert len(fake_http.calls) == 2
+    # The ledger carries one conclusive record per question, and the two
+    # questions are distinguishable in the operation key.
+    operations = sorted(row["technique"] for row in gate.log.events("receipt"))
+    assert operations == ["doubled:doubled:one", "doubled:doubled:two"]
+    assert all(row["outcome"] == "none" for row in gate.log.events("receipt"))
+
+
+def test_a_conclusive_hypothesis_receipt_skips_only_its_own_question(
+    build_gate, clock, fixture_seed, fake_http
+) -> None:
+    from service.vuln_engine.scheduler.driver import Engine
+
+    gate = build_gate()
+    receipt = Receipt()
+    registry = _doubled_registry()
+    first = Engine(
+        fixture_seed,
+        gate=gate,
+        registry=registry,
+        log=gate.log,
+        receipt=receipt,
+        clock=clock,
+    ).run()
+    calls_after_first = list(fake_http.calls)
+
+    second = Engine(
+        fixture_seed,
+        gate=gate,
+        registry=registry,
+        log=gate.log,
+        receipt=receipt,
+        clock=clock,
+    ).run()
+    assert first.counts["probes_run"] == 2
+    # A second run re-asks nothing: both questions have conclusive answers on
+    # file, each under its own operation key.
+    assert second.counts["skipped_conclusive"] == 2
+    assert second.counts["probes_run"] == 0
+    assert fake_http.calls == calls_after_first
 
 
 # --------------------------------------------------------------------------- #

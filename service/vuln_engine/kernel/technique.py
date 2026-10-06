@@ -40,6 +40,11 @@ from .plan import PLAN_DIGEST_FIELD, PLAN_EVENT_FIELD, canonical_plan, plan_dige
 from .prediction import Expectation
 from .verdict import Candidate
 
+#: The empty capability set — the default for a surface nobody has claimed or
+#: measured anything about. Kept as a named constant so the two call sites that
+#: mean "no facts at all" read the same way.
+NO_CAPABILITIES: frozenset[str] = frozenset()
+
 # --------------------------------------------------------------------------- #
 # Effect kinds — must equal the policy layer's own names
 # --------------------------------------------------------------------------- #
@@ -182,10 +187,21 @@ class Surface:
     #: the store endpoint and the page that serves what was stored). Empty means
     #: the surface's own URL — the common "post and the list re-renders" shape.
     read_back: str = ""
+    #: Every capability *established* for this surface — the declared claim plus
+    #: whatever the engine itself has measured (kernel/capability.py). The
+    #: declared string stays the strongest claim for backwards compatibility;
+    #: new code may read the set. A technique's ``surfaces()`` gate that reads
+    #: only ``capability`` fires only on the declared claim; one that reads the
+    #: set fires on anything the world has established, declared or measured.
+    capabilities: frozenset[str] = NO_CAPABILITIES
 
     @property
     def key(self) -> str:
         return f"{self.url}#{self.param}" if self.param else self.url
+
+    def claims(self, capability: str) -> bool:
+        """True when *capability* was declared or measured for this surface."""
+        return capability == self.capability or capability in self.capabilities
 
     def to_dict(self) -> dict:
         data: dict[str, object] = {
@@ -200,6 +216,8 @@ class Surface:
             data["companions"] = dict(self.companions)
         if self.read_back:
             data["read_back"] = self.read_back
+        if self.capabilities:
+            data["capabilities"] = sorted(self.capabilities)
         return data
 
 
@@ -390,6 +408,7 @@ __all__ = [
     "CAP_SCRIPT_EXECUTION",
     "CONFIRM_STORED_EXECUTE",
     "EngagementSeed",
+    "NO_CAPABILITIES",
     "ProbeGrammar",
     "Hypothesis",
     "KIND_BROWSER",

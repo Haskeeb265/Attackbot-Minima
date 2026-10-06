@@ -28,6 +28,7 @@ from service.ui import engine as engine_view
 from service.ui import jobs as jobs_mod
 from service.ui import programs as programs_mod
 from service.ui import recon as recon_view
+from service.ui import trace as trace_view
 from service.ui.artifacts import ArtifactError, safe_resolve
 from service.ui.server import UiHandler
 
@@ -142,6 +143,80 @@ WORLD_ROWS = [
     {"type": "run.end", "at": 1001.2, "counts": {"findings": 1}},
 ]
 
+#: A minimal but faithful excerpt of the two-gate ledger: measured capabilities,
+#: a model junction (the agent's reasoning), a planned routine, a spec, the
+#: oracle's answer, and the proven verdict — the rows the trace view must phase.
+TWOGATE_ROWS = [
+    {
+        "type": "run.begin", "at": 3000.0, "target": "example.test",
+        "criteria": {"max_rounds_per_surface": 3},
+        "surfaces": [
+            {"url": "http://example.test/search", "host": "example.test",
+             "param": "q", "where": "query", "capability": "public_param", "label": "search"}
+        ],
+        "capabilities": {"http1": {"name": "http1", "available": True, "reason": ""}},
+    },
+    {"type": "capability.measured", "at": 3000.1,
+     "surface_key": "http://example.test/search#q",
+     "capability": "http_response_reflects_input", "measured": True},
+    {"type": "capability.measured", "at": 3000.2,
+     "surface_key": "http://example.test/search#q",
+     "capability": "delayed_response", "measured": False},
+    {"type": "loop.round", "at": 3000.3,
+     "surface_key": "http://example.test/search#q", "round": 1,
+     "proposed": 1, "fresh": 1, "history": []},
+    {
+        "type": "llm.junction", "at": 3000.4, "junction": "twogate.capability",
+        "digest": "abc", "model": "openai/gpt-oss-20b",
+        "junction_input": {"surface": {"url": "http://example.test/search", "param": "q"},
+                            "capabilities": ["http_response_reflects_input"],
+                            "options": ["xss"]},
+        "answer": {"label": "xss"},
+        "validation": "label-in-admitted-set", "degraded": False,
+        "validated": True, "reason": "",
+    },
+    {"type": "confirmation.planned", "at": 3000.5,
+     "surface_key": "http://example.test/search#q", "proposal_id": "xss:s",
+     "label": "xss", "confirm_kind": "browser.run", "routine_id": "xss.browser.v1",
+     "oracle": "script_executed"},
+    {"type": "confirmation.spec", "at": 3000.6,
+     "surface_key": "http://example.test/search#q",
+     "spec": {"oracle": "script_executed", "samples": 1, "margin": 0.0,
+              "injected_payload": "<script>x</script>", "baseline_payload": "ve-noop0",
+              "spec_digest": "deadbeef"}},
+    {"type": "effect.request", "at": 3000.7, "host": "example.test",
+     "kind": "browser.run", "technique": "two_gate_verifier", "probe": "confirm:xss.browser.v1",
+     "detail": {"url": "http://example.test/search?q=%3Cscript%3Ex%3C/script%3E"}},
+    {"type": "gate.decision", "at": 3000.8, "host": "example.test",
+     "kind": "browser.run", "technique": "two_gate_verifier", "verb": "ALLOW", "reason": "in scope"},
+    {"type": "effect.result", "at": 3000.9, "host": "example.test",
+     "kind": "browser.run", "technique": "two_gate_verifier", "status": 200,
+     "bytes": 0, "elapsed": 1.2, "ok": True, "markers_true": {"ve-xss-exec": True}},
+    {"type": "confirmation.executed", "at": 3001.0,
+     "surface_key": "http://example.test/search#q", "proposal_id": "xss:s",
+     "routine_id": "xss.browser.v1", "spec_digest": "deadbeef",
+     "proven": True, "oracle_true": True,
+     "features": {"injected": [{"elapsed_ms": 1200.0, "script_executed": True}]}},
+    {"type": "candidate", "at": 3001.1, "arm": "xss@http://example.test/search#q",
+     "id": "xss:http://example.test/search#q", "technique": "capability_agent",
+     "vuln_class": "xss", "summary": "reflected input", "payload": "<script>x</script>",
+     "repro_url": "http://example.test/search?q=x", "origin": "llm.capability"},
+    {"type": "verdict", "at": 3001.2, "arm": "xss@http://example.test/search#q",
+     "candidate": "xss:http://example.test/search#q", "proven": True, "grade": "execution",
+     "reason": "oracle 'script_executed' held over fresh measurements",
+     "proposer_grade": "hypothesis"},
+    {"type": "run.end", "at": 3001.3, "counts": {"proven": 1}},
+]
+
+TWOGATE_REPORT = {
+    "target": "example.test",
+    "findings": [{"vuln_class": "xss", "evidence_class": "execution",
+                  "summary": "reflected input", "repro_url": "http://example.test/search?q=x"}],
+    "leads": [],
+    "gate": {"by_verb": {"ALLOW": 1, "DENY": 0}},    "counts": {"proven": 1},
+    "report_lines": ["xss — execution — reflected input"],
+}
+
 REPORT = {
     "target": "example.test",
     "findings": [{"vuln_class": "xss", "grade": "execution",
@@ -186,6 +261,8 @@ def artifact_tree(tmp_path, monkeypatch):
     monkeypatch.setattr(engine_view, "ENGINE_ROOT", root / "output" / "vuln_engine")
     monkeypatch.setattr(jobs_mod, "ROOT", root)
     monkeypatch.setattr(jobs_mod, "JOBS_ROOT", root / "output" / "ui_jobs")
+    monkeypatch.setattr(trace_view, "OUTPUT_ROOT", root / "output")
+    monkeypatch.setattr(trace_view, "ENGINE_ROOT", root / "output" / "vuln_engine")
 
     # Recon logs live at the *caller's* root (run_recon.py writes them at the
     # repo root), and this test tree's root is the temp dir — write them there.
@@ -224,6 +301,18 @@ def artifact_tree(tmp_path, monkeypatch):
         encoding="utf-8", newline="\n",
     )
     (run_dir / "report.json").write_text(json.dumps(REPORT), encoding="utf-8")
+
+    # a two-gate run, written where the CLI default lands when the UI passes an
+    # explicit output dir: output/vuln_engine/<name> — classified by its ledger.
+    tg_dir = root / "output" / "vuln_engine" / "twogate_demo"
+    tg_dir.mkdir(parents=True)
+    (tg_dir / "twogate.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in TWOGATE_ROWS),
+        encoding="utf-8", newline="\n",
+    )
+    (tg_dir / "twogate_report.json").write_text(
+        json.dumps(TWOGATE_REPORT), encoding="utf-8"
+    )
     return root
 
 
@@ -500,6 +589,85 @@ def test_report_view_degrades_without_a_report(artifact_tree):
 
 
 # --------------------------------------------------------------------------- #
+# trace views (both flows)
+# --------------------------------------------------------------------------- #
+
+
+def test_trace_discover_finds_both_flows(artifact_tree):
+    runs = trace_view.discover()
+    by_key = {run["key"]: run for run in runs}
+    assert by_key["vuln_engine/example.test"]["flow"] == "classic"
+    assert by_key["vuln_engine/twogate_demo"]["flow"] == "twogate"
+    # the two-gate run used a model junction, so the label says so
+    assert by_key["vuln_engine/twogate_demo"]["used_llm"] is True
+
+
+def test_trace_view_phases_the_two_gate_flow(artifact_tree):
+    view = trace_view.trace_view("vuln_engine/twogate_demo")
+    assert view["available"] is True
+    assert view["flow"] == "twogate"
+    assert view["total_rows"] == len(TWOGATE_ROWS)
+    phases = [step["phase"] for step in view["steps"]]
+    assert phases[0] == "input"
+    assert "measure" in phases and "reason" in phases
+    assert phases[-1] == "output"
+    # the model junction is the AI-reasoning step and keeps its prompt + answer
+    reasoning = next(s for s in view["steps"] if s["type"] == "llm.junction")
+    assert reasoning["phase"] == "reason"
+    assert reasoning["raw"]["answer"] == {"label": "xss"}
+    assert reasoning["raw"]["junction_input"]["options"] == ["xss"]
+
+
+def test_trace_view_summarizes_capabilities_and_findings(artifact_tree):
+    view = trace_view.trace_view("vuln_engine/twogate_demo")
+    summary = view["summary"]
+    assert summary["findings"] == 1
+    assert summary["gate"]["ALLOW"] == 1
+    measured = summary["capabilities"]["http://example.test/search#q"]
+    assert measured == ["http_response_reflects_input"]  # the false one is excluded
+
+
+def test_trace_view_streams_by_cursor_without_loss(artifact_tree):
+    first = trace_view.trace_view("vuln_engine/twogate_demo", cursor=0, limit=4)
+    assert [s["index"] for s in first["steps"]] == [0, 1, 2, 3]
+    second = trace_view.trace_view(
+        "vuln_engine/twogate_demo", cursor=first["next_index"], limit=4
+    )
+    assert [s["index"] for s in second["steps"]] == [4, 5, 6, 7]
+    tail = trace_view.trace_view(
+        "vuln_engine/twogate_demo", cursor=second["next_index"], limit=100
+    )
+    assert tail["count"] == len(TWOGATE_ROWS) - 8
+
+
+def test_trace_view_on_a_missing_run_is_unavailable(artifact_tree):
+    view = trace_view.trace_view("no_such_run")
+    assert view["available"] is False
+    assert view["steps"] == []
+
+
+def test_trace_resolve_refuses_escape(artifact_tree):
+    with pytest.raises(ArtifactError):
+        trace_view.resolve("../.env")
+    with pytest.raises(ArtifactError):
+        trace_view.resolve("vuln_engine/../../secret")
+
+
+def test_trace_output_reads_the_twogate_report(artifact_tree):
+    out = trace_view.output_view("vuln_engine/twogate_demo")
+    assert out["available"] is True
+    assert out["source"] == "twogate_report.json"
+    assert out["report"]["findings"][0]["vuln_class"] == "xss"
+
+
+def test_trace_output_derives_classic_findings_from_the_ledger(artifact_tree):
+    """The classic run here has report.json, so its source is the file."""
+    out = trace_view.output_view("vuln_engine/example.test")
+    assert out["flow"] == "classic"
+    assert out["source"] == "report.json"
+
+
+# --------------------------------------------------------------------------- #
 # jobs
 # --------------------------------------------------------------------------- #
 
@@ -615,6 +783,37 @@ def test_http_engine_report(server):
     assert payload["report"]["findings"][0]["vuln_class"] == "xss"
 
 
+def test_http_state_exposes_traces(server):
+    status, payload = get(server + "/api/state")
+    assert status == 200
+    keys = {run["key"] for run in payload["traces"]}
+    assert {"vuln_engine/example.test", "vuln_engine/twogate_demo"} <= keys
+
+
+def test_http_trace_streams_steps(server):
+    status, first = get(server + "/api/trace?key=vuln_engine/twogate_demo&limit=4")
+    assert status == 200
+    assert first["available"] is True
+    assert first["flow"] == "twogate"
+    assert [s["index"] for s in first["steps"]] == [0, 1, 2, 3]
+    status, second = get(
+        server + f"/api/trace?key=vuln_engine/twogate_demo&cursor={first['next_index']}&limit=4"
+    )
+    assert status == 200
+    assert [s["index"] for s in second["steps"]] == [4, 5, 6, 7]
+
+
+def test_http_trace_refuses_a_path_escape(server):
+    status, _ = get(server + "/api/trace?key=..%2f..%2f.env")
+    assert status == 400
+
+
+def test_http_trace_output(server):
+    status, payload = get(server + "/api/trace/output?key=vuln_engine/twogate_demo")
+    assert status == 200
+    assert payload["report"]["findings"][0]["vuln_class"] == "xss"
+
+
 def test_http_unknown_route_is_404(server):
     status, _ = get(server + "/api/nope")
     assert status == 404
@@ -642,6 +841,33 @@ def test_http_run_starts_and_streams_a_job(server):
         time.sleep(0.3)
     assert lines, "job output must stream over HTTP"
     assert any("run_engine" in line or "[ui]" in line for line in lines)
+
+
+def test_build_command_twogate_whitelists_flags():
+    argv, label = jobs_mod.build_command(
+        "twogate",
+        {
+            "target": "t.test",
+            "surfaces": ["url=http://t.test;param=q;capability=public_param"],
+            "cookies": ["session=a"],
+            "session_b_cookie": "session=b",
+            "max_rounds": 4,
+            "host_budget": 25,
+            "llm": True,
+            "output_dir": "dvwa_check",
+        },
+    )
+    assert "run_twogate.py" in argv
+    assert "-t" in argv and "t.test" in argv
+    assert "--llm" in argv and "--max-rounds" in argv and "4" in argv
+    assert "--session-b-cookie" in argv
+    assert "output/vuln_engine/dvwa_check" in argv
+    assert label == "twogate t.test"
+    # an empty target is the fixture, not an error
+    argv, label = jobs_mod.build_command("twogate", {})
+    assert "--fixture" in argv and label == "twogate fixture"
+    argv, _ = jobs_mod.build_command("twogate_fixture", {"max_rounds": 2})
+    assert "--fixture" in argv and "--max-rounds" in argv
 
 
 def test_job_output_dir_is_whitelisted(artifact_tree):

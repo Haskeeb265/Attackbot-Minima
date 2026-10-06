@@ -51,6 +51,7 @@ class GenericDifferential:
             surface
             for surface in seed.with_param()
             if surface.capability in eligible
+            or surface.capabilities and (surface.capabilities & eligible)
         ]
 
     def hypotheses(self, surface: Surface) -> list[Hypothesis]:
@@ -67,6 +68,7 @@ class GenericDifferential:
             s
             for s in self._bound_seed.with_param()
             if s.capability in eligible
+            or s.capabilities and (s.capabilities & eligible)
         ]
         if not eligible_surfaces or surface.url != eligible_surfaces[0].url:
             return []

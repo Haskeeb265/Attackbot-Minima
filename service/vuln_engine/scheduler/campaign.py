@@ -33,9 +33,10 @@ from ..kernel.manifest import TechniqueManifest
 from ..kernel.technique import EngagementSeed
 from ..policy.gate import PolicyGate
 from ..registry import TechniqueRegistry
-from ..world.log import EVENT_NOTE, WorldLog, read_rows
+from ..world.log import EVENT_CANDIDATE, EVENT_NOTE, EVENT_VERDICT, WorldLog, read_rows
 from .driver import Engine, RunReport
 from .pool import HypothesisPool, novelty_cells_from_log
+from .tree import Tree, decide, filter_arms
 from .ucb import Arm, arms_from_receipts, pick
 
 if TYPE_CHECKING:
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 
     from ..abduction.proposal import Proposal
     from ..abduction.validator import Validator
+    from ..elicit.registry import ElicitorRegistry
     from ..kernel.anomaly import Anomaly
     from ..kernel.technique import Surface
     from ..llm.wiring import Advisory
@@ -133,6 +135,9 @@ class Campaign:
         abducer: "Callable[[Anomaly, Sequence[Surface]], list[Proposal]] | None" = None,
         validator: "Validator | None" = None,
         pen: "HoldingPen | None" = None,
+        elicit: bool = False,
+        elicit_registry: "ElicitorRegistry | None" = None,
+        tree: Tree | None = None,
     ) -> None:
         self.seed = seed
         self.gate = gate
@@ -161,6 +166,19 @@ class Campaign:
         #: model's static opinion cools exactly the way UCB cools everything.
         self.advisory = advisory
         self.widening = widening
+        #: Capability Closure, threaded to every round's engine exactly as the
+        #: abductive loop is: the closure pass runs once per round's engine
+        #: build, and the world log dedups the answers (a fact already on file
+        #: is skipped), so a campaign pays for elicitation once per surface.
+        self.elicit = elicit
+        self.elicit_registry = elicit_registry
+        #: The operator's attack tree (``scheduler/tree.py``), or ``None``. When
+        #: one is wired, ``decide`` runs over the world log before every pick and
+        #: only the unlocked OR node's arms are spendable — an unreachable AND
+        #: parks its subtree instead of burning rounds on it. Without a tree the
+        #: selector ranks every eligible arm flat, exactly as Phase 2 did; the
+        #: tree narrows *where the campaign may spend*, it never re-orders.
+        self.tree = tree
         self._priors: dict[str, float] | None = None
 
     def run(self, budget: Budget) -> CampaignReport:
@@ -180,6 +198,24 @@ class Campaign:
         """
         report = CampaignReport(target=self.seed.target, rounds_planned=budget.rounds)
         report.widening = dict(self.widening) if self.widening else None
+        if self.elicit:
+            # Capability Closure runs ONCE per campaign, before round 1, over
+            # the full registry: the enriched seed is what every round's
+            # eligibility reads, and the world-log dedup inside the closure
+            # pass keeps a resumed campaign from paying for elicitation twice.
+            # Rounds then run with the flag off — their seed already carries
+            # the measured facts.
+            from ..elicit.closure import run_closure
+
+            self.seed, _closure = run_closure(
+                self.seed,
+                gate=self.gate,
+                registry=self.registry,
+                log=self.log,
+                clock=self.clock,
+                elicit_registry=self.elicit_registry,
+            )
+            self.elicit = False
         # The provenance is a campaign fact, so it is logged once, before the
         # first pick: a replay reads it back from the log rather than trusting
         # the report's say-so. ``stage=campaign.widening`` rides the ordinary
@@ -284,6 +320,23 @@ class Campaign:
             if arm.surface not in (excluded or set())
             and (self.force or not _settled(receipts.get(arm.surface, {})))
         ]
+        if self.tree is not None:
+            decision = decide(
+                self.tree,
+                arms,
+                proven_classes=_proven_classes(self.log),
+                observed_kinds={item.kind for item in self.log.observations()},
+            )
+            self.log.append(
+                EVENT_NOTE,
+                at=self.clock(),
+                stage="scheduler.tree",
+                decision=decision.to_dict(),
+            )
+            if decision.active is None:
+                return None  # the tree parked every node: nothing is spendable
+            allowed = set(decision.active.techniques)
+            arms = [arm for arm in arms if arm.technique in allowed]
         outcome = pick(arms, noise=noise)
         if outcome is None:
             return None
@@ -352,8 +405,29 @@ class Campaign:
             validator=self.validator,
             pen=self.pen,
             pool=HypothesisPool(),
+            elicit=self.elicit,
+            elicit_registry=self.elicit_registry,
         )
         return engine.run()
+
+
+def _proven_classes(log: WorldLog) -> set[str]:
+    """The ``vuln_class`` values with a proven verdict on file.
+
+    The tree's satisfaction rule reads these plus the log's observation kinds —
+    both derived views of the same append-only record a replay has, so the
+    parking decisions stay reproducible offline.
+    """
+    proven = {
+        str(row.get("candidate") or "")
+        for row in log.events(EVENT_VERDICT)
+        if row.get("proven")
+    }
+    return {
+        str(row.get("vuln_class") or "")
+        for row in log.events(EVENT_CANDIDATE)
+        if str(row.get("id") or "") in proven and row.get("vuln_class")
+    }
 
 
 def _receipts_by_arm_from_ledger(log: WorldLog) -> dict[str, dict[str, int]]:

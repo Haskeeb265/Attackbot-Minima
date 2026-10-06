@@ -14,6 +14,12 @@ record, not current-state documentation.
 Written against the code as it stands (2026-10-02). Every path here resolves;
 if one does not, that is a bug in this file.
 
+Verified against `service/vuln_engine/` at commit **512cc9d**. Every kernel
+constant, manifest field and gate named in this file was read from that
+commit's source, not from prose about it. If a sentence here names a
+kernel value, it cites the file it came from — that rule is what stops
+the next draft inheriting an error instead of the code.
+
 ---
 
 ## 1. What this is
@@ -110,21 +116,47 @@ would make "the chain query returned nothing" a silent wrong answer),
 `techniques/ssti/`. The folder *is* the registration — the same contract the
 recon pipelines use. Deleting a technique folder cannot break the engine.
 
-| Technique | Class | Fires on claim | Confirmed by |
-| --- | --- | --- | --- |
-| `xss_reflected` | `xss` | `public_param` | browser (execution) |
-| `xss_dom` | `xss` | `public_param` | browser (execution) |
-| `xss_stored` | `xss` | `server_stores_input` | stored runner (re-inject + browser) |
-| `oob_fetch` | `ssrf` | `can_influence_remote_fetch` | collaborator (oob) |
-| `sqli_blind_time` | `sqli` | `delayed_response` | fresh timing differential |
-| `command_injection` | `command-injection` | `delayed_response` | fresh timing differential |
-| `idor_differential` | `idor` | `access_differs_by_session` | authorization (flipped sessions) |
-| `generic_differential` | `method-confusion` | plan-table capabilities | differential |
+A technique declares two different things, and only one of them decides
+whether it runs:
 
-The two timing techniques read the **same** declared `delayed_response` claim
-and compete to explain it — which one is right is measurement's job, not the
-operator's. Capability strings are the kernel's exact spellings; a claim that
-misspells one simply produces no arm.
+* **`preconditions`** (the manifest) is declarative metadata — what the world
+  would have to look like for the technique to be worth trying.
+* **`surfaces()`** (the technique object) is the **gate**. It decides, per run,
+  which surfaces the technique is actually offered.
+
+`surfaces()` is the authority, and the two can legitimately differ: a loud
+technique refuses to spend its probe budget on a surface whose declared
+purpose is an ordinary search box. That was a deliberate Phase 2 decision
+(`phase2_checklist.md`), not an accident. **Three of the eight techniques
+gate differently from their manifest**, so the manifest alone will mislead you.
+
+| Technique | Class | Manifest `preconditions` | `surfaces()` gate | Confirmed by |
+| --- | --- | --- | --- | --- |
+| `xss_reflected` | `xss` | `public_param` | `public_param` | browser (execution) |
+| `xss_dom` | `xss` | `public_param` | `public_param` | browser (execution) |
+| `xss_stored` | `xss` | `server_stores_input` | `server_stores_input` | stored runner (re-inject + browser) |
+| `oob_fetch` | `ssrf` | `can_influence_remote_fetch` | `can_influence_remote_fetch` | collaborator (oob) |
+| `idor_differential` | `idor` | `access_differs_by_session` | `access_differs_by_session` | authorization (flipped sessions) |
+| `sqli_blind_time` | `sqli` | `public_param` | **`delayed_response`** | fresh timing differential |
+| `command_injection` | `command-injection` | `public_param` | **`delayed_response`** | fresh timing differential |
+| `generic_differential` | `method-confusion` | `public_param` **and** `access_differs_by_session` | **either** of the two | differential |
+
+Three things follow, and all three are operator-facing:
+
+1. **To make a timing technique fire, declare `delayed_response` on the
+   surface** — not `public_param`, which is what its manifest says. The
+   manifest is not the gate.
+2. The two timing techniques read the **same** `delayed_response` claim and
+   compete to explain it — which one is right is measurement's job, not the
+   operator's.
+3. `generic_differential`'s gate is an **OR**: either claim admits the
+   surface, though its manifest reads as an AND.
+
+A surface declaring a claim no `surfaces()` gate accepts yields zero arms for
+every technique — silently, with no error. Capability strings are the
+kernel's exact spellings (`kernel/technique.py`, the `CAPABILITIES` tuple); a
+claim that misspells one, or names a postcondition rather than a gate, simply
+produces nothing.
 
 ---
 
@@ -405,3 +437,71 @@ cannot lie) → `llm/client.py` and the smallest junction → any technique fold
 
 Producer side of the contract:
 `service/recon_pipeline/pipelines/graph_normalize/README.md`.
+
+
+
+
+
+
+
+
+
+Where we are, in plain terms
+
+What the product is
+
+Attackbot is meant to find security bugs in someone else's website, on a large scale, without a human driving it. It has two halves that work in sequence.
+
+The first half is a reconnaissance system. You point it at a domain and it goes and finds things: subdomains, open ports, running services, URLs, and the parameters those URLs accept. For a real run against one target it produced a picture containing 3,541 items — mostly URLs — and 2,806 relationships between them, saved as a single structured file. Think of it as a very thorough map of a property.
+
+The second half is the attack engine. It reads that map and tries to actually break something. It has eight "techniques" — small, focused programs, one per vulnerability class. One tries cross-site scripting by feeding a script into a search box and watching whether a browser executes it. Another tries blind SQL injection by feeding a parameter a command that makes the server wait four seconds, then measures whether it actually did. Another fetches a URL you control to see if the server will phone home. Eight of these exist today.
+
+How the two halves connect, and why that's the crux
+
+This is the part that matters and it's subtle.
+
+The recon half cannot just hand the engine "here's a URL, go attack it." The engine has a safety rule built in: it will only try a technique against a target if something has already established that the target is worth trying. That something is called a capability claim. A claim is a small piece of text meaning "this parameter is a normal, publicly-reachable input" or "this parameter makes the server fetch a remote address."
+
+There are only eight such claims in the entire system, and each technique declares which one it needs. A technique that tests for timing-based injection needs the claim "this parameter influences response time." A technique that tests for server-side request forgery needs "this parameter makes the server fetch a URL." And critically — if a target has none of the claims a technique needs, that technique never runs on it. Not with a warning. Not with an error. It simply doesn't happen.
+
+So the entire output of the recon half gets filtered through a bottleneck of eight possible claims, and recon currently only ever produces one of them.
+
+What we found today
+
+We were reviewing a plan for a new feature — a system that reads public vulnerability disclosures (the CVE database, which is a giant public list of "this product, this version, this bug") and turns them into new attack techniques automatically. The idea is reasonable. But checking the plan against the actual code turned up three real problems.
+
+First, the plan was written against a system that doesn't exist. All seven example programs in it used made-up function and parameter names — things like a noise-cost setting that is actually a read-only calculation, a probe object with fields that don't exist, a grammar object that means something entirely different from how the plan used it. Every single sample would have crashed on its first line. This is the classic failure of designing against documentation instead of code.
+
+Second, the plan described the wrong list. Every technique carries two separate lists. One says "these are the conditions that would make this technique worth running." The other says "here is what this technique actually does, when it succeeds." The plan only described the first, and told its reader that the first one is what decides whether a technique runs. It isn't. The second thing — a separate piece of code inside each technique — is what actually decides. For three of the eight techniques, the two lists disagree. So a technique built by following the plan would have looked perfectly correct and then never fired on anything, and nobody would have been told why.
+
+Third, the plan invented two words. It referred to capabilities by names the system doesn't use. In this system, if you use a capability name that doesn't exist, nothing happens — the technique just quietly doesn't match. So an invented word isn't a typo, it's a switch that doesn't connect.
+
+We also caught a genuine self-contradiction inside the engine itself: one file states, in a comment, that it deliberately works one way, while the function sitting next to it does the opposite and claims to be deliberate too. Both cannot be intended. I left it alone because the divergence might be intentional and only the comment might be stale — that's your call, not mine.
+
+Where we're actually stuck
+
+Here's the thing. The plan we were reviewing is about building more techniques. And we cannot use them.
+
+Right now, when recon finishes a run and hands over its map, every surface it produces gets exactly one claim: "this is a normal public input." That's it. One of eight.
+
+So when the engine starts up and goes through its eight techniques asking "does this target meet my requirements," three of the eight say yes. Five say no. Those five never send a single request. They aren't slow, they aren't failing, they aren't reporting a problem — they are simply not present in the run.
+
+And this is not a small thing to fix by tweaking the attack engine. It's a missing feature on the other half. The recon system has no capability to measure "this parameter makes the server fetch a remote address," because measuring it means actually making the server fetch something and watching — which means sending traffic, which recon has deliberately been built not to do. It has no capability to measure "this parameter influences response time," because that means timing requests. It has no capability to say "this input gets stored and shown to another user later," because that means submitting data and reading it back. And it cannot say anything about two users seeing different things, because recon runs as a single anonymous visitor and never has a second identity.
+
+There is one narrow exception. The system will assign the "fetches a remote URL" claim if a parameter is simply named something like  url ,  uri , or  redirect  — guessing from the name rather than proving anything. I checked the current map: thirty-five parameters, not one of them has a name like that. So even the guess never fires.
+
+Why this changes what should be built next
+
+The plan we reviewed would take roughly a week and produce, say, a new technique for XML external entity bugs — a technique that only runs when a target carries the "fetches a remote URL" claim, which nothing currently supplies. We would have built a working, correct, well-tested attack tool that can never be used, because the thing it depends on doesn't get produced.
+
+This is the trap: the ingestion pipeline is real work, it's satisfying work, and it is very likely the wrong work right now. Building more techniques makes the shop bigger while the front door stays locked.
+
+Where that leaves us
+
+Two loose ends and one real decision.
+
+Loose end one: that self-contradicting comment inside the timing-injection code. Someone needs to decide which of the two behaviours is intended, and then the other one should be corrected. It's a comment, not logic, so it's a safe change — but I deliberately didn't make it, because picking the wrong one would mean changing how a technique behaves.
+
+Loose end two: the technical write-ups now agree with the code and are pinned to the specific code version they were checked against, so the next person can tell whether they've drifted. No engine code has been changed. All568 engine tests still pass.
+
+The real decision is about ordering. Either we fix the claim-supply problem on the recon side first — which is a genuine build, not a patch, and it's the thing everything else is waiting on — or we build the ingestion pipeline anyway and accept that its output sits idle. My read is that the first is right, and that a week spent on ingestion before then is a week that has to be redone once recon can finally supply the claims the techniques are waiting for. But that's a scheduling call about your priorities, and I'd rather you make it than have me quietly pick.

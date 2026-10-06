@@ -9,7 +9,13 @@ editing anything outside ``techniques/ssti/``" actually means in practice.
 from __future__ import annotations
 
 from ...kernel.observation import Observation
-from ...kernel.technique import EngagementSeed, Hypothesis, ProbeSpec, Surface
+from ...kernel.technique import (
+    CAP_INFLUENCE_REMOTE_FETCH,
+    EngagementSeed,
+    Hypothesis,
+    ProbeSpec,
+    Surface,
+)
 from ...kernel.verdict import Candidate
 from . import hypothesis as hypothesis_mod
 from . import interpret as interpret_mod
@@ -23,10 +29,24 @@ class OobFetch:
     manifest = MANIFEST
 
     def surfaces(self, seed: EngagementSeed) -> list[Surface]:
-        """Surfaces claiming the capability this technique needs, and no others."""
+        """Surfaces with an established remote-fetch capability — declared or measured.
+
+        The declared route is the operator's word (``for_capability``, unchanged);
+        the measured route is Capability Closure's: the remote-fetch elicitor
+        plants our collaborator URL and the interaction record establishes the
+        claim at ``oob`` grade, which this gate now reads from the surface's
+        ``capabilities`` set. Either way the technique still proposes candidates
+        that only the OOB verifier can prove.
+        """
         return [
             surface
-            for surface in seed.for_capability("can_influence_remote_fetch")
+            for surface in seed.for_capability(CAP_INFLUENCE_REMOTE_FETCH)
+            + [
+                candidate
+                for candidate in seed.with_param()
+                if candidate.capabilities
+                and CAP_INFLUENCE_REMOTE_FETCH in candidate.capabilities
+            ]
             if surface.param
         ]
 
