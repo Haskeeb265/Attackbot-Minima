@@ -28,6 +28,7 @@ from service.ui import engine as engine_view
 from service.ui import jobs as jobs_mod
 from service.ui import programs as programs_mod
 from service.ui import recon as recon_view
+from service.ui import server as server_mod
 from service.ui import trace as trace_view
 from service.ui.artifacts import ArtifactError, safe_resolve
 from service.ui.server import UiHandler
@@ -344,6 +345,23 @@ def get(url: str) -> tuple[int, dict | str]:
 
 
 def post(url: str, payload: dict) -> tuple[int, dict]:
+    """POST as the app does: JSON plus the X-Requested-With guard header."""
+    request = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "X-Requested-With": "vuln-engine",
+        }, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as res:
+            return res.status, json.loads(res.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def post_unguarded(url: str, payload: dict) -> tuple[int, dict]:
+    """POST *without* the guard header — what a forged cross-origin request looks like."""
     request = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST",
@@ -370,6 +388,77 @@ def test_safe_resolve_refuses_escape(tmp_path):
         safe_resolve(tmp_path, "..", "elsewhere")
     with pytest.raises(ArtifactError):
         safe_resolve(tmp_path, "output", "..", "..", "etc")
+
+
+# --------------------------------------------------------------------------- #
+# the write side is not browser-reachable (T5)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_post_without_the_guard_header_is_refused_before_dispatch(server):
+    # A forged cross-origin POST (form auto-submit, no-preflight fetch) looks
+    # exactly like this: right content type, no X-Requested-With. It must be
+    # refused with 403 whatever the route — the guard is before dispatch.
+    status, payload = post_unguarded(server + "/api/run", {"kind": "engine_fixture", "params": {}})
+    assert status == 403
+    assert "X-Requested-With" in payload["error"]
+    status, _ = post_unguarded(server + "/api/jobs/stop", {"id": "nope"})
+    assert status == 403
+    status, _ = post_unguarded(server + "/api/demo/seed", {})
+    assert status == 403
+
+
+def test_a_wrong_guard_value_is_refused_too(server):
+    # The value matters: an attacker-controlled page can sometimes reflect a
+    # header name, but it cannot know the value this server expects.
+    request = urllib.request.Request(
+        server + "/api/run", data=b"{}",
+        headers={"Content-Type": "application/json", "X-Requested-With": "evil"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as res:
+            status = res.status
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+    assert status == 403
+
+
+def test_a_guarded_post_still_works_end_to_end(server, artifact_tree):
+    # The guard did not break the legitimate path: unknown kind still reaches
+    # the launcher and comes back 400 (route dispatch happened).
+    status, payload = post(server + "/api/run", {"kind": "shell", "params": {}})
+    assert status == 400
+
+
+def test_the_server_refuses_a_non_loopback_bind_without_expose(monkeypatch, capsys):
+    # The opt-in boundary: main() refuses before any socket is opened.
+    assert server_mod.main(["--host", "0.0.0.0"]) == 2
+    assert "--expose" in capsys.readouterr().err
+    assert server_mod.main(["--host", "192.168.1.10"]) == 2
+
+
+def test_the_server_accepts_loopback_hosts_without_expose(monkeypatch):
+    # ThreadingHTTPServer would actually bind; patch it to keep the test
+    # hermetic while main() still constructs and configures the real class.
+    created = {}
+
+    class FakeServer:
+        def __init__(self, addr, handler):
+            created["addr"] = addr
+            self.verbose = False
+
+        def serve_forever(self):
+            raise KeyboardInterrupt  # main() treats Ctrl+C as clean exit
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(server_mod, "ThreadingHTTPServer", FakeServer)
+    assert server_mod.main(["--port", "0"]) == 0
+    assert created["addr"][0] == "127.0.0.1"
+    # And the non-loopback refusal does not fire for a loopback alias.
+    assert server_mod.main(["--host", "localhost", "--port", "0"]) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -729,10 +818,17 @@ def test_http_static_refuses_traversal(server):
     assert status == 404
 
 
-def test_http_state(server):
+def test_http_state(server, monkeypatch):
+    # The real programs DB is not part of this fixture (Postgres down in the
+    # hermetic suite) — the state endpoint must degrade around it, exactly as
+    # the DB-degrade tests above pin, not block on the eager pool.
+    def boom(query, params=()):
+        raise programs_mod.DbUnavailable("no database here")
+    monkeypatch.setattr(programs_mod, "_fetch", boom)
     status, payload = get(server + "/api/state")
     assert status == 200
     assert "programs" in payload and "engine_runs" in payload
+    assert payload["programs_error"]
     assert any(run["run"] == "example.test" for run in payload["engine_runs"])
     assert "example.test" in payload["recon_targets"]
 
@@ -783,7 +879,10 @@ def test_http_engine_report(server):
     assert payload["report"]["findings"][0]["vuln_class"] == "xss"
 
 
-def test_http_state_exposes_traces(server):
+def test_http_state_exposes_traces(server, monkeypatch):
+    def boom(query, params=()):
+        raise programs_mod.DbUnavailable("no database here")
+    monkeypatch.setattr(programs_mod, "_fetch", boom)
     status, payload = get(server + "/api/state")
     assert status == 200
     keys = {run["key"] for run in payload["traces"]}

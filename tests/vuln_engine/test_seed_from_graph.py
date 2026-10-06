@@ -15,7 +15,12 @@ from pathlib import Path
 
 from service.recon_pipeline.platform.graph.reader import JsonFileBackend
 from service.vuln_engine.kernel.technique import CAP_INFLUENCE_REMOTE_FETCH, CAP_PUBLIC_PARAM
-from service.vuln_engine.seed import derive_surfaces, graph_context_rows, merge_surfaces
+from service.vuln_engine.seed import (
+    candidates_for_nodes,
+    derive_surfaces,
+    graph_context_rows,
+    merge_surfaces,
+)
 
 
 def _document() -> dict:
@@ -280,3 +285,232 @@ def test_merge_unions_derived_capabilities_into_the_declared_surface(tmp_path: P
     assert winner.capability == CAP_PUBLIC_PARAM  # and so does their claim
     assert CAP_INFLUENCE_REMOTE_FETCH in winner.capabilities  # the graph widened it
     assert winner.claims(CAP_PUBLIC_PARAM) and winner.claims(CAP_INFLUENCE_REMOTE_FETCH)
+
+
+# --------------------------------------------------------------------------- #
+# T8: service and cloud nodes — the non-URL asset kinds
+# --------------------------------------------------------------------------- #
+
+
+def _assets_document() -> dict:
+    """A graph with one service per gate outcome and three cloud outcomes.
+
+    Services: an in-scope TCP endpoint (host recorded), a 443 endpoint with no
+    recorded host (the address stands in), an out-of-scope host, a dead-evidence
+    endpoint, and a UDP service. Clouds: an open bucket claimed by an in-scope
+    domain, a dangling bucket claimed by the same domain, an auth-required
+    bucket, an open bucket with no probe URL, and an open bucket with no
+    claimant — each must be surfaced or counted exactly once.
+    """
+    nodes = [
+        {"id": "service:10.0.0.5:8080/tcp", "kind": "service",
+         "identity": "10.0.0.5:8080/tcp", "trust": "observed", "score": 70, "band": "medium",
+         "props": {"port": 8080, "proto": "tcp", "host": "api.acme.test", "scan_mode": "connect"}},
+        {"id": "service:10.0.0.6:443/tcp", "kind": "service",
+         "identity": "10.0.0.6:443/tcp", "trust": "observed", "score": 60, "band": "medium",
+         "props": {"port": 443, "proto": "tcp", "host": "", "scan_mode": "connect"}},
+        {"id": "service:10.0.0.7:22/tcp", "kind": "service",
+         "identity": "10.0.0.7:22/tcp", "trust": "observed", "score": 50, "band": "low",
+         "props": {"port": 22, "proto": "tcp", "host": "excluded.acme.test"}},
+        {"id": "service:10.0.0.8:9000/tcp", "kind": "service",
+         "identity": "10.0.0.8:9000/tcp", "trust": "observed", "score": 40, "band": "low",
+         "evidence_state": "dead",
+         "props": {"port": 9000, "proto": "tcp", "host": "api.acme.test"}},
+        {"id": "service:10.0.0.9:53/udp", "kind": "service",
+         "identity": "10.0.0.9:53/udp", "trust": "observed", "score": 30, "band": "low",
+         "props": {"port": 53, "proto": "udp", "host": "api.acme.test"}},
+        {"id": "domain:www.acme.test", "kind": "domain", "identity": "www.acme.test", "score": 80, "band": "high"},
+        {"id": "cloud:aws:acme-open", "kind": "cloud", "identity": "aws:acme-open",
+         "trust": "observed", "score": 65, "band": "high",
+         "props": {"provider": "aws", "bucket": "acme-open", "outcome": "open",
+                   "probe_url": "https://acme-open.s3.amazonaws.com/", "http_status": 200,
+                   "evidence_class": "observed"}},
+        {"id": "cloud:aws:acme-dangling", "kind": "cloud", "identity": "aws:acme-dangling",
+         "trust": "observed", "score": 64, "band": "high",
+         "props": {"provider": "aws", "bucket": "acme-dangling", "outcome": "dangling",
+                   "probe_url": "https://acme-dangling.s3.amazonaws.com/", "http_status": 404}},
+        {"id": "cloud:aws:acme-private", "kind": "cloud", "identity": "aws:acme-private",
+         "trust": "observed", "score": 63, "band": "high",
+         "props": {"provider": "aws", "bucket": "acme-private", "outcome": "auth_required",
+                   "probe_url": "https://acme-private.s3.amazonaws.com/", "http_status": 403}},
+        {"id": "cloud:aws:no-probe", "kind": "cloud", "identity": "aws:no-probe",
+         "trust": "discovered", "score": 62, "band": "medium",
+         "props": {"provider": "aws", "bucket": "no-probe", "outcome": "open"}},
+        {"id": "cloud:aws:no-claim", "kind": "cloud", "identity": "aws:no-claim",
+         "trust": "discovered", "score": 61, "band": "medium",
+         "props": {"provider": "aws", "bucket": "no-claim", "outcome": "open",
+                   "probe_url": "https://no-claim.s3.amazonaws.com/"}},
+    ]
+    edges = [
+        {"type": "cname_points_to", "from": "domain:www.acme.test", "to": "cloud:aws:acme-open", "props": {}},
+        {"type": "cname_points_to", "from": "domain:www.acme.test", "to": "cloud:aws:acme-dangling", "props": {}},
+        {"type": "cname_points_to", "from": "domain:www.acme.test", "to": "cloud:aws:acme-private", "props": {}},
+        {"type": "cname_points_to", "from": "domain:www.acme.test", "to": "cloud:aws:no-probe", "props": {}},
+    ]
+    return {"target": "acme.test", "nodes": nodes, "edges": edges}
+
+
+def _assets_backend(tmp_path: Path) -> JsonFileBackend:
+    path = tmp_path / "assets_graph_state.json"
+    path.write_text(json.dumps(_assets_document()), encoding="utf-8")
+    return JsonFileBackend(path)
+
+
+def _scope(host: str) -> str:
+    return "out_of_scope" if host == "excluded.acme.test" else "in_scope"
+
+
+def test_a_service_node_becomes_its_endpoint_surface(tmp_path: Path) -> None:
+    derived = derive_surfaces(_assets_backend(tmp_path), scope_state=_scope)
+
+    endpoint = next(s for s in derived.surfaces if s.url == "http://api.acme.test:8080/")
+    assert endpoint.param == ""  # an endpoint, not a parameter
+    assert endpoint.capability == CAP_PUBLIC_PARAM
+    assert endpoint.label == "graph:service:10.0.0.5:8080/tcp"
+    assert derived.report["services_considered"] == 4  # the dead one is walked too
+
+
+def test_the_https_scheme_comes_from_the_port_and_the_address_stands_in_for_a_missing_host(tmp_path: Path) -> None:
+    derived = derive_surfaces(_assets_backend(tmp_path), scope_state=_scope)
+
+    assert any(s.url == "https://10.0.0.6:443/" for s in derived.surfaces)
+
+
+def test_a_udp_service_is_not_an_http_surface(tmp_path: Path) -> None:
+    derived = derive_surfaces(_assets_backend(tmp_path), scope_state=_scope)
+
+    assert not any(":53" in s.url for s in derived.surfaces)
+    assert derived.report["skipped_service_not_tcp"] == 1
+
+
+def test_services_pass_the_scope_and_evidence_gates(tmp_path: Path) -> None:
+    derived = derive_surfaces(_assets_backend(tmp_path), scope_state=_scope)
+
+    assert not any("excluded.acme.test" in s.host for s in derived.surfaces)
+    assert not any(":9000" in s.url for s in derived.surfaces)
+    assert derived.report["skipped_out_of_scope"] == 1
+    assert derived.report["skipped_dead_evidence"] == 1
+
+
+def test_cloud_outcomes_decide_what_surfaces(tmp_path: Path) -> None:
+    derived = derive_surfaces(_assets_backend(tmp_path), scope_state=_scope)
+
+    urls = {s.url for s in derived.surfaces}
+    assert "https://acme-open.s3.amazonaws.com/" in urls
+    assert "https://acme-dangling.s3.amazonaws.com/" in urls
+    # Known walls are skipped and counted, never dressed up as experiments.
+    assert "https://acme-private.s3.amazonaws.com/" not in urls
+    assert derived.report["skipped_cloud_outcome"] == 1
+    assert derived.report["cloud_resources_considered"] == 5
+
+
+def test_a_cloud_surface_needs_a_probe_url_and_a_claimant(tmp_path: Path) -> None:
+    derived = derive_surfaces(_assets_backend(tmp_path), scope_state=_scope)
+
+    urls = {s.url for s in derived.surfaces}
+    assert "https://no-claim.s3.amazonaws.com/" not in urls, "no name ties it to the target"
+    assert "https://no-probe.s3.amazonaws.com/" not in urls, "no invented endpoints"
+    assert derived.report["skipped_cloud_no_claimant"] == 1
+    assert derived.report["skipped_cloud_no_probe_url"] == 1
+
+
+def test_a_cloud_surface_is_hosted_on_its_claimant(tmp_path: Path) -> None:
+    derived = derive_surfaces(_assets_backend(tmp_path), scope_state=_scope)
+
+    bucket = next(s for s in derived.surfaces if "acme-open" in s.url)
+    assert bucket.host == "www.acme.test"  # the domain whose DNS claims it
+    assert bucket.param == ""
+    assert bucket.label == "graph:cloud:aws:acme-open"
+
+
+def test_a_cloud_claimant_out_of_scope_refuses_the_surface(tmp_path: Path) -> None:
+    def scope(host: str) -> str:
+        return "out_of_scope" if host == "www.acme.test" else "in_scope"
+
+    derived = derive_surfaces(_assets_backend(tmp_path), scope_state=scope)
+
+    assert not any("s3.amazonaws.com" in s.url for s in derived.surfaces)
+    assert derived.report["skipped_out_of_scope"] >= 2  # per claimant, counted
+
+
+def test_the_asset_walk_is_deterministic(tmp_path: Path) -> None:
+    first = derive_surfaces(_assets_backend(tmp_path), scope_state=_scope)
+    second = derive_surfaces(_assets_backend(tmp_path), scope_state=_scope)
+
+    assert [(s.url, s.param) for s in first.surfaces] == [(s.url, s.param) for s in second.surfaces]
+
+
+def test_candidates_for_nodes_expands_service_and_cloud_ids(tmp_path: Path) -> None:
+    """The agent's targeted expansion follows the same rule as the walk."""
+    backend = _assets_backend(tmp_path)
+
+    expansion = candidates_for_nodes(
+        backend,
+        ["service:10.0.0.5:8080/tcp", "cloud:aws:acme-dangling", "organization:acme"],
+        scope_state=_scope,
+    )
+
+    urls = {s.url for s in expansion.surfaces}
+    assert "http://api.acme.test:8080/" in urls
+    assert "https://acme-dangling.s3.amazonaws.com/" in urls
+    assert expansion.report["skipped_not_url"] == 1  # the organisation is not derivable
+
+
+def test_graph_context_rows_carry_the_endpoint_candidates(tmp_path: Path) -> None:
+    rows = graph_context_rows(_assets_backend(tmp_path), scope_state=_scope)
+
+    by_url = {row["url"]: row for row in rows}
+    assert by_url["http://api.acme.test:8080/"]["param"] == ""
+    assert by_url["https://acme-open.s3.amazonaws.com/"]["host"] == "www.acme.test"
+
+
+# --------------------------------------------------------------------------- #
+# T7: the bridge speaks all five locations — header and url explicitly
+# --------------------------------------------------------------------------- #
+
+
+def _header_url_document() -> dict:
+    """One URL whose parameter edges carry `header` and `url` locations.
+
+    The recon pipeline only writes `"query"` today (§22.10 #4), so these two
+    spellings never appear in a live graph — the bridge must still map them
+    when recon starts observing them, and this is the pin.
+    """
+    nodes = [
+        {"id": "url:https://www.acme.test/track", "kind": "url",
+         "identity": "https://www.acme.test/track", "trust": "observed",
+         "score": 80, "band": "high", "props": {}},
+        {"id": "parameter:auth", "kind": "parameter", "identity": "auth", "score": 40},
+        {"id": "parameter:dest", "kind": "parameter", "identity": "dest", "score": 40},
+    ]
+    edges = [
+        {"type": "observed_parameter", "from": "url:https://www.acme.test/track",
+         "to": "parameter:auth", "props": {"location": "header"}},
+        {"type": "observed_parameter", "from": "url:https://www.acme.test/track",
+         "to": "parameter:dest", "props": {"location": "url"}},
+    ]
+    return {"target": "acme.test", "nodes": nodes, "edges": edges}
+
+
+def test_a_header_location_becomes_a_header_surface(tmp_path: Path) -> None:
+    path = tmp_path / "header_graph_state.json"
+    path.write_text(json.dumps(_header_url_document()), encoding="utf-8")
+
+    derived = derive_surfaces(JsonFileBackend(path))
+
+    surface = next(s for s in derived.surfaces if s.param == "auth")
+    assert surface.where == "header"
+    assert derived.report["locations"]["header"] == 1
+
+
+def test_a_url_location_becomes_a_url_surface_and_keeps_the_remote_fetch_claim(tmp_path: Path) -> None:
+    path = tmp_path / "urlloc_graph_state.json"
+    path.write_text(json.dumps(_header_url_document()), encoding="utf-8")
+
+    derived = derive_surfaces(JsonFileBackend(path))
+
+    surface = next(s for s in derived.surfaces if s.param == "dest")
+    assert surface.where == "url"
+    # The value the server itself fetches: the stronger claim rides along.
+    assert CAP_INFLUENCE_REMOTE_FETCH in surface.capabilities
+    assert derived.report["remote_fetch_claims"] == 1

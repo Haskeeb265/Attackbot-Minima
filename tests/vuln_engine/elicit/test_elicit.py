@@ -394,3 +394,66 @@ def test_elicitor_manifests_are_the_technique_manifest_shape() -> None:
     for registration in registry.all():
         assert registration.manifest.vuln_class == ELICITOR_CLASS
         assert registration.manifest.postconditions
+
+
+# --------------------------------------------------------------------------- #
+# T9: elicitation is opt-in — the flag's default is part of the contract
+# --------------------------------------------------------------------------- #
+
+
+def test_elicitation_is_opt_in_at_every_layer() -> None:
+    """Elicitation sends live requests against the *target* (the timing
+    elicitor's SLEEP doses, the sessions elicitor's second-identity reads, all
+    through the gate but on the wire), so it must never run because an
+    operator forgot to think about it. The default at every layer — the
+    scheduler classes and the CLI — is off; the two-gate flow has no flag at
+    all because its prober always measures."""
+    import inspect
+
+    from service.vuln_engine.scheduler.campaign import Campaign
+
+    for cls in (Engine, Campaign):
+        default = inspect.signature(cls.__init__).parameters["elicit"].default
+        assert default is False, f"{cls.__name__} elicits by default"
+    # Any run_engine-level helper that threads elicit through defaults off too.
+    import run_engine
+
+    for name in dir(run_engine):
+        obj = getattr(run_engine, name)
+        if not callable(obj) or name.startswith("_"):
+            continue
+        try:
+            parameters = inspect.signature(obj).parameters
+        except (TypeError, ValueError):
+            continue
+        if "elicit" in parameters:
+            assert parameters["elicit"].default is False, (
+                f"run_engine.{name} elicits by default"
+            )
+
+
+def test_the_cli_flag_is_store_true_and_twogate_has_none() -> None:
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    tree = ast.parse((root / "run_engine.py").read_text(encoding="utf-8"))
+    elicit_flags = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_argument"
+        and node.args
+        and node.args[0].value == "--elicit"
+    ]
+    assert len(elicit_flags) == 1
+    keywords = {kw.arg: kw.value for kw in elicit_flags[0].keywords}
+    assert keywords.get("action").value == "store_true"
+    # store_true's own default is False; an explicit default=True would make
+    # the flag opt-out, which is the contract this pins against.
+    default_kw = keywords.get("default")
+    assert default_kw is None or default_kw.value is not True
+    # The two-gate flow: no flag at all — the prober measures unconditionally.
+    twogate = (root / "run_twogate.py").read_text(encoding="utf-8")
+    assert "--elicit" not in twogate

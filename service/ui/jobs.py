@@ -17,7 +17,6 @@ it.
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import sys
 import threading
@@ -25,13 +24,9 @@ import time
 from pathlib import Path
 
 from service.ui.artifacts import ROOT
+from service.vuln_engine.paths import safe_component
 
 JOBS_ROOT = ROOT / "output" / "ui_jobs"
-
-#: A run-name-shaped output dir: one path segment, no separators, no dots.
-#: The engine joins it under its own output root; this keeps a crafted value
-#: from walking anywhere else.
-_OUTPUT_DIR_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 
 #: The engine's default output root, relative to the repo root — where a bare
 #: run name belongs so the UI's engine views (which read output/vuln_engine)
@@ -40,7 +35,14 @@ _ENGINE_OUTPUT_ROOT = "output/vuln_engine"
 
 
 def _engine_output_dir(name: str) -> str:
-    """A bare run name as run_engine.py's ``--output-dir`` expects it."""
+    """A bare run name as run_engine.py's ``--output-dir`` expects it.
+
+    The name is one allowlisted path component (``safe_component``), so the
+    join cannot walk out of the engine's output root — the same rule the CLIs
+    enforce on their own ``-t`` targets, enforced here where the UI composes
+    the argv.
+    """
+    safe_component(name)
     return f"{_ENGINE_OUTPUT_ROOT}/{name}"
 
 #: The ring-buffer cap per job: the last 2 MB of output is kept on disk, so a
@@ -54,13 +56,18 @@ PYTHON = sys.executable or "python"
 
 def build_command(kind: str, params: dict) -> tuple[list[str], str]:
     """The whitelisted argv for a job kind, or ValueError for anything else."""
-    #: An explicit output dir is a single path-safe segment (a run name),
-    #: never a path with separators — the engine joins it under its own
-    #: output root, and a crafted value must not walk out of it.
+    #: An explicit output dir is a single path-safe segment (a run name) via
+    #: ``safe_component`` — never a path with separators — so the engine joins
+    #: it under its own output root and a crafted value cannot walk out of it.
     output_dir = str(params.get("output_dir", "")).strip()
-    if output_dir and not _OUTPUT_DIR_RE.match(output_dir):
-        raise ValueError(f"invalid output_dir: {output_dir!r}")
+    if output_dir:
+        safe_component(output_dir)
     target = str(params.get("target", "")).strip()
+    if target:
+        # The target rides the argv to a CLI that turns it into a filesystem
+        # name (output/vuln_engine/<target>); apply the same allowlist here
+        # that the CLI applies at its own argparse boundary.
+        safe_component(target)
     if kind == "recon":
         if not target:
             raise ValueError("recon needs a target")

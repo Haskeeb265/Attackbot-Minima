@@ -2,7 +2,9 @@
 
 The passive source runner is injected, so the whole pipeline is exercised
 (passive merge -> extraction -> artifact writing -> summary) with no network and
-no Docker.
+no Docker.  The live validate stage is disabled explicitly (it needs the
+Docker-hosted httpx prober); its disabled path is covered by
+``test_validate_stage_can_be_disabled``.
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ def test_full_pipeline_writes_every_artifact(tmp_path: Path) -> None:
         passive_output_dir=passive,
         only=["wayback"],
         runner=_fake_runner({"wayback": URLS}),
+        validate_enabled=False,  # hermetic: the live prober needs Docker
     )
 
     assert summary.ok

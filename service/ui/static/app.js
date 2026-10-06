@@ -46,7 +46,13 @@ async function api(path) {
 async function post(path, payload) {
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      // The write-side guard: the server refuses any POST without this, and a
+      // browser will not attach it to a cross-origin request — which is the
+      // point. See server.py's CSRF_HEADER_* constants.
+      "X-Requested-With": "vuln-engine",
+    },
     body: JSON.stringify(payload),
   });
   const body = await res.json().catch(() => ({ error: "unreadable response" }));

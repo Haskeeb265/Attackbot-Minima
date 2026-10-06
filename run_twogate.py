@@ -42,6 +42,7 @@ from run_engine import (  # noqa: E402
     target_profile,
 )
 from service.vuln_engine.kernel.technique import EngagementSeed  # noqa: E402
+from service.vuln_engine.paths import safe_component  # noqa: E402
 from service.vuln_engine.seed import (  # noqa: E402
     DEFAULT_MAX_SURFACES,
     derive_surfaces,
@@ -113,6 +114,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    # A target becomes a filesystem name (output/vuln_engine/<target> when
+    # --output-dir is not given): refuse a traversal-shaped or separator-bearing
+    # one HERE, before any graph, policy or network work happens.
+    if args.target:
+        safe_component(args.target)
     load_env_file()
 
     if args.target:
@@ -153,7 +159,10 @@ def main(argv: list[str] | None = None) -> int:
             f"filtered {derived.report.get('skipped_out_of_scope', 0)} out-of-scope"
         )
 
-    output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_ROOT / profile.target.replace(":", "_")
+    output_dir = (
+        Path(args.output_dir) if args.output_dir
+        else DEFAULT_OUTPUT_ROOT / safe_component(profile.target)
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     log = WorldLog(output_dir / "twogate.jsonl")
     gate = build_gate(profile, log=log)

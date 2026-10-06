@@ -26,6 +26,16 @@ Design rules, kept from the repo's own discipline:
 * **Every dynamic value is path-checked.** A client-supplied target/log/run
   name goes through :func:`service.ui.artifacts.safe_resolve` before any file
   is opened; anything escaping the repo is refused with 400.
+* **The write side is not browser-reachable.** A POST is a job start — the
+  strongest thing this server does — so every POST must carry
+  ``X-Requested-With: vuln-engine`` (:data:`CSRF_HEADER_NAME`/:data:`CSRF_HEADER_VALUE`),
+  a header a browser will not attach to a cross-origin form post or a
+  simple request without a preflight. A forged POST from a web page the
+  operator is looking at is refused with 403 before its body is read.
+* **Loopback by default.** The server binds ``127.0.0.1`` and refuses any
+  other ``--host`` unless ``--expose`` is passed: the UI starts jobs, and a
+  job is started with *this operator's* authority — anything beyond loopback
+  must be an explicit, thought-about choice.
 * **Degrade, never 500.** A missing artifact is an honest empty payload with
   a reason; the DB not being up degrades the program panel, not the server.
 """
@@ -35,6 +45,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import socket
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -50,6 +61,11 @@ from service.ui.jobs import MANAGER
 
 HOST_DEFAULT = "127.0.0.1"
 PORT_DEFAULT = 8787
+
+#: The header every POST must carry (and a browser will not attach to a
+#: cross-origin simple request) — the anti-CSRF guard for the write side.
+CSRF_HEADER_NAME = "X-Requested-With"
+CSRF_HEADER_VALUE = "vuln-engine"
 
 #: Targets and run names are the client's freedom; the character class is what
 #: keeps a crafted name from reaching a path. Everything still goes through
@@ -193,6 +209,13 @@ class UiHandler(BaseHTTPRequestHandler):
             self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
 
     def do_POST(self) -> None:
+        # The CSRF guard fires before the body is even read: a browser-sent
+        # cross-origin POST (a form auto-submitting, a no-preflight fetch)
+        # cannot carry this header, so the request is refused on its headers
+        # alone — no body, no route dispatch, no side effects.
+        if self.headers.get(CSRF_HEADER_NAME, "") != CSRF_HEADER_VALUE:
+            self._json({"error": "missing or wrong X-Requested-With header"}, 403)
+            return
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         try:
@@ -377,12 +400,37 @@ class UiHandler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": "not running"}, 400)
 
 
+def _is_loopback(host: str) -> bool:
+    """Whether *host* resolves to this machine's loopback interface."""
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return True
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    return any(ip in {info[4][0] for info in infos} for ip in ("127.0.0.1", "::1"))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m service.ui.server")
     parser.add_argument("--host", default=HOST_DEFAULT)
     parser.add_argument("--port", type=int, default=PORT_DEFAULT)
+    parser.add_argument(
+        "--expose",
+        action="store_true",
+        help="allow binding beyond loopback (e.g. --host 0.0.0.0); the UI "
+        "starts jobs with this machine's authority, so sharing it is opt-in",
+    )
     parser.add_argument("--verbose", action="store_true", help="log every request")
     args = parser.parse_args(argv)
+
+    if not args.expose and not _is_loopback(args.host):
+        print(
+            f"refusing to bind non-loopback host {args.host!r} without --expose: "
+            "the UI can start jobs on this machine; pass --expose if that is intended",
+            file=sys.stderr,
+        )
+        return 2
 
     server = ThreadingHTTPServer((args.host, args.port), UiHandler)
     server.verbose = args.verbose  # type: ignore[attr-defined]

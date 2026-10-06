@@ -55,6 +55,7 @@ from service.vuln_engine.llm.wiring import (
     load_recon_artifacts,
     remember,
 )
+from service.vuln_engine.paths import safe_component  # noqa: E402
 from service.vuln_engine.policy.eligibility import (  # noqa: E402
     ProgramPolicy,
     annotate_findings,
@@ -714,6 +715,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--replay", default="", metavar="LOG", help="recompute a finished run offline")
     parser.add_argument("--json", action="store_true", help="print the machine report only")
     args = parser.parse_args(argv)
+    # A target becomes a filesystem name (output/vuln_engine/<target> when
+    # --output-dir is not given): refuse a traversal-shaped or separator-bearing
+    # one HERE, before any graph, policy or network work happens.
+    if args.target:
+        safe_component(args.target)
     # Secrets before anything that could want them: the advisory junctions read
     # the environment lazily at client construction, which happens inside run().
     load_env_file()
@@ -875,7 +881,10 @@ def main(argv: list[str] | None = None) -> int:
         profile.host_budget = args.host_budget
 
     advisory = Advisory.from_env() if (args.llm_draft or args.hypothesize_from_recon or args.graph_agent) else None
-    output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_ROOT / profile.target.replace(":", "_")
+    output_dir = (
+        Path(args.output_dir) if args.output_dir
+        else DEFAULT_OUTPUT_ROOT / safe_component(profile.target)
+    )
 
     agent_result: dict | None = None
     if args.graph_agent:

@@ -44,14 +44,17 @@ from .registry import ElicitorRegistry
 def observed_gates(registry: TechniqueRegistry) -> frozenset[str]:
     """The capability strings the registered techniques' gates actually read.
 
-    Three of the eight techniques gate differently from their manifest (the
-    timing pair and the OR-gate), so the manifest's ``preconditions`` alone is
-    not the truth about what opens a door. A technique MAY declare
-    ``gate_capabilities`` on itself — the exact tuple its ``surfaces()`` reads —
-    and when it does, that declaration wins; otherwise the manifest's
-    ``preconditions`` stands in. This is one attribute read off the technique,
-    not introspection, and a technique that adds it widens the closure
-    question by existing.
+    Five of the eight techniques gate differently from their manifest: the
+    XSS pair and the timing pair declare ``gate_capabilities`` (their
+    ``surfaces()`` reads a different tuple than the manifest's
+    ``preconditions``), and the OR-gate derives its eligibility from the plan
+    table — so the manifest's ``preconditions`` alone is not the truth about
+    what opens a door (pinned by ``tests/vuln_engine/test_inventory_pins.py``).
+    A technique MAY declare ``gate_capabilities`` on itself — the exact tuple
+    its ``surfaces()`` reads — and when it does, that declaration wins;
+    otherwise the manifest's ``preconditions`` stands in. This is one
+    attribute read off the technique, not introspection, and a technique that
+    adds it widens the closure question by existing.
     """
     wanted: set[str] = set()
     for registration in registry.all():

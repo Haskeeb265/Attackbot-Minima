@@ -8,13 +8,18 @@ an explicitly out-of-scope host is refused before it is ever a candidate.
 
 from __future__ import annotations
 
+import pytest
+
+from service.vuln_engine.kernel.vuln_class import CANONICAL_VULN_CLASSES
 from service.vuln_engine.policy.eligibility import (
+    CLASS_FRAGMENTS,
     INELIGIBLE,
     POTENTIALLY_ELIGIBLE,
     UNKNOWN,
     ProgramPolicy,
     annotate_findings,
     assess,
+    class_fragments,
     policy_from_document,
 )
 
@@ -104,6 +109,73 @@ def test_a_scope_lookup_failure_does_not_lose_the_finding() -> None:
 
     assert len(annotated) == 1
     assert annotated[0]["scope_state"] == "unknown"
+
+
+# --------------------------------------------------------------------------- #
+# the class-fragment bridge — every canonical class has published words
+# --------------------------------------------------------------------------- #
+
+
+def test_every_canonical_vuln_class_has_a_fragment_table_entry() -> None:
+    # The bridge is total over the engine's vocabulary: a class the engine can
+    # name is a class the bridge can look for. A class added to the canonical
+    # set without published fragments yields UNKNOWN for every program that
+    # *does* publish it — a silent eligibility hole; this fails loudly instead.
+    assert set(CLASS_FRAGMENTS) == set(CANONICAL_VULN_CLASSES)
+
+
+def test_fragments_are_lowercase_and_the_owners_spelling_agrees() -> None:
+    # The table keys are the canonical spellings (kernel.vuln_class is the
+    # owner); the fragments are lowercase because _mentions lowercases the
+    # program's prose before matching.
+    for key in CLASS_FRAGMENTS:
+        assert key == key.strip().lower()
+        assert CLASS_FRAGMENTS[key], "a class with no fragments matches nothing"
+        assert all(f == f.lower() and f.strip() == f for f in CLASS_FRAGMENTS[key])
+
+
+@pytest.mark.parametrize(
+    ("vuln_class", "published"),
+    [
+        ("xss", "Cross-site Scripting (XSS) - Reflected"),
+        ("sqli", "SQL Injection"),
+        ("ssrf", "Server-Side Request Forgery (SSRF)"),
+        ("idor", "Broken Object Level Authorization"),
+        ("idor", "Insecure Direct Object Reference (IDOR)"),
+        ("object-access", "Broken Access Control"),
+        ("object-access", "Improper Authorization"),
+        ("object-access", "Broken Object Level Authorization (BOLA)"),
+        ("command-injection", "OS Command Injection"),
+        ("command-injection", "Command Execution"),
+        ("method-confusion", "HTTP Request Smuggling"),
+        ("method-confusion", "Interpretation Conflict"),
+    ],
+)
+def test_published_prose_matches_the_engine_class(vuln_class: str, published: str) -> None:
+    policy = ProgramPolicy(handle="acme", eligible_classes=(published,))
+    assert assess(vuln_class, "in_scope", policy).state == POTENTIALLY_ELIGIBLE
+
+
+def test_the_idor_object_access_asymmetry_is_deliberate() -> None:
+    # object-access is the FAMILY (CWE-285) and idor its named instance
+    # (CWE-639): the family claim matches the family's generic authorization
+    # prose, the instance claim does not. A program publishing only generic
+    # authorization words has not said it pays for the named instance — and
+    # eligibility never defaults to yes.
+    policy = ProgramPolicy(handle="acme", eligible_classes=("Improper Authorization",))
+    assert assess("object-access", "in_scope", policy).state == POTENTIALLY_ELIGIBLE
+    assert assess("idor", "in_scope", policy).state == UNKNOWN
+    # ...and the BOLA wording is shared: programs use it for exactly this bug.
+    assert "bola" in class_fragments("idor")
+    assert "bola" in class_fragments("object-access")
+
+
+def test_an_unlisted_novel_class_stays_unknown() -> None:
+    # The fallback (the key itself as the sole fragment) is unchanged: a novel
+    # class matches only programs that literally publish its canonical spelling.
+    policy = ProgramPolicy(handle="acme", eligible_classes=("quantum-bit-flip",))
+    assert assess("quantum-bit-flip", "in_scope", policy).state == POTENTIALLY_ELIGIBLE
+    assert assess("quantum-bit-flip", "in_scope", ProgramPolicy(handle="acme")).state == UNKNOWN
 
 
 # --------------------------------------------------------------------------- #

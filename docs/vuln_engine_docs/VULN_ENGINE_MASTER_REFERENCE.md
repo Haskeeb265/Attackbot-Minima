@@ -1,12 +1,16 @@
 # The Vuln Engine — Master Reference
 
 > **Status:** current-state reference, written against the code on branch
-> `attackbot/feature/vuln-engine` (revision current as of 2026-10-05, after the
-> Capability Closure work — `service/vuln_engine/elicit/` — the timing verifier's
-> dose-response discriminator, and the authorization verifier's content
-> comparison). Every path, constant and field named below was read from the
-> source, not from prose about it. If a sentence here disagrees with a file, the
-> file wins and this document is a bug.
+> `attackbot/feature/vuln-engine` (revision current as of 2026-10-07, after the
+> hardening batch: `safe_component` name→path allowlist across the CLIs and UI
+> (T1), the seven-class eligibility bridge (T3), the UI write-side POST guard
+> and loopback-only default (T5), the counted inventory pins (T6), the
+> service/cloud graph kinds (T8), and the documented `--elicit` opt-in (T9) —
+> on top of Capability Closure (`service/vuln_engine/elicit/`), the timing
+> verifier's dose-response discriminator, and the authorization verifier's
+> content comparison). Every path, constant and field named below was read from
+> the source, not from prose about it. If a sentence here disagrees with a
+> file, the file wins and this document is a bug.
 >
 > This is the "everything in one place" document for `service/vuln_engine/`.
 > It is deliberately long: it names every module, every public symbol, every
@@ -266,7 +270,7 @@ supports. Key flags (see [§22](#22-appendices--vocabularies-tables-flags-env)):
 | Flag | Effect |
 |---|---|
 | `--fixture` | run the Phase-1 exit criteria against the compose fixture |
-| `-t/--target` | declared target domain |
+| `-t/--target` | declared target domain; refused at option-parse time unless it is one safe path component (`service/vuln_engine/paths.py::safe_component` — it becomes `output/vuln_engine/<target>` when `--output-dir` is absent, so `../x`, absolute paths and anything with a separator fail loudly before any work) |
 | `--surface url=...;param=...;capability=...` | declare one surface (repeatable) |
 | `--from-graph [PATH]` | derive surfaces from the recon graph |
 | `--graph-neo4j` | use Neo4j as the graph backend |
@@ -280,9 +284,9 @@ supports. Key flags (see [§22](#22-appendices--vocabularies-tables-flags-env)):
 | `--hypothesize-from-recon` | let the model widen the seed from recon artifacts |
 | `--graph-agent` | let the model navigate the recon graph tool-by-tool |
 | `--llm-draft` | model prose beside the canonical report lines |
-| `--remember` | write the anomaly-memory distillate |
+| `--remember` | write the findings-memory distillate (`memory.json`: per-arm receipts, contexts, timing medians) for a later run's `--hypothesize-from-recon` |
 | `--force` | ignore the receipts ledger and re-probe |
-| `--elicit` | Capability Closure: before the pass, measure the preconditions techniques gate on (`reflection`, `remote_fetch`, `timing`, `sessions`, `storage`) with the elicitor corpus, and let the measured facts open gates a declared claim alone used to open |
+| `--elicit` | Capability Closure: before the pass, measure the preconditions techniques gate on (`reflection`, `remote_fetch`, `timing`, `sessions`, `storage`, `public_param`) with the elicitor corpus, and let the measured facts open gates a declared claim alone used to open. **Opt-in by design** — elicitation sends live requests against the target (timing doses, second-identity reads), so it never runs by accident |
 | `--json` | machine report |
 
 The run directory holds: `world.jsonl`, `report.json`,
@@ -301,7 +305,9 @@ oracle. Flags include `--fixture`, `-t`, `--surface`, `--from-graph`,
 
 A read-only stdlib web app over the artifacts the pipelines and engine already
 write. It can start the same CLIs the operator runs, as subprocesses built from
-a flag whitelist — never a shell. See [§20](#20-the-ui).
+a flag whitelist — never a shell. Binds loopback only unless `--expose` is
+passed, and refuses any POST that does not carry the `X-Requested-With:
+vuln-engine` guard header (§20.1). See [§20](#20-the-ui).
 
 ---
 
@@ -424,11 +430,16 @@ gated capability, the technologies' own folder-is-the-registration shape:
 | `elicit/registry.py` | `ElicitationRegistration`, `ElicitorRegistry.discover(strict=...)`, `ELICIT_PACKAGE` |
 | `elicit/closure.py` | `observed_gates`, `ClosureReport`, `run_closure(...)` — the closure pass |
 
-Five elicitor folders, each `manifest.py` + `__init__.py` exposing `MANIFEST`
-and `ELICITOR`:
+Six elicitor folders, each `manifest.py` + `__init__.py` exposing `MANIFEST`
+and `ELICITOR` — one per capability a technique's gate can read (the kernel's
+other two capability strings, `script_execution` and `cross_account_readable`,
+are verifiers' postconditions, not gate inputs, so no elicitor exists for
+them by design; the count is pinned by
+`tests/vuln_engine/test_inventory_pins.py`):
 
 | Folder | Establishes | Grade | Measurement |
 |---|---|---|---|
+| `public_param/` | `public_param` | `differential` | paired request: canary-carrying param vs an ignored name (`ve-elicitor-absent`) |
 | `reflection/` | `http_response_reflects_input` | `reflection` | one canary GET (`ve-elicitor-<>"'`) |
 | `remote_fetch/` | `can_influence_remote_fetch` | `oob` | collaborator URL in the param, read back |
 | `timing/` | `delayed_response` | `differential` | quiet/sleep + a short/long dose-response pair |
@@ -751,11 +762,15 @@ Key derived sets and functions:
 - `is_executable_context(value)` — `value in SCRIPT_EXECUTABLE_CONTEXTS or value
   in JS_EXECUTABLE_CONTEXTS`.
 - `context_for_content_type(content_type)` — the response-shape gate. Declared
-  type, never sniffed bytes: markup types (`text/html`, `application/xhtml`,
-  `text/xml`, `application/xml`) return `None` ("the HTML state machine may
-  run"); JSON types (`application/json`, `application/ld+json`, `text/json`)
-  return `CONTEXT_JSON_VALUE`; any other declared type returns `CONTEXT_UNKNOWN`;
-  an absent header returns `None` (too many real servers omit it on HTML).
+  type, never sniffed bytes. The header is **normalized first** —
+  `split(";", 1)[0].strip().lower()` — so `text/html; charset=utf-8` and
+  `Application/JSON ` are the declared types they declare (pinned by
+  `tests/vuln_engine/world/test_observe.py`). Markup types (`text/html`,
+  `application/xhtml`, `text/xml`, `application/xml`) return `None` ("the HTML
+  state machine may run"); JSON types (`application/json`,
+  `application/ld+json`, `text/json`) return `CONTEXT_JSON_VALUE`; any other
+  declared type returns `CONTEXT_UNKNOWN`; an absent header returns `None`
+  (too many real servers omit it on HTML).
 
 `DOM_ONLY_CONTEXTS` collects the five DOM contexts. `DANGEROUS_UNKNOWN =
 CONTEXT_UNKNOWN`, so "unknown" is never confused with "safe".
@@ -1329,8 +1344,10 @@ Three answers, and the middle one matters:
 The module never claims `ELIGIBLE`. Only the program can decide that, on
 submission.
 
-`CLASS_FRAGMENTS` is the deterministic bridge from the engine's four classes to
-a program's prose:
+`CLASS_FRAGMENTS` is the deterministic bridge from the engine's canonical
+classes (`kernel/vuln_class.py`, all seven) to a program's prose — a class
+added to the canonical set without fragments here is a loud test failure, not
+a silent eligibility hole:
 
 | Engine class | lowercased fragments matched |
 |---|---|
@@ -1338,6 +1355,17 @@ a program's prose:
 | `sqli` | `sql injection`, `sqli` |
 | `ssrf` | `server-side request forgery`, `server side request forgery`, `ssrf` |
 | `idor` | `insecure direct object reference`, `idor`, `broken object level authorization`, `object level authorization`, `bola` |
+| `object-access` | `object level authorization`, `broken object level authorization`, `bola`, `improper authorization`, `improper access control`, `broken access control`, `access control`, `authorization bypass` |
+| `command-injection` | `command injection`, `os command injection`, `command execution` |
+| `method-confusion` | `request smuggling`, `http request smuggling`, `method confusion`, `interpretation conflict` |
+
+The `idor`/`object-access` split is deliberate: `object-access` (CWE-285) is
+the *family* and `idor` (CWE-639) its named instance. The family claim
+matches the family's generic authorization prose; the instance claim stays
+narrower (IDOR's own words plus the BOLA wording programs use for exactly
+this bug). A program publishing only "Improper Authorization" yields UNKNOWN
+for an `idor` finding — the source did not say it pays for the named
+instance, and eligibility never defaults to yes.
 
 `ProgramPolicy` holds `handle`, `eligible_classes`, `ineligible_classes`,
 `exclusions`, `max_severity`. `assess(vuln_class, scope_state, policy)` checks
@@ -1900,11 +1928,12 @@ model. The driver composes them.
 
 The manifest is the identity card. `surfaces()` is the **gate** — the authority
 on which surfaces a technique is actually offered — and it can legitimately
-differ from `preconditions`. **Three of the eight techniques gate differently
-from their manifest.** Since Capability Closure (§12.10) every gate reads the
-surface's *established* `capabilities` set — the declared claim **or** a fact an
-elicitor measured — so a precondition nobody declared is no longer a silent
-dead arm; `--elicit` measures it.
+differ from `preconditions`. **Five of the eight techniques gate differently
+from their manifest** (pinned by `tests/vuln_engine/test_inventory_pins.py`).
+Since Capability Closure (§12.10) every gate reads the surface's *established*
+`capabilities` set — the declared claim **or** a fact an elicitor measured —
+so a precondition nobody declared is no longer a silent dead arm; `--elicit`
+measures it.
 
 | Technique | Class | Manifest `preconditions` | `surfaces()` gate | Confirmed by |
 |---|---|---|---|---|
@@ -1929,8 +1958,11 @@ Four operator-facing consequences:
    every technique — silently, with no error. Capability strings must be the
    kernel's exact spellings. `--elicit` shrinks this silent set by measuring what
    it can; a capability no elicitor can establish is reported, not hidden.
-4. The two timing techniques declare `gate_capabilities = (delayed_response,)`;
-   the closure pass reads that attribute (falling back to the manifest's
+4. Four techniques declare `gate_capabilities` — both XSS gates read
+   `(public_param, http_response_reflects_input)` and both timing techniques
+   read `(delayed_response,)` — and `generic_differential` derives its
+   eligibility from the plan table (an OR where the manifest names both). The
+   closure pass reads that attribute (falling back to the manifest's
    `preconditions`) to know which capabilities to measure — so a new technique
    that gates on a new capability widens the closure question by existing.
 
@@ -2312,10 +2344,11 @@ already answered (established *or* measured-negative); a negative is not retried
 within the run. Elicitation is traffic, so it obeys the ordinary gate, scope,
 budget and receipts rules — nothing about it bypasses the chokepoint.
 
-#### The five elicitors
+#### The six elicitors
 
 | Folder | Establishes (grade) | Honesty rule |
 |---|---|---|
+| `public_param` | `public_param` (`differential`) | a *pair*: canary `ve-elicitor-<>"'` in the parameter versus an ignored name (`ve-elicitor-absent`) — a parameter named `p` that the app ignores also reflects the canary back in some frameworks; positive only when the pair differs in status or bytes |
 | `reflection` | `http_response_reflects_input` (`reflection`) | its own canary `ve-elicitor-<>"'`, distinct from the XSS techniques' so the two questions never answer each other |
 | `remote_fetch` | `can_influence_remote_fetch` (`oob`) | an interaction record on *our* collaborator; no arrival is a negative, and a refused/unreadable collaborator is inconclusive |
 | `timing` | `delayed_response` (`differential`) | quiet (`ve-noop0`) vs `SLEEP(6.0)` **plus a dose-response pair** (`SLEEP(2.0)` vs `SLEEP(6.0)`); the delay must track the dose, not just separate once |
@@ -2345,6 +2378,16 @@ population from each observation's `timing_class`.
 -The facts land in the same append-only ledger as ordinary
 `capability.measured` rows, so a replay sees exactly what was measured and why
 a door opened.
+
+**Why `--elicit` is opt-in (T9).** Elicitation is traffic against the
+*target* — the timing elicitor's SLEEP doses, the sessions elicitor's
+second-identity reads, the storage elicitor's submit — all through the gate,
+but on the wire and in the target's logs. A run that elicits by default would
+send requests an operator never asked for, against a target they may report
+to; so the default is off at every layer (Engine, Campaign, the run/campaign
+helpers, the CLI flag), and the two-gate flow has no flag at all because its
+prober measures unconditionally. The default is pinned by
+`tests/vuln_engine/elicit/test_elicit.py` (T9).
 
 #### Live verification (2026-10-06, fixture + `--elicit`)
 
@@ -2977,7 +3020,7 @@ vocabulary. Two rules make it safe:
 ```mermaid
 flowchart LR
     G["graph_state.json / Neo4j"] --> B["GraphBackend"]
-    B --> CC["collect_candidates()<br/>url nodes + observed_parameter edges"]
+    B --> CC["collect_candidates()<br/>url + service + cloud nodes"]
     CC --> SCOPE{"scope_state(host)"}
     SCOPE -->|out_of_scope / needs_review| DROP["skipped + counted"]
     SCOPE -->|in_scope| CAP["capability: public_param<br/>or inferred remote-fetch"]
@@ -3021,19 +3064,57 @@ strongest-wins no longer drops one of two true capabilities).
 `companions`/`read_back` are always empty today (a known coverage gap for
 stored surfaces).
 
-> **Measured limitation (documented in the existing docs):** on the live
-> `qbsco.net` graph the derivation supplies only `public_param`. Two of the
-> eight techniques can fire from the graph alone; the rest need a capability
-> claim recon does not yet collect, or an operator. That is a recon-coverage
-> limit, not a technique-contract limit.
+**Three asset kinds, not one (T8).** The walk also reads `service` and
+`cloud` nodes, under the same scope and evidence gates, in the same
+deterministic order. The conventions (deliberate, and pinned by
+`test_seed_from_graph.py`):
+
+- **A `service` node** (an open port, identity `address:port/proto`) becomes
+  its **endpoint surface**: the URL `http://<host-or-address>:<port>/`
+  (`https://` for port 443), `param=""`, and the uniform `public_param` claim
+  — true by HTTP construction, and inert in the classic pass because
+  `with_param()` requires a parameter name, so it arms nothing without a
+  measurement (the two-gate prober's job). UDP services are skipped and
+  counted (`skipped_service_not_tcp`): a UDP port is not an HTTP endpoint,
+  and guessing one would be inventing the target.
+- **A `cloud` node** (a probed bucket, identity `provider:name`) surfaces
+  only on the two *actionable* probe outcomes: `open` (listable) and
+  `dangling` (the provider says the CNAME-claimed bucket does not exist — the
+  takeover-shaped precondition). `auth_required` and `exists_other_region`
+  are known walls, skipped and counted (`skipped_cloud_outcome`). The URL is
+  the **probe URL recon actually measured** — never a provider endpoint this
+  module invents (`skipped_cloud_no_probe_url` without one) — and the scope
+  check runs on the **claimant** domain (the `cname_points_to` edge): a
+  resource no target name points at cannot be shown in scope, so it is
+  skipped and counted (`skipped_cloud_no_claimant`), never assumed.
+- Param-less surfaces carry the label `graph:<node id>` (no `#param` tail),
+  and `candidates_for_nodes` accepts all three kinds, so a graph agent that
+  selects a service or cloud id gets the same expansion an operator would.
+
+> **Measured limitation (recon coverage, not the bridge):** the graph's
+> `observed_parameter` edges carry `location: "query"` only today —
+> `url_endpoint/extract.py` writes that one value — so while the bridge maps
+> `body`/`path`/`header`/`url` whenever recon observes them (G4), no live run
+> produces them yet. Extending the extractor is a recon-side change; the
+> bridge side is done and tested.
 
 ---
 
 ## 18. Memory — cross-engagement distillates
 
-`memory/anomaly.py` is the other half of the memory pair (findings memory vs
-anomaly memory): a deterministic, capped distillate of retained surprises,
-cross-engagement, advisory, never evidence.
+Memory is a pair, and today only one half is wired:
+
+- **Findings memory — wired.** `llm/wiring.remember(log_path, target)` writes
+  the cross-engagement distillate of receipts (`memory.json`), and
+  `load_memory` reads it back into `--hypothesize-from-recon`; `run_engine.py
+  --remember` is the operator's handle (§15.10).
+- **Anomaly memory — built, not wired (a documented limitation, §22.10).**
+  `memory/anomaly.py` is a deterministic, capped distillate of retained
+  surprises, cross-engagement, advisory, never evidence. Nothing imports it:
+  the abducer reads memory as an input *file*, so wiring it into a consumer is
+  a deliberate next step, not something that happened silently — pinned by
+  `tests/vuln_engine/test_inventory_pins.py`, which fails the day an import
+  appears without the reference changing with it.
 
 The distillate is a count over **predicate families**, deliberately
 surface-free: a surprise that keeps recurring across engagements — the same
@@ -3317,7 +3398,20 @@ Design rules:
   as subprocesses built from a fixed flag whitelist — never a shell.
 - **Every client-supplied name is path-checked**: `_name` (character-class
   allowlist) then `artifacts.safe_resolve` (resolve, then `relative_to` the root);
-  `?target=../.env` is a 400, not a file read.
+  `?target=../.env` is a 400, not a file read. The job launcher applies the
+  same rule to a run name or target *before* it composes the argv:
+  `service/vuln_engine/paths.safe_component` is the one allowlist shared with
+  the CLIs (§20.2).
+- **The write side is not browser-reachable (T5).** Every POST must carry
+  `X-Requested-With: vuln-engine` — a header a browser will not attach to a
+  cross-origin form post or a no-preflight fetch. The guard fires before the
+  body is read and before route dispatch: a forged POST from a page the
+  operator is looking at is a 403 with no side effects. The frontend sends
+  the header on every POST (`app.js`), pinned by the UI suite's
+  `post_unguarded` tests.
+- **Loopback by default.** `main()` refuses any `--host` outside loopback
+  unless `--expose` is passed (exit 2, before a socket is opened): the UI
+  starts jobs with this machine's authority, so sharing it is opt-in.
 - **Degrade, never 500** — a missing artifact is an honest empty payload with a
   reason.
 - **Bounded by default** — log tails, graph slices, job ring-buffers.
@@ -3330,7 +3424,10 @@ returns a whitelisted argv and a label for each kind (`recon`, `engine`,
 repo's interpreter and runs from the repo root; the UI builds it from fixed words
 plus operator values and never passes a string through a shell. A bare run name
 is joined under the engine's own output root (`output/vuln_engine/<name>`) so the
-UI's engine views find it.
+UI's engine views find it. The run name, the output dir and the target all pass
+through `safe_component` — the same allowlist the CLIs enforce at their own
+argparse boundary — so a traversal-shaped POST is a 400 from the launcher, not
+a run directory outside the output root.
 
 `Job` spawns the process with `stdout=PIPE, stderr=STDOUT`, pumps stdout line by
 line into a ring-buffered file (`MAX_OUTPUT_BYTES = 2 MB`), and writes a JSON meta
@@ -3400,6 +3497,10 @@ Notable test modules:
 |---|---|
 | `test_invariants.py` | the import graph (no transport outside `policy/`), payload-is-dict, capability spellings |
 | `test_registry.py` | discovery, strict vs non-strict manifest handling |
+| `test_paths.py` | the name→path allowlist (`safe_component`) and the pinning test over every call site (T1) |
+| `test_inventory_pins.py` | counted inventories: six elicitors, five gate-differs, the anomaly distillate unwired (T6) |
+| `test_seed_from_graph.py` | the graph walk: locations, evidence, capabilities — and the service/cloud asset kinds (T8) |
+| `elicit/test_elicit.py` | discovery, each elicitor's positive/negative, closure enriching the seed — and elicitation opt-in at every layer (T9) |
 | `test_plan_serialization.py` | canonical plan bytes and digests |
 | `test_claim_shapes.py` | the state-change cap and the verifier alignment |
 | `test_verifier_registry.py` | `check_alignment(CONFIRM_VERIFIERS)` is empty |
@@ -3408,11 +3509,15 @@ Notable test modules:
 | `test_abduction*.py` | proposals, validation, and the abduced round |
 | `elicit/test_elicit.py` | discovery, each elicitor's positive/negative, and closure enriching the seed so a technique fires through it |
 
-Verification at the time of writing (re-run 2026-10-06): **603 tests pass,
-2 skip** (`python -m pytest tests/vuln_engine -q`) and
-`mypy service/vuln_engine` is clean across **130 source files**. The hermetic
+Verification at the time of writing (re-run 2026-10-07): the **whole tree** —
+`python -m pytest tests/ -q` — is **2218 passed, 18 skipped, 0 failed**
+(85–170 s depending on disk; the UI suite's job tests dominate the variance),
+and `mypy service/vuln_engine run_engine.py` is clean across **136 source
+files**. `python -m pytest tests/vuln_engine -q` alone: 712 passed, 16 skip.
+The hermetic
 UI suite additionally pins the trace phase mapping, a path-escape test
-(`?key=../../.env` is a 400), and the DB-degrade path.
+(`?key=../../.env` is a 400), the DB-degrade path, the POST guard and the
+loopback-only default (§20.1).
 
 Live verification against the compose fixture (2026-10-06, `fixture_app` and
 `oob_collaborator` up, clean output directory): the classic run
@@ -3430,14 +3535,19 @@ over 4 rounds (gate 23×ALLOW / 2×DENY), reported 1 finding (`xss`, grade
 The UI demo flow (`python -m service.ui.demo`) streamed its run live: 54
 world-log rows, gate 5×ALLOW / 0×DENY, the same two findings (§20.4).
 
-> **Known suite-isolation caveat (pre-existing, not a defect in the engine):**
-> running the *whole* `tests/` tree in one process fails 11 assertions in
-> `tests/vuln_engine/llm/` because `tests/ui` runs first and root `config.py`'s
-> `load_dotenv(..., override=True)` leaks a real `VULN_ENGINE_LLM_API_KEY` into
-> the process, so `Advisory.from_env()` becomes `available` and the
-> "no key ⇒ degraded" assertions fail. It reproduces on `HEAD` with no changes
-> and does not occur when `tests/vuln_engine` is run alone. Left untouched; the
-> engine's own suite is the one quoted above.
+> **Suite isolation is a solved guard (T4, no longer a caveat).** Several
+> production modules call `load_dotenv(..., override=True)` at import time —
+> the recon side's `platform.common.config` (imported the moment any recon
+> test module is *collected*) and the repo-root `config` (reached via
+> `shared.db` when a UI test touches the programs database) — which used to
+> leak a real `VULN_ENGINE_LLM_API_KEY` into the process and fail the engine's
+> "no key ⇒ degraded" assertions when the whole tree ran in one process. The
+> guard now lives in the root `tests/conftest.py`: the environment is
+> snapshotted before collection, restored after collection (the collection
+> path is the one a per-test fixture cannot see) and restored around every
+> test, so an import-time dotenv load never outlives the test that triggered
+> it. The whole-tree run is the quoted verification; run the engine's suite
+> alone and you get the same answers.
 
 ### How to verify the engine yourself
 
@@ -3572,10 +3682,13 @@ today:
 
 1. **Graph supplies one of eight capability claims.** Two of eight techniques
    can fire from the recon graph alone; the rest need a claim recon does not yet
-   collect, an operator, or `--elicit`. Capability Closure measures five of the
-   eight preconditions (`http_response_reflects_input`,
-   `can_influence_remote_fetch`, `delayed_response`, `access_differs_by_session`,
-   `server_stores_input`), so the graph's narrow supply is no longer the only
+   collect, an operator, or `--elicit`. Capability Closure measures **six** of
+   the kernel's eight capability strings (`public_param`,
+   `http_response_reflects_input`, `can_influence_remote_fetch`,
+   `delayed_response`, `access_differs_by_session`, `server_stores_input`) —
+   the other two (`script_execution`, `cross_account_readable`) are verifiers'
+   postconditions, not gate inputs, so no elicitor exists for them by design —
+   so the graph's narrow supply is no longer the only
    source — but a capability with no elicitor still has to be declared. This is
    a recon-coverage limit, not a technique contract limit.
 2. **Evidence-state gating.** `collect_candidates` filters on `scope_state`
@@ -3583,17 +3696,34 @@ today:
    `actively_verified`) is not yet a hard filter.
 3. **No scope lookup by default.** `scope_state` is a caller-supplied callable;
    with none, `skipped_out_of_scope` is 0.
-4. **`_to_surface` hardcodes `where="query"`.** Body/path surfaces cannot be
-   derived from the graph; `companions`/`read_back` are always empty.
+4. **Recon collects `location: "query"` only.** The bridge maps every location
+   the graph carries — `query`, `body`, `path`, `header`, `url` — onto the
+   surface's `where` (G4, closed), but `url_endpoint/extract.py` writes only
+   `"query"` into `parameters.jsonl` today, so live graphs carry one location.
+   The fix is on the recon side (emit what was actually observed); the bridge
+   side is done and tested. `companions`/`read_back` remain always empty (the
+   stored-surface gap).
 5. **One param carries one declared capability** (strongest-wins). A surface's
    `capabilities` set may additionally hold whatever the elicitors measured
    (§12.10).
-6. **The graph walk reads `kind="url"` only** — services, IPs, networks and
-   organisations are untouched.
+6. **Service/cloud surfaces are endpoints, not experiments.** The walk now
+   reads `service` and `cloud` nodes (T8) and derives their endpoint surfaces,
+   but those surfaces carry no parameter, so `with_param()` never offers them
+   to a classic technique — they arm nothing in the classic pass by design
+   (the two-gate prober or the world model is their consumer). Cloud
+   resources surface only on `open`/`dangling` probe outcomes with a measured
+   probe URL and an in-scope claimant; everything else is skipped and
+   counted. Remaining untouched kinds: wildcard, ASN, network,
+   organisation.
 7. **`--replay` does not recompute verifier evidence** (recorded fact by
    design) and lists junction/abduced candidates rather than recomputing them.
-8. **State-change claims cannot be proven at `differential` yet** — the cap is
-   explicit in `kernel/claim.py` and lifts with a setup-re-executing confirm kind.
+8. **`state_change` routing cap, not provability cap.** The claim *is*
+   provable at `differential` (G9, closed): it sits in
+   `DIFFERENTIAL_PROVABLE` and the setup-re-executing verifier proves it end
+   to end. What stays capped is *routing* — a `state_change` spec misrouted
+   to the flipped two-session read verifier is refused with a named reason
+   (`kernel/claim.py`), because that verifier proves the read, not the
+   change.
 
 These are the honest boundary of "everything the engine is today". A document
 that claimed more would be the error this whole design exists to prevent.
@@ -3846,6 +3976,9 @@ some review claims did not survive that check and are recorded as stale rather
 than "fixed" — fix the code where the review was right, fix the record where it
 was not. Verification at close: `pytest tests/vuln_engine tests/ui` — 713
 tests, exit 0; `mypy service/vuln_engine run_engine.py` — clean, 135 files.
+Re-verified 2026-10-07 after the T1–T9 hardening batch (§21 has the exact
+counts): whole-tree pytest 2218 passed / 18 skipped / 0 failed, mypy clean
+across 136 files.
 
 | Gap | Verdict | Fix (section) |
 |---|---|---|
@@ -3858,6 +3991,14 @@ tests, exit 0; `mypy service/vuln_engine run_engine.py` — clean, 135 files.
 | G7 — receipts keyed `technique@surface` starve siblings | real | §11.1 |
 | G8 — no planner gate on classic confirm specs | real | §13.7 |
 | G9 — `state_change` claim unprovable | real | §7.7, §13.6 |
+| T1 — operator target/run name joins a path unvalidated | real | §4.3, §20.1, §20.2 |
+| T3 — eligibility bridge covered 4 of 7 canonical classes | real | §9.2 |
+| T5 — UI write side browser-reachable; non-loopback bind unguarded | real | §20.1 |
+| T6 — reference said "five elicitors"/"three gate-differs"; counts stale | real (doc) | §5, §12, §12.10 |
+| T7 — §22.10 #4 said `where` hardcoded (G4 had closed it) | **stale** (doc) | §17, §22.10 |
+| T8 — graph walk read `kind="url"` only | real | §17, §22.10 #6 |
+| T9 — `--elicit` opt-in rationale undocumented | real (doc) | §4.3, §12.10 |
+| T2 — §7.3 did not state content-type normalization | **stale** (doc) | §7.3 |
 | "command_injection has no shell grammar of its own" | **stale** | no change |
 | "scope is not wired into run_engine.py" | **stale** | no change |
 

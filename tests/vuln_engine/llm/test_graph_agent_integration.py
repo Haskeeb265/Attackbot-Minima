@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -32,7 +33,34 @@ from service.vuln_engine.llm.client import LLMClient
 from service.vuln_engine.llm.runtime import GraphNavigator
 from service.vuln_engine.seed import candidates_for_nodes
 
-STATE_PATH = "service/recon_pipeline/pipelines/graph_normalize/output/graph_state.json"
+
+def _fixture_backend(tmp_path: Path) -> JsonFileBackend:
+    """A tiny graph with one parameterised, in-scope URL, on real disk.
+
+    The repo artifact ``graph_state.json`` is a local, gitignored product of
+    the recon pipeline — its contents change run to run (it may hold no url
+    nodes at all), so the hermetic tests here cannot lean on it.  They write
+    the same document shape to ``tmp_path`` and read it through the real
+    ``JsonFileBackend`` instead; the seam under test is identical.
+    """
+    url = "https://www.acme.test/search?q=x"
+    doc = {
+        "target": "acme.test",
+        "nodes": [
+            {"id": f"url:{url}", "kind": "url", "identity": url,
+             "trust": "observed", "score": 80, "band": "high",
+             "props": {"url": url, "label": "search"}},
+            {"id": "parameter:q", "kind": "parameter", "identity": "q",
+             "trust": "observed", "score": 40, "band": "medium", "props": {}},
+        ],
+        "edges": [
+            {"type": "observed_parameter", "from": f"url:{url}",
+             "to": "parameter:q", "props": {"location": "query"}},
+        ],
+    }
+    path = tmp_path / "graph_state.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return JsonFileBackend(path)
 
 TOOLS = [schema["function"]["name"] for schema in tool_schemas()]
 
@@ -54,8 +82,8 @@ def _scripted(answers: list[str]) -> LLMClient:
 # --------------------------------------------------------------------------- #
 
 
-def test_the_agent_runs_the_real_tool_dispatcher_end_to_end() -> None:
-    backend = JsonFileBackend(STATE_PATH)
+def test_the_agent_runs_the_real_tool_dispatcher_end_to_end(tmp_path) -> None:
+    backend = _fixture_backend(tmp_path)
     seen: list[tuple[str, dict]] = []
     navigator = GraphNavigator(
         _scripted(
@@ -82,8 +110,8 @@ def test_the_agent_runs_the_real_tool_dispatcher_end_to_end() -> None:
     assert all(not step["observation"].startswith('{"view"') for step in result.steps)
 
 
-def test_an_unknown_tool_id_through_the_real_dispatcher_is_an_error_view_not_a_crash() -> None:
-    backend = JsonFileBackend(STATE_PATH)
+def test_an_unknown_tool_id_through_the_real_dispatcher_is_an_error_view_not_a_crash(tmp_path) -> None:
+    backend = _fixture_backend(tmp_path)
     navigator = GraphNavigator(
         _scripted(
             [
@@ -112,8 +140,8 @@ def test_an_unknown_tool_id_through_the_real_dispatcher_is_an_error_view_not_a_c
     assert expansion.report["skipped_not_url"] + expansion.report["skipped_no_param"] >= 1
 
 
-def test_selection_through_the_real_dispatcher_expands_only_parameterised_urls() -> None:
-    backend = JsonFileBackend(STATE_PATH)
+def test_selection_through_the_real_dispatcher_expands_only_parameterised_urls(tmp_path) -> None:
+    backend = _fixture_backend(tmp_path)
     # Pick ids straight from the store so the expansion result is meaningful.
     urls = [row["id"] for row in backend.top_by_score(kind="url", limit=50) if row.get("id")]
     parameterised = [
@@ -121,7 +149,7 @@ def test_selection_through_the_real_dispatcher_expands_only_parameterised_urls()
         for node_id in urls
         if backend.neighbors(node_id, edge_type="observed_parameter", direction="out", depth=1)
     ]
-    assert parameterised, "fixture graph_state.json holds no parameterised URL — update the fixture"
+    assert parameterised, "fixture holds no parameterised URL — update _fixture_backend"
     picked = parameterised[0]
 
     navigator = GraphNavigator(

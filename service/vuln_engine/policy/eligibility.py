@@ -15,8 +15,8 @@ Three answers, and the middle one matters:
 ``UNKNOWN``
     nothing published matches — **not** a refusal.  A program that lists no
     class, or lists classes phrased in words this module cannot tie to the
-    engine's four, yields ``UNKNOWN``: the honest answer when the source does
-    not say, never a defaulted yes or no.
+    engine's canonical classes, yields ``UNKNOWN``: the honest answer when the
+    source does not say, never a defaulted yes or no.
 
 The module never claims ``ELIGIBLE``.  Only the program can decide that, on
 submission; the engine's job is to say what is worth submitting and why.
@@ -31,11 +31,24 @@ INELIGIBLE = "ineligible"
 UNKNOWN = "unknown"
 
 #: Engine ``vuln_class`` -> the lowercase fragments a program's own wording may
-#: use.  The engine speaks four classes; programs publish prose ("Cross-site
-#: Scripting (XSS) - Reflected", "SQL Injection", "SSRF", "Broken Object Level
-#: Authorization").  This table is the deterministic bridge, and it is a table
-#: rather than a fuzzy matcher so every decision is explainable: a fragment
-#: either appeared in the program's text or it did not.
+#: use.  The engine speaks the seven canonical classes of
+#: ``kernel.vuln_class.CANONICAL_VULN_CLASSES``; programs publish prose
+#: ("Cross-site Scripting (XSS) - Reflected", "SQL Injection", "SSRF", "Broken
+#: Object Level Authorization", "HTTP Request Smuggling").  This table is the
+#: deterministic bridge, and it is a table rather than a fuzzy matcher so every
+#: decision is explainable: a fragment either appeared in the program's text or
+#: it did not.
+#:
+#: The ``idor``/``object-access`` pair is the one subtlety, and it is
+#: deliberate: ``object-access`` (CWE-285) is the *family* and ``idor``
+#: (CWE-639) its named instance.  The family claim therefore matches the
+#: family's published names — the object-level-authorization (BOLA) wording
+#: and the generic authorization prose — while the instance claim stays
+#: narrower: IDOR's own prose plus the BOLA wording programs use for exactly
+#: this bug, but not the generic authorization phrases.  The asymmetry means a
+#: program publishing exactly "Improper Authorization" yields UNKNOWN for an
+#: IDOR finding: the source did not say it pays for the named instance, and
+#: this module never defaults to yes.
 CLASS_FRAGMENTS: dict[str, tuple[str, ...]] = {
     "xss": ("cross-site scripting", "cross site scripting", "xss"),
     "sqli": ("sql injection", "sqli"),
@@ -46,6 +59,27 @@ CLASS_FRAGMENTS: dict[str, tuple[str, ...]] = {
         "broken object level authorization",
         "object level authorization",
         "bola",
+    ),
+    "object-access": (
+        "object level authorization",
+        "broken object level authorization",
+        "bola",
+        "improper authorization",
+        "improper access control",
+        "broken access control",
+        "access control",
+        "authorization bypass",
+    ),
+    "command-injection": (
+        "command injection",
+        "os command injection",
+        "command execution",
+    ),
+    "method-confusion": (
+        "request smuggling",
+        "http request smuggling",
+        "method confusion",
+        "interpretation conflict",
     ),
 }
 

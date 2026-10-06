@@ -52,6 +52,30 @@ the graph itself:
   budget refusals); ``historical`` nodes are skipped unless the operator opts
   in. Unverified/passive/actively-verified nodes all pass — the band is the
   scheduler's concern, this filter only refuses claims nothing can support.
+
+The walk reads three asset kinds, not one (T8):
+
+* **``url`` nodes** — observed URLs and their ``observed_parameter`` edges, as
+  above.
+* **``service`` nodes** — an open port the scan observed (identity
+  ``address:port/proto``). A service has no observed parameter, so its surface
+  is the endpoint itself: ``param=""`` and the constructed URL
+  ``http://<host-or-address>:<port>/`` (``https://`` for 443). Only TCP becomes
+  an HTTP surface; a UDP service is skipped and counted. The surface carries
+  the uniform ``public_param`` claim — true by HTTP construction, and inert in
+  the classic pass because ``with_param()`` requires a parameter name, so it
+  arms nothing without a measurement (the two-gate prober's job) — and the
+  graph's ``props.host`` (or the address) is the host the scope check sees.
+* **``cloud`` nodes** — a bucket the cloud pipeline probed (identity
+  ``provider:name``). Only the two *actionable* outcomes become surfaces:
+  ``open`` (listable) and ``dangling`` (the provider says the CNAME-claimed
+  bucket does not exist — the takeover-shaped precondition). ``auth_required``
+  and ``exists_other_region`` are known walls, skipped and counted. The URL is
+  the probe URL recon actually used — never a provider endpoint this module
+  invented; without one the node is skipped and counted. The scope check runs
+  on the *claimant* domain (the ``cname_points_to`` edge), because a cloud
+  resource with no name tying it to the target cannot be shown to be in scope
+  — it is skipped and counted, never assumed.
 """
 
 from __future__ import annotations
@@ -104,6 +128,21 @@ REMOTE_FETCH_PARAM_HINTS: frozenset[str] = frozenset(
 #: seed layer imports kernel only, and the two spellings are pinned together by
 #: the test suite rather than by an import.
 EDGE_OBSERVED_PARAMETER = "observed_parameter"
+#: ``ip -> service``: an address exposes an open port.
+EDGE_EXPOSES_SERVICE = "exposes_service"
+#: ``domain -> cloud``: a DNS name points at a cloud resource (the takeover shape).
+EDGE_CNAME_POINTS_TO = "cname_points_to"
+
+#: Graph node kinds this walk reads (the vocabulary's own spellings).
+KIND_URL = "url"
+KIND_SERVICE = "service"
+KIND_CLOUD = "cloud"
+
+#: Cloud probe outcomes that become surfaces: ``open`` is an exposure, and
+#: ``dangling`` is the takeover-shaped precondition. The rest are known walls
+#: (auth-required buckets, region mismatches) — skipped and counted, never
+#: dressed up as experiments.
+_CLOUD_SURFACED_OUTCOMES: frozenset[str] = frozenset({"open", "dangling"})
 
 #: Graph ``props.location`` spellings that map onto a surface's ``where``. The
 #: engine speaks five; anything else on an edge is a location the probe grammars
@@ -197,6 +236,13 @@ def _new_report(infer_remote_fetch: bool) -> dict[str, Any]:
         "skipped_historical_evidence": 0,
         "skipped_unknown_location": 0,
         "locations": {},
+        "services_considered": 0,
+        "skipped_service_no_endpoint": 0,
+        "skipped_service_not_tcp": 0,
+        "cloud_resources_considered": 0,
+        "skipped_cloud_outcome": 0,
+        "skipped_cloud_no_probe_url": 0,
+        "skipped_cloud_no_claimant": 0,
         "infer_remote_fetch": bool(infer_remote_fetch),
     }
 
@@ -316,6 +362,180 @@ def _candidates_for_url_node(
     return candidates
 
 
+def _service_endpoint_of(node: dict[str, Any]) -> tuple[str, int, str]:
+    """``(address, port, scheme)`` from a service node, or ``("", 0, "")``.
+
+    The identity is the canonical form (``address:port/proto``); the props
+    carry the same facts and win when present, so a backend that reshapes the
+    row cannot silently break the derivation.
+    """
+    props = node.get("props") or {}
+    identity = str(node.get("identity") or "").strip()
+    head, _, _proto = identity.rpartition("/")
+    address, _, port_text = head.rpartition(":")
+    port = props.get("port") or port_text
+    try:
+        port_number = int(port)
+    except (TypeError, ValueError):
+        return "", 0, ""
+    if not address:
+        address = str(props.get("host") or "").strip()
+    if not address:
+        return "", 0, ""
+    scheme = "https" if port_number == 443 else "http"
+    return address, port_number, scheme
+
+
+def _candidates_for_service_node(
+    service_node: dict[str, Any],
+    backend: Any,
+    *,
+    scope_state: Callable[[str], str] | None,
+    include_historical: bool,
+    report: dict[str, Any],
+    seen: set[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    """One ``service`` node -> its endpoint candidate, or ``[]``.
+
+    The convention (see the module docstring): the surface is the endpoint
+    itself — ``param=""``, the URL built from the observed address/port — and
+    it claims only the uniform ``public_param`` minimum, which arms nothing in
+    the classic pass (no parameter name to aim a probe at). It exists so the
+    two-gate prober and the world model see an asset the classic walk ignored.
+    The same scope and evidence gates as a URL node apply, in the same order.
+    """
+    props = service_node.get("props") or {}
+    if str(props.get("proto") or "").strip().lower() not in ("", "tcp"):
+        report["skipped_service_not_tcp"] += 1
+        return []
+    address, port, scheme = _service_endpoint_of(service_node)
+    if not address or not port:
+        report["skipped_service_no_endpoint"] += 1
+        return []
+    host = str(props.get("host") or "").strip().lower() or address
+    url = f"{scheme}://{host}:{port}/"
+    if not url.lower().startswith(("http://", "https://")):
+        report["skipped_service_no_endpoint"] += 1
+        return []
+    report["services_considered"] += 1
+
+    if scope_state is not None:
+        state = str(scope_state(host))
+        if state == "out_of_scope":
+            report["skipped_out_of_scope"] += 1
+            return []
+        if state == "needs_review":
+            report["skipped_needs_review"] += 1
+            return []
+    if _evidence_refuses(service_node, report, include_historical=include_historical):
+        return []
+
+    node_id = str(service_node.get("id") or f"{KIND_SERVICE}:{address}:{port}")
+    key = (url, "")
+    if key in seen:
+        return []
+    seen.add(key)
+    return [
+        {
+            "node_id": node_id,
+            "url": url,
+            "host": host,
+            "param": "",
+            "where": "query",
+            "capability": CAP_PUBLIC_PARAM,
+            "capabilities": frozenset({CAP_PUBLIC_PARAM}),
+            "score": int(service_node.get("score") or 0),
+            "band": str(service_node.get("band") or ""),
+        }
+    ]
+
+
+def _claimants_of(backend: Any, cloud_node_id: str) -> list[str]:
+    """The domains whose DNS claims this cloud resource, sorted.
+
+    ``cname_points_to`` edges run domain → cloud; the *claimant* is the tail.
+    A backend without neighbors, or one that errors, yields no claimants — and
+    a resource nobody's name claims is never proposed (see the caller).
+    """
+    try:
+        rows = backend.neighbors(
+            cloud_node_id, edge_type=EDGE_CNAME_POINTS_TO, direction="in"
+        )
+    except Exception:  # noqa: BLE001 - one unreadable node must not stop the walk
+        return []
+    claimants: set[str] = set()
+    for row in rows or ():
+        name = str(row.get("identity") or "").strip().lower()
+        if name:
+            claimants.add(name)
+    return sorted(claimants)
+
+
+def _candidates_for_cloud_node(
+    cloud_node: dict[str, Any],
+    backend: Any,
+    *,
+    scope_state: Callable[[str], str] | None,
+    include_historical: bool,
+    report: dict[str, Any],
+    seen: set[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    """One ``cloud`` node -> its bucket-endpoint candidate, or ``[]``.
+
+    The convention (see the module docstring): only the two actionable probe
+    outcomes surface (``open``, ``dangling``); the URL is the probe URL recon
+    measured — invented provider endpoints are exactly the kind of guess this
+    bridge exists to avoid; and the scope check runs on the claimant domain,
+    because a resource no target name points at cannot be shown in scope.
+    """
+    props = cloud_node.get("props") or {}
+    report["cloud_resources_considered"] += 1
+    outcome = str(props.get("outcome") or "").strip().lower()
+    if outcome not in _CLOUD_SURFACED_OUTCOMES:
+        report["skipped_cloud_outcome"] += 1
+        return []
+    probe_url = str(props.get("probe_url") or "").strip()
+    if not probe_url.lower().startswith(("http://", "https://")):
+        report["skipped_cloud_no_probe_url"] += 1
+        return []
+
+    node_id = str(cloud_node.get("id") or "")
+    claimants = _claimants_of(backend, node_id)
+    if not claimants:
+        report["skipped_cloud_no_claimant"] += 1
+        return []
+
+    for host in claimants:
+        if scope_state is not None:
+            state = str(scope_state(host))
+            if state == "out_of_scope":
+                report["skipped_out_of_scope"] += 1
+                continue
+            if state == "needs_review":
+                report["skipped_needs_review"] += 1
+                continue
+        if _evidence_refuses(cloud_node, report, include_historical=include_historical):
+            return []
+        key = (probe_url, "")
+        if key in seen:
+            return []
+        seen.add(key)
+        return [
+            {
+                "node_id": node_id,
+                "url": probe_url,
+                "host": host,
+                "param": "",
+                "where": "query",
+                "capability": CAP_PUBLIC_PARAM,
+                "capabilities": frozenset({CAP_PUBLIC_PARAM}),
+                "score": int(cloud_node.get("score") or 0),
+                "band": str(cloud_node.get("band") or ""),
+            }
+        ]
+    return []
+
+
 def collect_candidates(
     backend: Any,
     *,
@@ -334,6 +554,10 @@ def collect_candidates(
     ``needs_review`` are counted separately so a report shows the boundary
     working. The evidence-state filter runs after scope and before parameters:
     a dead or (unless opted in) historical URL node contributes nothing.
+
+    Three kinds are read (``url``, ``service``, ``cloud`` — see the module
+    docstring); services and clouds yield param-less endpoint surfaces and pass
+    the same scope and evidence gates in the same order.
 
     Order is ``(-score, url, param)`` — stable across runs and stores, which is
     what makes an otherwise-model-informed prompt digest reproducible.
@@ -363,18 +587,59 @@ def collect_candidates(
                 seen=seen,
             )
         )
+    # Services and cloud resources: the non-URL asset kinds the vocabulary
+    # speaks. Same gates, same ordering, no parameter — their surfaces are the
+    # endpoint itself (see the module docstring for the convention).
+    try:
+        services = backend.top_by_score(
+            limit=max(1, url_limit), kind=KIND_SERVICE, min_score=min_score
+        )
+    except Exception:  # noqa: BLE001 - a backend without the kind yields none
+        services = []
+    for service_node in services:
+        candidates.extend(
+            _candidates_for_service_node(
+                service_node,
+                backend,
+                scope_state=scope_state,
+                include_historical=include_historical,
+                report=report,
+                seen=seen,
+            )
+        )
+    try:
+        clouds = backend.top_by_score(
+            limit=max(1, url_limit), kind=KIND_CLOUD, min_score=min_score
+        )
+    except Exception:  # noqa: BLE001 - a backend without the kind yields none
+        clouds = []
+    for cloud_node in clouds:
+        candidates.extend(
+            _candidates_for_cloud_node(
+                cloud_node,
+                backend,
+                scope_state=scope_state,
+                include_historical=include_historical,
+                report=report,
+                seen=seen,
+            )
+        )
     candidates.sort(key=lambda row: (-row["score"], row["url"], row["param"]))
     return candidates, report
 
 
 def _to_surface(candidate: dict[str, Any]) -> Surface:
+    param = candidate["param"]
+    # A param-less surface (service/cloud endpoints) is its own key: the label
+    # names the node alone, so the provenance stays `graph:<node id>`.
+    label = f"graph:{candidate['node_id']}#{param}" if param else f"graph:{candidate['node_id']}"
     return Surface(
         url=candidate["url"],
         host=candidate["host"],
-        param=candidate["param"],
+        param=param,
         where=candidate.get("where") or "query",
         capability=candidate["capability"],
-        label=f"graph:{candidate['node_id']}#{candidate['param']}",
+        label=label,
         capabilities=candidate.get("capabilities") or frozenset({candidate["capability"]}),
     )
 
@@ -474,12 +739,14 @@ def candidates_for_nodes(
     """Expand *specific* node ids into surfaces — the graph agent's selection.
 
     The interactive navigation names node ids; this resolves each against the
-    graph and applies the **same** rule the whole-graph walk uses: only ``url``
-    nodes with observed parameters, only ``in_scope`` hosts, the same
-    evidence-state filter, the same capability heuristic and the same
-    provenance.  A node id the graph does not hold, or one that is not a URL,
-    contributes nothing — so an agent cannot turn an invented id into a surface,
-    and scope filtering happens before anything is proposed.
+    graph and applies the **same** rule the whole-graph walk uses: only
+    derivable kinds (a ``url`` node with observed parameters, a ``service``
+    node, a ``cloud`` node with an actionable outcome), only ``in_scope``
+    hosts, the same evidence-state filter, the same capability convention and
+    the same provenance.  A node id the graph does not hold, or one of a kind
+    the bridge does not derive (an organisation, an ASN), contributes nothing —
+    so an agent cannot turn an invented id into a surface, and scope filtering
+    happens before anything is proposed.
     """
     report = _new_report(infer_remote_fetch)
     candidates: list[dict[str, Any]] = []
@@ -489,11 +756,30 @@ def candidates_for_nodes(
             node = backend.node(str(node_id))
         except Exception:  # noqa: BLE001 - an unreadable node contributes nothing
             node = None
-        if not node or str(node.get("kind")) != "url":
+        kind = str((node or {}).get("kind"))
+        if not node or kind not in (KIND_URL, KIND_SERVICE, KIND_CLOUD):
             report["skipped_not_url"] = report.get("skipped_not_url", 0) + 1
             continue
-        candidates.extend(
-            _candidates_for_url_node(
+        if kind == KIND_SERVICE:
+            new = _candidates_for_service_node(
+                node,
+                backend,
+                scope_state=scope_state,
+                include_historical=include_historical,
+                report=report,
+                seen=seen,
+            )
+        elif kind == KIND_CLOUD:
+            new = _candidates_for_cloud_node(
+                node,
+                backend,
+                scope_state=scope_state,
+                include_historical=include_historical,
+                report=report,
+                seen=seen,
+            )
+        else:
+            new = _candidates_for_url_node(
                 node,
                 backend,
                 scope_state=scope_state,
@@ -502,7 +788,7 @@ def candidates_for_nodes(
                 report=report,
                 seen=seen,
             )
-        )
+        candidates.extend(new)
     candidates.sort(key=lambda row: (-row["score"], row["url"], row["param"]))
     if len(candidates) > max_surfaces:
         report["truncated"] = True
