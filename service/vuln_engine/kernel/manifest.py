@@ -27,6 +27,16 @@ from dataclasses import dataclass, field
 
 from .evidence import EVIDENCE_CLASSES, is_evidence_class
 
+#: Every surface position a surface may *declare*. ``query``/``body``/``path``
+#: are the positions the classic probing techniques accept today; ``header`` and
+#: ``url`` are legal declarations with no accepting technique yet — batch 2
+#: Phase 4 makes that gap **loud** (a declared surface no technique accepts is
+#: refused at seed assembly with a named reason) instead of silently skipped.
+#: A technique that starts accepting one declares it here (``gate_where``), and
+#: the loud gate's accepted set widens from the registry — never by editing a
+#: second copy of this tuple.
+SURFACE_WHERE_VALUES: tuple[str, ...] = ("query", "body", "path", "header", "url")
+
 
 @dataclass(frozen=True)
 class NoiseProfile:
@@ -93,6 +103,14 @@ class TechniqueManifest:
     produces: tuple[str, ...] = ()
     #: The class a verifier must use to confirm it (invariant #8).
     verification_needs: str = ""
+    #: The surface positions (``where`` values) this technique's probing grammar
+    #: accepts — the vocabulary the loud where-gate derives its accepted set
+    #: from (batch 2, Phase 4). Empty means the classic core's default
+    #: (``query``/``body``/``path``, the values every probing technique
+    #: handles today); a technique with a wider or narrower grammar declares
+    #: the exact set, the same way ``gate_capabilities`` declares a gate that
+    #: differs from the manifest's ``preconditions``.
+    gate_where: tuple[str, ...] = ()
     #: What it costs in visibility.
     noise: NoiseProfile | None = None
     #: Capability requirements — transport names this technique needs.
@@ -142,6 +160,15 @@ class TechniqueManifest:
             )
         if not self.transports:
             problems.append("declares no transports")
+        if self.gate_where:
+            unknown_where = [w for w in self.gate_where if w not in SURFACE_WHERE_VALUES]
+            if unknown_where:
+                problems.append(
+                    f"unknown gate_where value(s): {', '.join(sorted(unknown_where))} "
+                    f"(known: {', '.join(SURFACE_WHERE_VALUES)})"
+                )
+            if len(set(self.gate_where)) != len(self.gate_where):
+                problems.append("gate_where repeats a value")
         return problems
 
     def to_dict(self) -> dict:
@@ -153,6 +180,7 @@ class TechniqueManifest:
             "postconditions": list(self.postconditions),
             "produces": list(self.produces),
             "verification_needs": self.verification_needs,
+            "gate_where": list(self.gate_where),
             "transports": list(self.transports),
             "noise": self.noise.to_dict() if self.noise else None,
         }

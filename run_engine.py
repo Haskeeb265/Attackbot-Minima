@@ -69,6 +69,7 @@ from service.vuln_engine.seed import (  # noqa: E402
     graph_context_rows,
     merge_surfaces,
 )
+from service.vuln_engine.seed.validate import validate_seed  # noqa: E402
 from service.vuln_engine.registry import TechniqueRegistry  # noqa: E402
 from service.vuln_engine.scheduler.campaign import Budget, Campaign, CampaignReport  # noqa: E402
 from service.vuln_engine.scheduler.driver import Engine, RunReport  # noqa: E402
@@ -569,6 +570,32 @@ def parse_surface(token: str) -> Surface:
     )
 
 
+def check_seed_where(profile: Profile) -> int:
+    """The loud where-gate (batch 2, Phase 4): refuse what no technique accepts.
+
+    A surface declared at a position no registered technique's probing grammar
+    accepts used to be silently skipped — filtered by ``with_param`` or gated
+    off technique by technique — which reads, at the end of a run, as "the
+    scanner said nothing, so there was nothing". This refuses it loudly at
+    assembly, with a named reason. The accepted set is derived from the
+    registry (``TechniqueRegistry.accept_where``), so a technique that starts
+    accepting ``header`` or ``url`` widens the set by declaring ``gate_where``
+    and this gate moves with it. Returns the process exit code: 0 to continue.
+    """
+    problems = validate_seed(profile.seed, TechniqueRegistry.discover(strict=False))
+    if not problems:
+        return 0
+    for problem in problems:
+        _out(f"  surface refused: {problem.surface.key} — {problem.reason}")
+    print(
+        f"error: {len(problems)} declared surface(s) cannot run: their where value "
+        "is accepted by no registered technique (the engine refuses loudly rather "
+        "than skipping silently). Drop them, or re-declare at query/body/path.",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the vuln engine (Phase 1).")
     parser.add_argument("--fixture", action="store_true", help="run the Phase 1 fixture profile (default)")
@@ -1003,6 +1030,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         if widening_result.reason:
             _out(f"  junction: {widening_result.reason}")
+
+    # The loud where-gate: after every seed-widening path has run, before any
+    # scheduling work — a surface nobody can probe is a refused declaration,
+    # not a quiet skip the report would read as a clean negative.
+    exit_code = check_seed_where(profile)
+    if exit_code:
+        return exit_code
 
     if args.campaign > 0:
         attack_tree: Tree | None = None

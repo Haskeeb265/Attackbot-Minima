@@ -48,6 +48,8 @@ from service.vuln_engine.seed import (  # noqa: E402
     derive_surfaces,
     merge_surfaces,
 )
+from service.vuln_engine.seed.validate import validate_seed  # noqa: E402
+from service.vuln_engine.registry import TechniqueRegistry  # noqa: E402
 
 
 def build_gate(profile: Profile, *, log: WorldLog | None = None) -> PolicyGate:
@@ -158,6 +160,22 @@ def main(argv: list[str] | None = None) -> int:
             f"{derived.report.get('urls_considered', 0)} URL node(s); "
             f"filtered {derived.report.get('skipped_out_of_scope', 0)} out-of-scope"
         )
+
+    # The loud where-gate (batch 2, Phase 4): after every seed-widening path has
+    # run, before the loop is built — a surface nobody can probe is a refused
+    # declaration with a named reason, not a quiet skip the report would read
+    # as a clean negative.
+    problems = validate_seed(profile.seed, TechniqueRegistry.discover(strict=False))
+    if problems:
+        for problem in problems:
+            print(f"  surface refused: {problem.surface.key} — {problem.reason}")
+        print(
+            f"error: {len(problems)} declared surface(s) cannot run: their where "
+            "value is accepted by no registered technique. Drop them, or "
+            "re-declare at query/body/path.",
+            file=sys.stderr,
+        )
+        return 2
 
     output_dir = (
         Path(args.output_dir) if args.output_dir

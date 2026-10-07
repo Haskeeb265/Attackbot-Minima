@@ -35,6 +35,10 @@ from pathlib import Path
 from .kernel.manifest import TechniqueManifest
 from .kernel.technique import Technique
 
+#: The where-values a technique's probing grammar accepts when its manifest does
+#: not declare ``gate_where`` — the classic core's grammar, spelled once.
+DEFAULT_WHERE_GRAMMAR: tuple[str, ...] = ("query", "body", "path")
+
 log = logging.getLogger("vuln_engine.registry")
 
 #: The package all technique folders live in — the only registration point.
@@ -101,6 +105,24 @@ class TechniqueRegistry:
             {**registration.manifest.to_dict(), "module": registration.name}
             for registration in self.all()
         ]
+
+    def accept_where(self) -> frozenset[str]:
+        """Every surface position some registered technique's grammar accepts.
+
+        The loud where-gate's accepted set (batch 2, Phase 4), derived the same
+        way the capability gate's vocabulary is: from what the registered
+        techniques actually declare. A manifest that names ``gate_where``
+        contributes exactly that set; one that leaves it empty contributes the
+        classic core default (``query``/``body``/``path`` — the positions every
+        probing technique handles today). A declared ``where`` outside this set
+        is one **no** technique accepts, which seed assembly refuses loudly
+        rather than silently skipping.
+        """
+        accepted: set[str] = set()
+        for registration in self.all():
+            declared = registration.manifest.gate_where
+            accepted.update(declared if declared else DEFAULT_WHERE_GRAMMAR)
+        return frozenset(accepted) or frozenset(DEFAULT_WHERE_GRAMMAR)
 
     # ------------------------------------------------------------------ #
     # discovery
@@ -181,6 +203,7 @@ def _try_register(folder: str, module_name: str) -> Registration | None:
 
 
 __all__ = [
+    "DEFAULT_WHERE_GRAMMAR",
     "ManifestError",
     "Registration",
     "TECHNIQUES_PACKAGE",
