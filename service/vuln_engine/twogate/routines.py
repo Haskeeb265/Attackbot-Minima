@@ -207,7 +207,11 @@ ROUTINES: tuple[Routine, ...] = (
     ),
     Routine(
         routine_id="sqli.extraction.v1",
-        label="sqli",
+        # Its own label, not the timing routine's: the capability agent skips a
+        # label it has already tried on a surface, so a shared label made the
+        # extraction proof unreachable the moment the timing proof ran (and
+        # vice versa). One vuln class, two independently reachable proofs.
+        label="sqli-extraction",
         vuln_class="sqli",
         confirm_kind="differential.extraction",
         oracle=ORACLE_DATA_EXTRACTED,

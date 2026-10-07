@@ -66,10 +66,12 @@ CAPABILITY_ROUTES: dict[str, tuple[tuple[str, str, str, str], ...]] = {
         ("path_traversal", "differential.response", "path-traversal", "traversal-family"),
         # Extraction rides the same measured ``public_param`` precondition as
         # the response-difference family: the probe needs a parameter whose
-        # answer we can read, not a target that sleeps. It keeps the ``sqli``
-        # label the timing routine uses — a distinct confirm kind (and oracle)
-        # is what makes it a different experiment rather than a re-run.
-        ("sqli", "differential.extraction", "sqli", "union-extraction"),
+        # answer we can read, not a target that sleeps. Its own label, distinct
+        # from the timing routine's ``sqli``: the agent's skip rule is per-label,
+        # so a shared label made timing and extraction mutually exclusive on a
+        # surface — a distinct label (plus the distinct confirm kind and oracle
+        # that was already there) makes both proofs independently reachable.
+        ("sqli-extraction", "differential.extraction", "sqli", "union-extraction"),
     ),
 }
 

@@ -4230,13 +4230,15 @@ demo fix is client-side.
 `mypy service/vuln_engine run_engine.py run_twogate.py` → clean, 137 files; live
 against the compose fixture — §21 has the run-by-run numbers.
 
-**Deliberately left open.** The two-gate extraction routine shares the `sqli`
+**Deliberately left open.** ~~The two-gate extraction routine shares the `sqli`
 label with `sqli.timing.v1`, so a surface where the timing routine also fires
-settles on the timing proof first; that is by design (one label = one hypothesis
-per surface) and the extraction experiment remains reachable on any
-`public_param` surface. On the replay change: an abduced row the model sourced
-(`rule=llm_abduction`) is still listed rather than recomputed — the same
-recorded-fact rule as `candidate.junction`, not a gap. And `holding_pen_summary`
-can only exclude a promoted/demoted entry when the caller passes the pen; from the
-world log alone a transition is not derivable, so it reports `lifetime` honestly
-instead of guessing.
+settles on the timing proof first~~ — **resolved (batch 2, Phase 6)**:
+`sqli.extraction.v1` now carries its own label (`sqli-extraction`, vuln class
+unchanged), so the capability agent's per-label skip rule no longer makes the
+timing and extraction proofs mutually exclusive on one surface — both are
+independently reachable wherever `public_param` is measured. On the replay
+change: an abduced row the model sourced (`rule=llm_abduction`) is still listed
+rather than recomputed — the same recorded-fact rule as `candidate.junction`,
+not a gap. And `holding_pen_summary` can only exclude a promoted/demoted entry
+when the caller passes the pen; from the world log alone a transition is not
+derivable, so it reports `lifetime` honestly instead of guessing.

@@ -76,7 +76,7 @@ def _surface() -> Surface:
 
 
 def test_the_extraction_routine_references_the_data_extracted_oracle() -> None:
-    routine = select_routine("sqli", "differential.extraction")
+    routine = select_routine("sqli-extraction", "differential.extraction")
     assert routine is not None, "no routine answers the extraction confirm kind"
     assert routine.routine_id == "sqli.extraction.v1"
     assert routine.oracle == ORACLE_DATA_EXTRACTED
