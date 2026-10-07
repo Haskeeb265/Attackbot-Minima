@@ -43,6 +43,7 @@ _URL_KINDS: frozenset[str] = frozenset(
         "authorization.state_change",
         "browser.run",
         "xss_stored.execute",
+        "differential.response",
     }
 )
 
@@ -110,6 +111,13 @@ def _required_field_problem(spec: dict, kind: str) -> str:
     elif kind == "oob.read":
         if not spec.get("probe") or not spec.get("path"):
             return "the oob spec names no probe path to read"
+    elif kind == "differential.response":
+        if not spec.get("url"):
+            return "the response-differential spec names no URL"
+        if not spec.get("param"):
+            return "the response-differential spec names no parameter"
+        if not spec.get("baseline_payload") or not spec.get("injected_payload"):
+            return "the response-differential spec names no baseline or injected population"
     elif kind == "xss_stored.execute":
         inject = spec.get("inject") or {}
         if not isinstance(inject, dict) or not inject.get("url"):

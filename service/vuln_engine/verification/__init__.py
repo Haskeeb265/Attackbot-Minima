@@ -1,6 +1,6 @@
 """Verification: independent confirmation, by a class the proposer did not use.
 
-Six verifiers, one per confirmation shape a finding may rest on:
+Seven verifiers, one per confirmation shape a finding may rest on:
 
 ``browser_runner``           execution — a script ran in a browser
 ``oob_verifier``             oob — our own collaborator saw the interaction
@@ -10,6 +10,8 @@ Six verifiers, one per confirmation shape a finding may rest on:
 ``authorization_verifier``   differential — both sessions re-asked, flipped order
 ``state_change_verifier``    differential — the change re-executed fresh,
                              between two unchanged victim reads
+``response_verifier``        differential — the response re-measured fresh, and
+                             it differs from the baseline and the control
 
 :class:`VerificationLayer` picks between them from the candidate's *confirmation
 spec*, which is the only thing a verifier is allowed to read from a candidate. It
@@ -47,6 +49,8 @@ from .authorization_verifier import AuthorizationVerifier
 from .browser_runner import BrowserVerifier
 from .oob_verifier import CONFIRM_KIND as OOB_CONFIRM_KIND
 from .oob_verifier import OobVerifier
+from .response_verifier import CONFIRM_KIND as RESPONSE_CONFIRM_KIND
+from .response_verifier import DifferentialResponseVerifier
 from .state_change_verifier import CONFIRM_KIND as STATE_CHANGE_CONFIRM_KIND
 from .state_change_verifier import StateChangeVerifier
 from .stored_xss_runner import StoredXssVerifier
@@ -62,6 +66,7 @@ CONFIRM_VERIFIERS: dict[str, str] = {
     CONFIRM_STORED_EXECUTE: "stored",
     AUTHORIZATION_CONFIRM_KIND: "authorization",
     STATE_CHANGE_CONFIRM_KIND: "state_change",
+    RESPONSE_CONFIRM_KIND: "response_differential",
 }
 
 
@@ -75,6 +80,7 @@ class VerificationLayer:
             (
                 AuthorizationVerifier
                 | BrowserVerifier
+                | DifferentialResponseVerifier
                 | OobVerifier
                 | StateChangeVerifier
                 | TimingVerifier
@@ -87,6 +93,7 @@ class VerificationLayer:
             "stored": StoredXssVerifier(gate),
             "authorization": AuthorizationVerifier(gate),
             "state_change": StateChangeVerifier(gate),
+            "response_differential": DifferentialResponseVerifier(gate),
         }
 
     def verify(self, candidate: Candidate) -> Verdict:
@@ -121,6 +128,7 @@ __all__ = [
     "CONFIRM_VERIFIERS",
     "AuthorizationVerifier",
     "BrowserVerifier",
+    "DifferentialResponseVerifier",
     "OobVerifier",
     "StateChangeVerifier",
     "StoredXssVerifier",

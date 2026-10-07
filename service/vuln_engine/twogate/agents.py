@@ -49,6 +49,11 @@ CAPABILITY_ROUTES: dict[str, tuple[tuple[str, str, str, str], ...]] = {
     ),
     CAP_DELAYED_RESPONSE: (
         ("sqli", "timing.differential", "sqli", "sleep-family"),
+        # The second explanation of one measured timing fact: the value may
+        # have reached a shell rather than a SQL interpreter. Route parity
+        # with the classic ``command_injection`` technique (batch 2, Phase 3);
+        # the routine carries the shell grammar and its own dose payloads.
+        ("command_injection", "timing.differential", "command-injection", "shell-family"),
     ),
     CAP_INFLUENCE_REMOTE_FETCH: (
         ("ssrf", "oob.read", "ssrf", "collaborator-url"),
@@ -224,6 +229,8 @@ class VerifierAgent:
             baseline_payload=routine.baseline_payload,
             control_payload=routine.control_payload,
             injected_payload=payload,
+            dose_short_payload=routine.dose_short_payload,
+            dose_long_payload=routine.dose_long_payload,
             samples=routine.samples,
             oracle=routine.oracle,
             margin=routine.margin,

@@ -24,13 +24,13 @@ from service.vuln_engine.verification.registry import (
 
 def test_the_registry_covers_every_dispatched_kind() -> None:
     assert check_alignment(CONFIRM_VERIFIERS, two_gate_kinds=TWOGATE_CONFIRM_KINDS) == []
-    # Every classic-dispatched kind is registered, and the runner-only kinds
-    # (``differential.extraction``/``differential.response``) are the only
-    # registered entries the classic dispatcher does not answer.
+    # Every classic-dispatched kind is registered. With the classic response
+    # verifier landed (batch 2 Phase 3), ``differential.extraction`` is the only
+    # registered entry the classic dispatcher does not answer — the two-gate
+    # runner owns it (label-indexed routines read the extracted value back).
     assert set(CONFIRM_VERIFIERS) <= set(registry())
     assert set(registry()) - set(CONFIRM_VERIFIERS) == {
         "differential.extraction",
-        "differential.response",
     }
 
 
@@ -69,8 +69,10 @@ def test_the_validator_vocabulary_comes_from_the_registry() -> None:
 
 def test_the_delegation_routes_are_in_the_registry_vocabulary() -> None:
     # The runner delegates ``timing.differential`` and
-    # ``authorization.differential`` to the classic verifiers, and answers
-    # ``differential.extraction``/``differential.response`` itself; all four
+    # ``authorization.differential`` to the classic verifiers, answers
+    # ``differential.response`` through the same logic the classic dispatcher
+    # uses (``response_differential``), and owns ``differential.extraction``
+    # itself (label-indexed routines read the extracted value back); all kinds
     # (plus the browser and oob routes) are described in one place.
     from service.vuln_engine.twogate.routines import routines_for_kind
 

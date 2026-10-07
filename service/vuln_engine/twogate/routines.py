@@ -60,6 +60,15 @@ class Routine:
     margin: float = 1000.0
     #: Body-length change that counts as a response difference, in bytes.
     length_delta: int = 0
+    #: The causal discriminator's two doses in the *first* payload's own shape
+    #: (batch 2, Phase 3). The verifier agent picks that payload
+    #: deterministically, so the dose experiment asks the same interpolation
+    #: shape the main population proved with. Empty keeps the shared verifier's
+    #: own fallback spelling (the SQL numeric shape) — which is why a shell
+    #: routine must name its doses, or the discriminator would ask a SQL
+    #: question of a shell target and honestly refuse.
+    dose_short_payload: str = ""
+    dose_long_payload: str = ""
     #: Capabilities the surface must have measured before this routine applies.
     preconditions: tuple[str, ...] = ()
     #: Transports the routine needs wired (``http1`` always; others when relevant).
@@ -80,6 +89,8 @@ class Routine:
             "injected_payloads": list(self.injected_payloads),
             "samples": self.samples,
             "margin": self.margin,
+            "dose_short_payload": self.dose_short_payload,
+            "dose_long_payload": self.dose_long_payload,
             "preconditions": list(self.preconditions),
             "transports": list(self.transports),
             "vuln_class": self.vuln_class,
@@ -108,6 +119,27 @@ _SQLI_PAYLOADS = (
     "1 AND SLEEP(4.0)",
     "1;SELECT SLEEP(4.0)",
 )
+
+#: The SQLi timing routine's causal doses, in the FIRST payload's own shape —
+#: the verifier agent picks that payload deterministically, so the dose
+#: experiment asks the same interpolation shape the separation proved with.
+_SQLI_DOSE_SHORT = "1' AND SLEEP(2.0)-- -"
+_SQLI_DOSE_LONG = "1' AND SLEEP(6.0)-- -"
+
+#: Blind OS command injection payloads: a shell metacharacter plus a delay
+#: command, one population per interpolation shape — the same shape-defined
+#: family the classic ``command_injection`` technique's grammar carries (the
+#: two tables are pinned against each other by the route-parity test, the same
+#: convention as the timing verifier's pinned fallbacks).
+_SHELL_PAYLOADS = (
+    "ve-noop0; sleep 4.0",
+    "ve-noop0| sleep 4.0",
+    "ve-noop0&& sleep 4.0",
+    "ve-noop0$(sleep 4.0)",
+    "ve-noop0`sleep 4.0`",
+)
+_SHELL_DOSE_SHORT = "ve-noop0; sleep 2.0"
+_SHELL_DOSE_LONG = "ve-noop0; sleep 6.0"
 
 #: The collaborator marker an SSRF routine injects; the runner replaces the
 #: sentinel with a real per-probe URL before sending.
@@ -149,6 +181,27 @@ ROUTINES: tuple[Routine, ...] = (
         injected_payloads=_SQLI_PAYLOADS,
         samples=3,
         margin=1000.0,
+        dose_short_payload=_SQLI_DOSE_SHORT,
+        dose_long_payload=_SQLI_DOSE_LONG,
+        preconditions=(CAP_DELAYED_RESPONSE,),
+        transports=("http1",),
+    ),
+    Routine(
+        routine_id="command_injection.timing.v1",
+        label="command_injection",
+        vuln_class="command-injection",
+        confirm_kind="timing.differential",
+        oracle=ORACLE_TIMING_DIFFERENTIAL,
+        # The same question the classic command_injection technique asks, one
+        # hypothesis over: a timing separation has more than one possible
+        # explanation, and "the value reached a shell" is a different one from
+        # "the value reached a SQL interpreter". The delegated timing verifier
+        # dose-discriminates the shell doses, so a shared delay cannot pass.
+        injected_payloads=_SHELL_PAYLOADS,
+        samples=3,
+        margin=1000.0,
+        dose_short_payload=_SHELL_DOSE_SHORT,
+        dose_long_payload=_SHELL_DOSE_LONG,
         preconditions=(CAP_DELAYED_RESPONSE,),
         transports=("http1",),
     ),
