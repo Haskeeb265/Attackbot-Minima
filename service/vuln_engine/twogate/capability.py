@@ -5,13 +5,16 @@ declared, and silently offered nothing to a technique whose claim was absent.
 This module closes that gap the same way the verifiers close the finding gap: it
 *sends a measurement* and records what it saw.
 
-Five measurements, each a low-noise probe through the policy gate:
+Six measurements, each a low-noise probe through the policy gate:
 
 * reflection   — does our canary come back?
 * remote fetch — does the target fetch a collaborator URL we plant?
 * timing       — does a sleep payload move the response time?
 * sessions     — do two identities see different content?
-* storage      — is input served back later (needs a declared read-back).
+* storage      — is input stored and served back later (the classic closure
+  pass's own ``elicit/storage`` question, asked here so a two-gate surface is
+  measured against the same six-capability corpus the classic flow measures —
+  one fact, one measurement, two consumers).
 
 A measured capability is a **fact about the surface**, never a finding: it opens
 the eligibility door for a routine; the verifier still has to prove the bug in a
@@ -25,13 +28,14 @@ from dataclasses import dataclass, field
 
 from urllib.parse import urlsplit
 
-from ..kernel.technique import Surface
+from ..kernel.technique import Observation, Surface
 from ..policy.gate import EffectRequest, PolicyGate
 from ..techniques.common import json_body_request, with_parameter
 from .routines import (
     CAP_ACCESS_DIFFERS_BY_SESSION,
     CAP_DELAYED_RESPONSE,
     CAP_INFLUENCE_REMOTE_FETCH,
+    CAP_PERSISTENT_STORAGE,
     CAP_PUBLIC_PARAM,
     CAP_REFLECTS_INPUT,
 )
@@ -50,13 +54,16 @@ TIMING_MARGIN_MS = 1000.0
 #: the two-gate flow owns its own vocabulary; the ledger stays a generic appender.
 CAPABILITY_MEASURED = "capability.measured"
 
-#: Every capability the prober can measure. Closed set.
+#: Every capability the prober can measure. Closed set — six of the kernel's
+#: eight capability strings, the same six the classic closure pass measures
+#: (the other two are verifiers' postconditions, not gate inputs).
 MEASURABLE: tuple[str, ...] = (
     CAP_PUBLIC_PARAM,
     CAP_REFLECTS_INPUT,
     CAP_INFLUENCE_REMOTE_FETCH,
     CAP_DELAYED_RESPONSE,
     CAP_ACCESS_DIFFERS_BY_SESSION,
+    CAP_PERSISTENT_STORAGE,
 )
 
 
@@ -139,6 +146,7 @@ class CapabilityProber:
         facts.append(self._remote_fetch(surface))
         facts.append(self._timing(surface))
         facts.append(self._sessions(surface))
+        facts.append(self._storage(surface))
         return facts
 
     def _measure(self, surface: Surface, payload: str, *, tag: str, session: str = "") -> object | None:
@@ -239,6 +247,64 @@ class CapabilityProber:
                 "the two sessions saw different content",
             )
         return CapabilityFact(surface.key, CAP_ACCESS_DIFFERS_BY_SESSION, False, "", "sessions saw the same content")
+
+    def _storage(self, surface: Surface) -> CapabilityFact:
+        """The storage measurement: submit a canary, read the surface back.
+
+        This is the classic closure pass's own ``elicit/storage`` elicitor,
+        *reused* rather than re-implemented — same canary, same submit/read-back
+        pair, same honesty rule (the canary must return on the **read-back**
+        request; the submit's own echo is reflection, not storage). Reusing it
+        keeps one source of truth for the question: a two-gate surface and a
+        classic ``--elicit`` surface are measured against the identical corpus.
+        """
+        from ..elicit.storage import ELICITOR
+        from ..world.observe import http_observations
+
+        if not ELICITOR.applies(surface):
+            return CapabilityFact(
+                surface.key, CAP_PERSISTENT_STORAGE, False, "",
+                "no parameter to store through",
+            )
+        observations: list[Observation] = []
+        for probe in ELICITOR.probes(surface):
+            detail = dict(probe.get("detail") or {})
+            probe_id = str(probe.get("id") or "")
+            self._probes += 1
+            outcome = self.gate.run(
+                EffectRequest(
+                    kind="http.request",
+                    host=str(probe.get("host") or surface.host),
+                    detail=detail,
+                    technique="capability_prober",
+                    probe=probe_id,
+                )
+            )
+            if not outcome.executed:
+                return CapabilityFact(
+                    surface.key, CAP_PERSISTENT_STORAGE, False, "",
+                    "gate refused or no response",
+                )
+            at = self.gate.now()
+            exchange = outcome.effect
+            observations.extend(
+                http_observations(
+                    exchange,
+                    probe=probe_id,
+                    canary=str(probe.get("canary") or ""),
+                    mark=str(probe.get("mark") or ""),
+                    at=at,
+                )
+            )
+        answer = ELICITOR.interpret(surface, observations, at=self.gate.now())
+        if answer.fact is not None:
+            return CapabilityFact(
+                surface.key, CAP_PERSISTENT_STORAGE, True, "reflection",
+                "the submitted canary came back on the read-back request",
+            )
+        return CapabilityFact(
+            surface.key, CAP_PERSISTENT_STORAGE, False, "", answer.reason
+        )
 
 
 __all__ = [
