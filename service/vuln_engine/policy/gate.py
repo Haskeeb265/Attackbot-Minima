@@ -72,6 +72,19 @@ KIND_OPERATIONS: dict[str, str] = {
 #: step from being the outage. Deliberately small; see ``_record_breaker``.
 CIRCUIT_FAILURE_LIMIT = 5
 
+#: The refusal a request asking for the second identity gets when no
+#: ``--session-b-cookie`` was wired. A named constant because it is *counted* a
+#: layer up (``world.views.blocked_on_session_b``): a refusal that names the
+#: missing declaration is an operator fix, not a dead end, and the run report
+#: says how many turns on it. ``views`` cannot import this module (the import
+#: graph is one-way: ``policy`` → ``world``), so it matches on
+#: ``world.views.SESSION_B_REFUSAL_MARKER``, and a test pins that marker to this
+#: string.
+SESSION_B_REFUSAL = (
+    "the request asks for session B but no second session is wired "
+    "(declare it with --session-b-cookie)"
+)
+
 
 @dataclass(frozen=True)
 class EffectRequest:
@@ -421,10 +434,7 @@ class PolicyGate:
             and str(request.detail.get("_session", "")) == "b"
             and not self._session_b_headers
         ):
-            return (
-                "the request asks for session B but no second session is wired "
-                "(declare it with --session-b-cookie)"
-            )
+            return SESSION_B_REFUSAL
         url = request.url
         if not url:
             return "no url in the request detail"
@@ -558,6 +568,7 @@ __all__ = [
     "KIND_OOB_READ",
     "KIND_OPERATIONS",
     "PolicyGate",
+    "SESSION_B_REFUSAL",
     "TARGET_KINDS",
     "default_effects",
 ]

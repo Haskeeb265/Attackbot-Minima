@@ -133,6 +133,27 @@ class Profile:
     policy: ProgramPolicy | None = None
 
 
+def print_holding_pen(report: "RunReport") -> None:
+    """The holding-pen backlog, as the report's human lines (empty when none).
+
+    The machine shape travels under the ``holding_pen`` key of ``report.json``
+    and ``--json``; this is the operator-facing rendering of the same view, and
+    it prints nothing at all when no hypothesis is waiting.
+    """
+    pen = getattr(report, "holding_pen", None) or {}
+    if not pen.get("held"):
+        return
+    _out(
+        f"  holding pen: {pen['held']} held hypothesis(es) waiting on a "
+        "verifier; run --json for the breakdown"
+    )
+    for group in pen.get("groups", []):
+        _out(
+            f"    - {group['count']}x {group['needs_verifier']} "
+            f"({group['key']})"
+        )
+
+
 def _out(line: str) -> None:
     """Print a line, losing a glyph rather than the report.
 
@@ -1125,6 +1146,18 @@ def main(argv: list[str] | None = None) -> int:
                 f"    + {fact.get('capability')} on {fact.get('surface_key')} "
                 f"(grade {fact.get('grade')})"
             )
+    blocked = int(report.counts.get("blocked_on_session_b", 0) or 0)
+    if blocked:
+        checks = int(report.counts.get("blocked_on_session_b_capability_checks", 0) or 0)
+        candidates = int(
+            report.counts.get("blocked_on_session_b_candidates", 0) or 0
+        )
+        _out(
+            f"  blocked:    {checks} capability check(s) and {candidates} "
+            "candidate(s) were blocked only by a missing second session — run "
+            "with --session-b-cookie to unlock them."
+        )
+    print_holding_pen(report)
     _out(f"  counts:     {report.counts}")
     _out(f"  findings:   {len(report.findings)}")
     for line in report.report_lines:

@@ -1071,6 +1071,39 @@ def test_demo_orchestrator_needs_the_ui(artifact_tree, monkeypatch, capsys):
     assert "not reachable" in out
 
 
+def test_the_demo_client_carries_the_write_guard_header(monkeypatch):
+    """The guided demo POSTs through the same anti-CSRF guard the UI's JS does.
+
+    Regression, found live rather than hermetically: the T5 guard landed on
+    every POST, but the demo's own client forgot the header, so
+    ``python -m service.ui.demo`` died at STEP 2 with a 403. This pins the
+    header on the request the demo actually sends.
+    """
+    import service.ui.demo as demo
+
+    seen: dict = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"ok": true, "job": {"id": "demo-1"}}'
+
+    def fake_urlopen(request, timeout=30):
+        seen["request"] = request
+        return FakeResponse()
+
+    monkeypatch.setattr(demo.urllib.request, "urlopen", fake_urlopen)
+    result = demo._post("http://127.0.0.1:8787", "/api/run", {"kind": "engine_fixture"})
+    assert result["ok"] is True
+    headers = {name.lower(): value for name, value in seen["request"].header_items()}
+    assert headers[server_mod.CSRF_HEADER_NAME.lower()] == server_mod.CSRF_HEADER_VALUE
+
+
 def test_http_demo_seed_endpoint(server, monkeypatch):
     """The endpoint reports the seeder's degrade honestly."""
     from service.ui import demo_seed

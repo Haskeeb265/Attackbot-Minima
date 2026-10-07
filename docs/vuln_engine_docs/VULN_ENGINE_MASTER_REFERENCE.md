@@ -2,10 +2,15 @@
 
 > **Status:** current-state reference, written against the code on branch
 > `attackbot/feature/vuln-engine` (revision current as of 2026-10-07, after the
-> hardening batch: `safe_component` name→path allowlist across the CLIs and UI
-> (T1), the seven-class eligibility bridge (T3), the UI write-side POST guard
-> and loopback-only default (T5), the counted inventory pins (T6), the
-> service/cloud graph kinds (T8), and the documented `--elicit` opt-in (T9) —
+> hardening batch (T1–T9: the `safe_component` name→path allowlist across the
+> CLIs and UI, the seven-class eligibility bridge, the UI write-side POST guard
+> and loopback-only default, the counted inventory pins, the service/cloud graph
+> kinds, and the documented `--elicit` opt-in) **and the gap-closure batch**
+> (`sqli.extraction.v1` wiring the previously-dead `data_extracted` oracle, the
+> `blocked_on_session_b` counter and its CLI line, the `holding_pen_summary`
+> view with its promoted/demoted exclusion and its report section, replay's
+> recomputation of the deterministic abduced round, and the guided demo's
+> CSRF-header fix) —
 > on top of Capability Closure (`service/vuln_engine/elicit/`), the timing
 > verifier's dose-response discriminator, and the authorization verifier's
 > content comparison). Every path, constant and field named below was read from
@@ -48,6 +53,7 @@
 24. [Appendix B — One finding, row by row](#appendix-b--one-finding-row-by-row)
 25. [Appendix C — Glossary](#appendix-c--glossary)
 26. [Appendix D — External-review gap resolution](#appendix-d--external-review-gap-resolution-2026-10)
+27. [Appendix E — Gap-closure batch](#appendix-e--gap-closure-batch-2026-10-07)
 
 ---
 
@@ -87,8 +93,8 @@ implementation that answered its three correct findings:
    compares session B's body against session A's, so a generic `2xx` envelope is
    no longer a finding.
 
-The engine's own suite is at **603 passed, 2 skipped**, `mypy` clean across 130
-source files (see §21).
+The engine's and UI's suites together are at **813 passed, 2 skipped**, `mypy`
+clean across 137 source files (see §21).
 
 ### The single most important distinction
 
@@ -573,8 +579,10 @@ flowchart TD
 flowchart LR
     LOG["world.jsonl"] --> OBSR["log.observations()"]
     OBSR --> REC["recompute hypotheses + probes + interpret"]
+    OBSR --> ABR["re-abduce deterministic abduced rows<br/>(anomaly → proposal → experiment)"]
     REC --> CMP{"logged candidates == recomputed?"}
-    CMP -->|"junction/abduced rows present"| LISTED["listed, not mismatched<br/>(recorded fact)"]
+    ABR --> CMP
+    CMP -->|"model/junction rows present"| LISTED["listed, not mismatched<br/>(recorded fact)"]
     CMP -->|differs| MISMATCH["mismatch reported"]
     LOG --> IND["independence check on every proven verdict"]
     LOG --> AUD["gate_audit"]
@@ -587,8 +595,9 @@ flowchart LR
 - **Not recomputed:** the verifier's *evidence* (an effect's result is a
   recorded fact). A replay that re-ran effects would not be a replay.
 - **Listed separately:** junction candidates (`candidate.junction`) and the
-  abduced round (`note stage=hypothesis.abduced`) — recorded fact, not
-  derivation.
+  abduced rounds a *model* sourced (`rule=llm_abduction`) — recorded fact, not
+  derivation. A deterministic abduced row is no longer listed: it is recomputed,
+  its anomaly re-abduced and its candidate diffed like any other (§11.6).
 ---
 
 ## 7. The kernel — contracts only
@@ -1472,7 +1481,32 @@ writes, every function takes a `LogView` (structurally: `WorldLog` or
 | `leads` | candidates proposed but not proven |
 | `receipts_by_arm` | `{arm: {outcome: count}}` — the punch card |
 | `report_lines` | the canonical prose lines |
-| `summary` | machine summary: rows, by_type, gate, candidates, findings, leads, receipts |
+| `session_b_refusals` | every `gate.decision` refusal whose only cause is a missing second session |
+| `blocked_on_session_b` | the count of those refusals |
+| `blocked_on_session_b_split` | that count split into `capability_checks` vs `candidates` |
+| `holding_pen_summary` | held hypotheses grouped by `(needs_verifier, vuln_class or claim_shape)`, **descending by count**; takes the pen optionally so a promoted/demoted entry is excluded; reports `held` and `lifetime` |
+| `summary` | machine summary: rows, by_type, gate, candidates, findings, leads, receipts, `blocked_on_session_b`, `holding_pen` |
+
+**Session-B refusals, split.** `SESSION_B_REFUSAL_MARKER` ("no second session
+is wired") is the substring a `gate.decision` refusal carries when the only
+thing between a request and the target is a missing `--session-b-cookie`.
+`blocked_on_session_b` counts those rows; `blocked_on_session_b_split` splits
+them by the refusing technique — `CAPABILITY_CHECK_TECHNIQUES` (the two-gate
+prober and the six elicitors) is a capability check, everything else a
+candidate. The marker is deliberately a substring, not the whole message, and a
+test pins it to `policy.gate.SESSION_B_REFUSAL` (`world` cannot import `policy`;
+the import graph is one-way).
+
+**The holding-pen backlog.** `holding_pen_summary(log, *, pen=None)` groups the
+log's `holding_pen.entry` rows by `(needs_verifier, vuln_class or claim_shape)` —
+the driver now logs `claim_shape` and `vuln_class` on each entry — and sorts the
+groups **descending by count** (ties broken by name), so the group a single new
+verifier would unlock first is the one at the top. Promotion and demotion are
+transitions in the pen's own ledger, not the world log, so a caller that has the
+pen passes it and every entry whose key has since left is excluded; `held` counts
+what is still waiting and `lifetime` keeps the all-time figure. `RunReport`
+carries the view under the `holding_pen` key of `report.json`/`--json`, and
+`run_engine.py` prints the groups when anything is waiting.
 
 `GRADE_PROSE` maps classes to prose: `execution → "browser execution"`,
 `oob → "an out-of-band interaction with our own collaborator"`,
@@ -1624,7 +1658,11 @@ re-holding an entry that already left), `promote(key, at, note)`
 (the code change that landed its confirm kind — A4: there is no schedule or
 metric path, the caller is the PR), `demote(key, at, note)`, `entries()`,
 `get(key)`, `held()`. A held hypothesis leaves exactly once, by one of those two
-doors, and never by a grade change.
+doors, and never by a grade change. When the driver holds one it also appends a
+`holding_pen.entry` row to the world log carrying `needs_verifier`,
+`claim_shape` and `vuln_class`, so `views.holding_pen_summary` (§10.2) derives
+the backlog from the ledger; it reads *this* file only to exclude an entry that
+has since been promoted or demoted, which the world log cannot know.
 
 ---
 
@@ -1907,10 +1945,20 @@ Recomputes a run's decisions from its log, with nothing else.
 
 `replay(log, seed, registry)` builds observations grouped by probe, recomputes
 each technique's hypotheses/probes/interpret, compares recomputed candidate ids
-with logged ones, and reports mismatches and independence violations. The
-abduced round's hypotheses are read from `note stage=hypothesis.abduced` rows
-and listed rather than mismatched; junction candidates from
-`candidate.junction` rows likewise. `ReplayReport.clean` is
+with logged ones, and reports mismatches and independence violations.
+
+The abduced round is recomputed too, when it is reproducible. For each
+`note stage=hypothesis.abduced` row whose `rule` is one of the deterministic
+abducer's (`DETERMINISTIC_RULES`), replay rebuilds the retained `Anomaly` from
+its `anomaly.retained` row, re-abduces, matches the proposal by id, materializes
+it through the technique's own `hypothesis_for_proposal`, and diffs the candidate
+it implies — scoped to *that* experiment's own observations (the window between
+this note row and the next), because an abduced plan can share probe ids with the
+ordinary pass. A row the model sourced (`rule=llm_abduction`) or whose recorded
+anomaly is missing stays listed as recorded fact, as does every
+`candidate.junction` row. `ReplayReport` reports `abduced_recomputed`,
+`abduced_listed`, `junction_candidates`, `candidates_logged`,
+`candidates_recomputed`, `mismatches` and `independence_violations`; `clean` is
 `not mismatches and not independence_violations`.
 ---
 
@@ -3185,6 +3233,10 @@ Named oracles and their evidence classes:
 | `ORACLE_AUTHZ_DIFFERENTIAL` (`authz_differential`) | differential |
 | `ORACLE_DATA_EXTRACTED` (`data_extracted`) | differential |
 
+Every oracle above has a live consumer: `data_extracted` backs
+`sqli.extraction.v1`, which asks the target to *compute* a chosen sentinel
+(hex / `CHAR()`), so a plain reflection cannot satisfy it (§19.2).
+
 `OracleContext` — `baseline`, `injected`, `control`, `session_a`, `session_b`,
 `oob_hit`, `margin`, `length_delta` — one typed shape, no free-form dict.
 `_differs` compares status, length (beyond `length_delta`), then body hash.
@@ -3212,16 +3264,26 @@ independent knowledge distribution the proposer cannot see.
 `baseline_payload`, `control_payload`, `injected_payloads`, `samples`, `margin`,
 `length_delta`, `preconditions`, `transports`, `canary`, `marker`, `vuln_class`.
 
-The corpus (6 routines):
+The corpus (7 routines):
 
 | `routine_id` | label | confirm_kind | oracle | preconditions |
 |---|---|---|---|---|
 | `xss.browser.v1` | `xss` | `browser.run` | `script_executed` | reflects input |
 | `sqli.timing.v1` | `sqli` | `timing.differential` | `timing_differential` | delayed response |
+| `sqli.extraction.v1` | `sqli` | `differential.extraction` | `data_extracted` | public_param |
 | `ssrf.oob.v1` | `ssrf` | `oob.read` | `oob_hit` | remote fetch |
 | `idor.authz.v1` | `idor` | `authorization.differential` | `authz_differential` | access differs |
 | `method_confusion.response.v1` | `method_confusion` | `differential.response` | `response_differs` | public_param |
 | `path_traversal.response.v1` | `path_traversal` | `differential.response` | `response_differs` | public_param |
+
+`sqli.extraction.v1` proves what `sqli.timing.v1` cannot: not merely that
+injection exists, but that a **specific attacker-chosen value was read back**.
+Its payloads compute the canary (`0x76652d65787472616374` / `CHAR(118,…)`)
+rather than spelling it, so a reflecting target echoes the encoding and fails
+the oracle — only a target that runs the injected query returns `ve-extract`.
+That is why it can ride the cheap `public_param` precondition and share the
+`sqli` label with the timing routine: a distinct confirm kind and oracle make it
+a different experiment, not a re-run.
 
 `select_routine(label, confirm_kind)` is the deterministic selection (first in
 registry order). `routine_ids()`, `routines_for_label`, `routines_for_kind`,
@@ -3261,7 +3323,11 @@ carries `facts`, `by_surface`, `probes_sent`.
 | delayed response | `sqli` |
 | remote fetch | `ssrf` |
 | access differs | `idor` |
-| public_param | `method_confusion`, `path_traversal` |
+| public_param | `method_confusion`, `path_traversal`, `sqli` (extraction, §19.2) |
+
+Three routes share `public_param`; each round tries one, so a param surface
+works through `method_confusion` → `path_traversal` → `sqli` (extraction) and
+stops at the first proof or the round bound.
 
 `CAPABILITY_ORDER` is cheapest/most-specific first. `CapabilityAgent.propose`
 returns deterministic proposals, skipping labels already tried; an injected
@@ -3301,8 +3367,10 @@ Routes by `spec.kind`:
   `authz_differential`);
 - `timing.differential` → `_run_timing` (baseline + injected populations,
   `timing_differential` with `margin`);
-- otherwise → `_run_response` (baseline + control + injected, `response_differs`
-  with `length_delta`).
+- `differential.extraction` (and any other unlisted kind) → `_run_response`
+  (baseline + control + injected; the oracle the spec names over their
+  features — `response_differs` with `length_delta`, or `data_extracted` over
+  `value_present` for extraction).
 
 `_sample` returns `[]` the moment any request is refused or errored — an
 incomplete population is inconclusive, never a refutation. `_send` shapes the
@@ -3344,6 +3412,11 @@ independence and writes a `verdict` row with the oracle's evidence grade.
 Ledger row types added by the flow: `loop.round`, `loop.stopped`,
 `confirmation.planned`, `confirmation.spec`, `confirmation.executed`,
 `confirmation.refused`, `lead.classified`.
+
+`TwoGateReport.counts` also carries `blocked_on_session_b` (and its
+`_capability_checks` / `_candidates` split), derived from the run's
+`gate.decision` rows — the prober always asks both identities, so a run
+without `--session-b-cookie` counts the refusals the operator can unlock.
 
 ### 19.7 `twogate/advisor.py` — the model advisors
 
@@ -3460,14 +3533,20 @@ the report, or a derivation from the ledger (`_derive_classic_report`).
 - `programs.py` — the PostgreSQL-backed program views (`_fetch` injectable for
   tests); a missing DB is a degrade, not a crash.
 - `demo.py` / `demo_seed.py` — the guided demo: seed an `attackbot-demo`
-  program, run the engine fixture, stream the log, show findings.
+  program, run the engine fixture, stream the log, show findings. The demo's
+  `_post` now imports `CSRF_HEADER_NAME` / `CSRF_HEADER_VALUE` from the server
+  and sends the guard header on every write. Before that it was refused with a
+  403 at STEP 2 once the T5 guard landed — a regression the live fixture check
+  caught, because the hermetic UI tests exercise `demo_seed` and the argv
+  builder but not the demo's HTTP client. Pinned by
+  `test_the_demo_client_carries_the_write_guard_header`.
 
-Last verified demo run (2026-10-06, live): 54 world-log rows streamed live
-through the demo's own tail (`/api/engine/log`), gate 5×ALLOW / 0×DENY, two
-findings — `ssrf` (grade `oob`) and `xss` (grade `execution`). The row census:
-2 candidates, 2 verdicts, 3 receipts, 5 gate decisions, 5 effect requests /
-5 results, 8 observations, 4 `run.begin` / 4 `run.end`, 4 scheduler picks,
-10 notes.
+Last verified demo run (2026-10-07, live, after the fix): the flow completed
+end to end against the running UI server — program seeded, engine run launched
+through `/api/run`, the world log tailed live, findings read back. The engine's
+output ledger is cumulative across demo runs by design (see §21), so the
+re-run's tally included prior rows; the fix is what makes the flow runnable at
+all — before it, the demo died at the first POST.
 
 ---
 
@@ -3508,32 +3587,50 @@ Notable test modules:
 | `test_novelty.py` / `test_novelty_reward.py` | L0–L4 computation and the novelty cap |
 | `test_abduction*.py` | proposals, validation, and the abduced round |
 | `elicit/test_elicit.py` | discovery, each elicitor's positive/negative, and closure enriching the seed so a technique fires through it |
+| `twogate/test_sqli_extraction.py` | the `data_extracted` oracle wired end to end: measured capability → proven finding at `differential`, independent |
+| `world/test_session_b_blocked.py` | `blocked_on_session_b` in the classic, closure and two-gate paths; matches the log; marker pinned to the gate message |
+| `world/test_holding_pen_summary.py` | `holding_pen_summary` grouping and descending-by-count ordering, the promoted/demoted exclusion via the pen, and the driver's enriched `holding_pen.entry` row |
+| `scheduler/test_replay.py` | the deterministic abduced round is recomputed (a corrupted candidate and a deleted `anomaly.retained` row are both caught), while `rule=llm_abduction` and `candidate.junction` rows stay listed |
 
-Verification at the time of writing (re-run 2026-10-07): the **whole tree** —
-`python -m pytest tests/ -q` — is **2218 passed, 18 skipped, 0 failed**
-(85–170 s depending on disk; the UI suite's job tests dominate the variance),
-and `mypy service/vuln_engine run_engine.py` is clean across **136 source
-files**. `python -m pytest tests/vuln_engine -q` alone: 712 passed, 16 skip.
-The hermetic
-UI suite additionally pins the trace phase mapping, a path-escape test
-(`?key=../../.env` is a 400), the DB-degrade path, the POST guard and the
-loopback-only default (§20.1).
+Verification at the time of writing (re-run 2026-10-07, after the gap-closure
+batch, Docker up): `python -m pytest tests/vuln_engine tests/ui -q` — the
+engine's and UI's suites together — is **813 passed, 2 skipped, 0 failed** (the
+2 skips are Neo4j-env-gated, not fixture tests; this round added nine — two to
+`world/test_holding_pen_summary.py`, five in the new `scheduler/test_replay.py`,
+and two to `eval/test_phase1.py`), and
+`mypy service/vuln_engine run_engine.py run_twogate.py` is clean across **137
+source files**. The whole tree (`pytest tests/`) stood at 2218 passed / 18
+skipped before this batch; the engine+UI slice is the number this batch was
+verified against. The hermetic UI suite additionally pins the trace phase
+mapping, a path-escape test (`?key=../../.env` is a 400), the DB-degrade path,
+the POST guard, the loopback-only default, and the demo's guard header
+(§20.1, §20.4).
 
-Live verification against the compose fixture (2026-10-06, `fixture_app` and
-`oob_collaborator` up, clean output directory): the classic run
+Live verification against the compose fixture (2026-10-07, `fixture_app` and
+`oob_collaborator` up, fresh output directories): the classic run
 (`run_engine.py --fixture`) reported 2 findings — `ssrf` grade `oob` and `xss`
 grade `execution`, both independently confirmed — over gate decisions
-5×ALLOW / 0×DENY with 0 uncleared effects. The closure run
-(`--elicit`) measured 2 capability facts, 8 negatives and 2 honest refusals
-(§12.10 has the full account), and its log replayed clean: 2 candidates
-logged, 2 recomputed, 0 mismatches, 0 independence violations. The two-gate
-run (`run_twogate.py --fixture`) measured `http_response_reflects_input` and
-`public_param` on the fixture's surfaces, planned and executed 3 confirmations
-over 4 rounds (gate 23×ALLOW / 2×DENY), reported 1 finding (`xss`, grade
-`execution`, proposed on the *measured* reflection capability) and 2 leads
-(`method_confusion`, `path_traversal`, both on `/fetch#url`).
-The UI demo flow (`python -m service.ui.demo`) streamed its run live: 54
-world-log rows, gate 5×ALLOW / 0×DENY, the same two findings (§20.4).
+5×ALLOW / 0×DENY with 0 uncleared effects. The closure run (`--elicit`)
+measured 2 capability facts, 8 negatives and 2 honest refusals, and its
+37-decision audit (35×ALLOW / 2×DENY) printed the new
+`blocked: 2 capability check(s) and 0 candidate(s) were blocked only by a
+missing second session` line, with `blocked_on_session_b = 2` in the counts.
+Replaying that log offline (`run_engine.py --replay <log>`) exited 0 with 0
+mismatches and 0 independence issues, and every report now carries the
+`holding_pen` key — 0 held on the fixture, whose surfaces need no missing
+verifier today.
+The two-gate run (`run_twogate.py --fixture`) measured
+`http_response_reflects_input` and `public_param` on the fixture's surfaces,
+planned and executed 4 confirmations over 4 rounds (gate 29×ALLOW / 2×DENY),
+reported 1 finding (`xss`, grade `execution`, proposed on the *measured*
+reflection capability) and 3 leads — `method_confusion` and `path_traversal`
+on `/fetch#url`, plus the new `sqli.extraction.v1`, which ran on `/fetch` and
+honestly did **not** prove (the fixture never returns the computed canary), so
+the new routine added a lead rather than a false finding. The two-gate CLI
+also printed `blocked: 2 capability check(s)` (the prober asks both identities
+on each surface). The UI demo flow (`python -m service.ui.demo`) was the run
+that exposed the T5-header regression in the first place; after the fix it
+completed end to end (§20.4).
 
 > **Suite isolation is a solved guard (T4, no longer a caveat).** Several
 > production modules call `load_dotenv(..., override=True)` at import time —
@@ -3716,7 +3813,9 @@ today:
    counted. Remaining untouched kinds: wildcard, ASN, network,
    organisation.
 7. **`--replay` does not recompute verifier evidence** (recorded fact by
-   design) and lists junction/abduced candidates rather than recomputing them.
+   design). It recomputes the deterministic abduced round from the anomaly the
+   log recorded (§11.6) and lists only what a model sourced: `candidate.junction`
+   rows and abduced rows with `rule=llm_abduction`.
 8. **`state_change` routing cap, not provability cap.** The claim *is*
    provable at `differential` (G9, closed): it sits in
    `DIFFERENTIAL_PROVABLE` and the setup-re-executing verifier proves it end
@@ -4091,3 +4190,45 @@ and `test_claim_shapes.py`.
 pins the `elicit/` and `twogate/` capability spellings against
 `kernel/capability.py`, so a capability renamed in the kernel fails loudly
 everywhere instead of opening no door at all.
+
+---
+
+## Appendix E — Gap-closure batch (2026-10-07)
+
+A second same-day batch after T1–T9, closing gaps the previous pass left open.
+Every item is additive — no kernel vocabulary, no gate, no verifier proof logic
+changed.
+
+| Item | Delivered | Where |
+|---|---|---|
+| Task 1 | `sqli.extraction.v1` — the first routine to consume `ORACLE_DATA_EXTRACTED` (`data_extracted`): a UNION-based extraction that asks the target to *compute* a sentinel, so reflection cannot satisfy it | `twogate/routines.py`, `twogate/agents.py`, `tests/vuln_engine/twogate/test_sqli_extraction.py` |
+| Task 2 | `blocked_on_session_b` — a gate refusal caused only by a missing `--session-b-cookie` is counted and split (capability checks vs candidates), surfaced in the run report and both CLIs | `policy/gate.py` (`SESSION_B_REFUSAL`), `world/views.py`, `elicit/closure.py`, `scheduler/driver.py`, `twogate/loop.py`, `run_engine.py`, `run_twogate.py`, `tests/vuln_engine/world/test_session_b_blocked.py` |
+| Task 3 | `holding_pen_summary(log, *, pen=None)` — the verifier-vocabulary backlog as a pure view, grouped by `(needs_verifier, vuln_class or claim_shape)` and sorted descending by count; the pen is passed in so an entry since promoted/demoted is excluded (`lifetime` keeps the all-time figure). Surfaced under the `holding_pen` key of `report.json`/`--json` and in the CLI | `world/views.py`, `scheduler/driver.py` (`RunReport.holding_pen`; the `holding_pen.entry` row carries `claim_shape` + `vuln_class`), `run_engine.py`, `tests/vuln_engine/world/test_holding_pen_summary.py`, `tests/vuln_engine/eval/test_phase1.py` |
+| Task 4 | `scheduler/replay.py` recomputes the **deterministic** abduced round instead of listing it: the retained anomaly is re-abduced, the proposal matched by id, the experiment re-run against its own observation window, and the candidate diffed like any other. `rule=llm_abduction` rows and `candidate.junction` rows stay listed as recorded fact | `scheduler/replay.py` (`DETERMINISTIC_RULES`, `_recompute_abduced`, `_abduced_windows`, `abduced_recomputed`/`abduced_listed`), `tests/vuln_engine/scheduler/test_replay.py` |
+| Fix | The guided demo's `_post` sends the T5 guard header (it had been 403'd at STEP 2); pinned by a regression test | `service/ui/demo.py`, `tests/ui/test_ui_server.py` |
+
+**Invariants held.** Task 1 touches no verifier: it adds a routine and a route,
+and the oracle it names already existed and is applied by the unchanged `_decide`.
+Task 2 is a derivation over existing `gate.decision` rows (the one duplicated
+string is pinned by test). Task 3 logs two extra fields on an existing row type
+and aggregates them, reading the pen (optionally) only to *exclude* entries — the
+world log stays the only truth the report reads, and a promotion is a pen-file
+fact, not an invented log row. Task 4 replaces a listing with a recomputation: the
+deterministic abducer is pure, so re-running it is checking rather than effect, no
+invariant moves, and the model-sourced rows it must not re-run stay listed. The
+demo fix is client-side.
+
+**Verified.** `pytest tests/vuln_engine tests/ui` → 813 passed / 2 skipped;
+`mypy service/vuln_engine run_engine.py run_twogate.py` → clean, 137 files; live
+against the compose fixture — §21 has the run-by-run numbers.
+
+**Deliberately left open.** The two-gate extraction routine shares the `sqli`
+label with `sqli.timing.v1`, so a surface where the timing routine also fires
+settles on the timing proof first; that is by design (one label = one hypothesis
+per surface) and the extraction experiment remains reachable on any
+`public_param` surface. On the replay change: an abduced row the model sourced
+(`rule=llm_abduction`) is still listed rather than recomputed — the same
+recorded-fact rule as `candidate.junction`, not a gap. And `holding_pen_summary`
+can only exclude a promoted/demoted entry when the caller passes the pen; from the
+world log alone a transition is not derivable, so it reports `lifetime` honestly
+instead of guessing.

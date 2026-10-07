@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from .spec import (
     ORACLE_AUTHZ_DIFFERENTIAL,
+    ORACLE_DATA_EXTRACTED,
     ORACLE_OOB_HIT,
     ORACLE_RESPONSE_DIFFERS,
     ORACLE_SCRIPT_EXECUTED,
@@ -112,6 +113,20 @@ _SQLI_PAYLOADS = (
 #: sentinel with a real per-probe URL before sending.
 _SSRF_PAYLOAD = "http://ooburlsentinel_ssrf/probe"
 
+#: The value a UNION-based extraction routine reads back. It is deliberately
+#: NOT spelled in any payload: the payloads ask the database to *compute* it
+#: (hex literal / CHAR()), so a target that merely reflects the parameter bytes
+#: cannot produce it — only a target that parses and executes the injected
+#: query can. That is what keeps the ``data_extracted`` oracle from firing on a
+#: plain reflection.
+_SQLI_EXTRACT_CANARY = "ve-extract"
+_SQLI_EXTRACT_PAYLOADS = (
+    # 0x76652d65787472616374 == b"ve-extract"
+    "1' UNION SELECT 0x76652d65787472616374-- -",
+    # CHAR(118,101,45,101,120,116,114,97,99,116) == "ve-extract"
+    "1 UNION SELECT CHAR(118,101,45,101,120,116,114,97,99,116)",
+)
+
 ROUTINES: tuple[Routine, ...] = (
     Routine(
         routine_id="xss.browser.v1",
@@ -135,6 +150,22 @@ ROUTINES: tuple[Routine, ...] = (
         samples=3,
         margin=1000.0,
         preconditions=(CAP_DELAYED_RESPONSE,),
+        transports=("http1",),
+    ),
+    Routine(
+        routine_id="sqli.extraction.v1",
+        label="sqli",
+        vuln_class="sqli",
+        confirm_kind="differential.extraction",
+        oracle=ORACLE_DATA_EXTRACTED,
+        injected_payloads=_SQLI_EXTRACT_PAYLOADS,
+        samples=2,
+        canary=_SQLI_EXTRACT_CANARY,
+        # The probe needs a parameter whose response body we can read; that is
+        # exactly what a measured ``public_param`` establishes. Unlike the
+        # timing routine it does not need the target to sleep — it needs the
+        # target to answer a query whose result we chose.
+        preconditions=(CAP_PUBLIC_PARAM,),
         transports=("http1",),
     ),
     Routine(

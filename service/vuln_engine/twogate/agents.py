@@ -59,6 +59,12 @@ CAPABILITY_ROUTES: dict[str, tuple[tuple[str, str, str, str], ...]] = {
     CAP_PUBLIC_PARAM: (
         ("method_confusion", "differential.response", "method-confusion", "response-diff"),
         ("path_traversal", "differential.response", "path-traversal", "traversal-family"),
+        # Extraction rides the same measured ``public_param`` precondition as
+        # the response-difference family: the probe needs a parameter whose
+        # answer we can read, not a target that sleeps. It keeps the ``sqli``
+        # label the timing routine uses — a distinct confirm kind (and oracle)
+        # is what makes it a different experiment rather than a re-run.
+        ("sqli", "differential.extraction", "sqli", "union-extraction"),
     ),
 }
 

@@ -33,6 +33,7 @@ import urllib.request
 from pathlib import Path
 
 from service.ui.artifacts import ROOT
+from service.ui.server import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 
 UI_URL = "http://127.0.0.1:8787"
 #: The engine output dir for the demo run — isolated, so the run is clean and
@@ -202,7 +203,15 @@ def _get(base: str, path: str) -> dict:
 def _post(base: str, path: str, payload: dict) -> dict:
     request = urllib.request.Request(
         base + path, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers={
+            "Content-Type": "application/json",
+            # The server's write side refuses any POST without this anti-CSRF
+            # header (T5); the demo is a legitimate client and must carry it
+            # exactly as the UI's own JS does. Single-sourced from the server
+            # so the two can never drift.
+            CSRF_HEADER_NAME: CSRF_HEADER_VALUE,
+        },
+        method="POST",
     )
     with urllib.request.urlopen(request, timeout=30) as res:
         return json.loads(res.read().decode("utf-8"))

@@ -33,6 +33,7 @@ from ..kernel.technique import CAPABILITIES, EngagementSeed, Surface
 from ..policy.gate import PolicyGate
 from ..registry import TechniqueRegistry
 from ..world.log import WorldLog
+from ..world.views import SESSION_B_REFUSAL_MARKER
 from .common import Elicitation
 from .registry import ElicitorRegistry
 
@@ -79,6 +80,10 @@ class ClosureReport:
     skipped_known: int = 0
     #: Probes the gate refused (nothing was sent for them).
     refused: int = 0
+    #: Of those refusals, the ones caused *only* by a missing second session —
+    #: the operator unlocks them with ``--session-b-cookie``. Surfaced so the
+    #: run report can separate "blocked on a declaration" from "refused".
+    blocked_on_session_b: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -86,6 +91,7 @@ class ClosureReport:
             "negatives": list(self.negatives),
             "skipped_known": self.skipped_known,
             "refused": self.refused,
+            "blocked_on_session_b": self.blocked_on_session_b,
         }
 
 
@@ -271,6 +277,8 @@ def _run_probes(
         at = gate.now()
         if not outcome.executed:
             report.refused += 1
+            if SESSION_B_REFUSAL_MARKER in outcome.reason:
+                report.blocked_on_session_b += 1
             continue
         if probe_spec.kind == "http.request":
             exchange: RawHttpExchange = outcome.effect

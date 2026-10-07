@@ -166,6 +166,11 @@ class RunReport:
     #: Capability Closure's report (``ClosureReport.to_dict()``), or ``{}`` when
     #: the closure pass did not run.
     closure: dict = field(default_factory=dict)
+    #: The holding-pen backlog (``views.holding_pen_summary``): held hypotheses
+    #: grouped by ``(needs_verifier, vuln_class | claim_shape)``, descending by
+    #: count. This run's window over the ledger, with the pen passed in so an
+    #: entry that has since been promoted or demoted is not counted as waiting.
+    holding_pen: dict = field(default_factory=dict)
     log_path: str = ""
 
     def to_dict(self) -> dict:
@@ -186,6 +191,7 @@ class RunReport:
             "advisory": self.advisory,
             "novelty": self.novelty,
             "closure": self.closure,
+            "holding_pen": self.holding_pen,
             "log": self.log_path,
         }
 
@@ -324,6 +330,15 @@ class Engine:
         # independent verifier. A surprise here is not re-abduced.
         self._run_abduced(counts)
 
+        # A refusal caused only by a missing second session is an operator fix,
+        # not a dead end. Count them from the log (the ledger is the truth) and
+        # split them into capability checks vs candidate verifications, so the
+        # CLI can say which knob unlocks what.
+        session_b = views.blocked_on_session_b_split(this_run)
+        counts["blocked_on_session_b"] = session_b["total"]
+        counts["blocked_on_session_b_capability_checks"] = session_b["capability_checks"]
+        counts["blocked_on_session_b_candidates"] = session_b["candidates"]
+
         finished = self.clock()
         self.log.append(EVENT_END, at=finished, counts=dict(counts))
 
@@ -346,6 +361,7 @@ class Engine:
             problems=self.registry.problems,
             advisory=self._advisory_report(),
             closure=closure_report,
+            holding_pen=views.holding_pen_summary(this_run, pen=self.pen),
             log_path=self.log.path.as_posix() if self.log.path else "",
         )
 
@@ -644,6 +660,12 @@ class Engine:
                 arm=arm,
                 proposal_id=proposal.id,
                 needs_verifier=proposal.needs_verifier,
+                # Carried so the pen's backlog is derivable from the log alone
+                # (``world.views.holding_pen_summary``); the pen's own JSONL
+                # holds the same fields, but the ledger is the only place the
+                # run report reads truth from.
+                claim_shape=proposal.claim_shape,
+                vuln_class=proposal.vuln_class,
             )
 
     def _run_abduced(self, counts: dict[str, int]) -> None:

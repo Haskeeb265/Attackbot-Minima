@@ -201,6 +201,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  proposals:    {report.counts.get('proposals', 0)}  planned: {report.counts.get('planned', 0)}")
     print(f"  executions:   {report.counts.get('executions', 0)}")
     print(f"  gate:         {report.gate.get('by_verb', {})}; uncleared: {report.gate.get('uncleared_effects')}")
+    blocked = int(report.counts.get("blocked_on_session_b", 0) or 0)
+    if blocked:
+        checks = int(report.counts.get("blocked_on_session_b_capability_checks", 0) or 0)
+        candidates = int(report.counts.get("blocked_on_session_b_candidates", 0) or 0)
+        print(
+            f"  blocked:      {checks} capability check(s) and {candidates} "
+            "candidate(s) were blocked only by a missing second session — run "
+            "with --session-b-cookie to unlock them."
+        )
     print(f"  findings:     {len(report.findings)}")
     for line in report.report_lines:
         print(f"    {line}")

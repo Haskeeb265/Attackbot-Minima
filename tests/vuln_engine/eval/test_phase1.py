@@ -220,3 +220,41 @@ def test_a_second_run_does_not_pay_for_what_it_already_proved(harness, tmp_path:
     assert second.counts["skipped_conclusive"] == 3
     assert second.counts["probes_run"] == 0
     assert second.findings == []
+
+
+# --------------------------------------------------------------------------- #
+# the holding-pen section (Task 3)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_report_carries_the_holding_pen_view(report: run_engine.RunReport) -> None:
+    """The machine report always names the pen, even when nothing is waiting."""
+    payload = report.to_dict()
+    assert "holding_pen" in payload
+    assert set(payload["holding_pen"]) == {"held", "lifetime", "groups"}
+    assert payload["holding_pen"]["held"] == 0
+
+
+def test_the_holding_pen_lines_print_only_when_something_is_held(capsys) -> None:
+    from service.vuln_engine.scheduler.driver import RunReport
+
+    quiet = RunReport(target="t", holding_pen={"held": 0, "lifetime": 4, "groups": []})
+    run_engine.print_holding_pen(quiet)
+    assert capsys.readouterr().out == ""
+
+    waiting = RunReport(
+        target="t",
+        holding_pen={
+            "held": 2,
+            "lifetime": 3,
+            "groups": [
+                {"count": 2, "needs_verifier": "v.one", "key": "idor"},
+                {"count": 1, "needs_verifier": "v.two", "key": "object_read"},
+            ],
+        },
+    )
+    run_engine.print_holding_pen(waiting)
+    printed = capsys.readouterr().out
+    assert "2 held hypothesis(es)" in printed
+    assert "2x v.one (idor)" in printed
+    assert "1x v.two (object_read)" in printed

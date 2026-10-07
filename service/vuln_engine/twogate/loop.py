@@ -170,6 +170,14 @@ class TwoGateLoop:
         for surface in self.seed.surfaces:
             self._run_surface(surface, report, counts, rounds, stops)
 
+        # The two-gate equivalent of the driver's counter: the capability prober
+        # always asks both identities, so a run without ``--session-b-cookie``
+        # collects refusals here that the operator can unlock by declaring one.
+        session_b = views.blocked_on_session_b_split(this_run)
+        counts["blocked_on_session_b"] = session_b["total"]
+        counts["blocked_on_session_b_capability_checks"] = session_b["capability_checks"]
+        counts["blocked_on_session_b_candidates"] = session_b["candidates"]
+
         finished = self.gate.now()
         self.log.append(self.EVENT_END, at=finished, counts=dict(counts))
 

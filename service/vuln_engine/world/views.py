@@ -30,16 +30,22 @@ The four views Phase 1 needs:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from ..kernel.evidence import EVIDENCE_HYPOTHESIS
+from .holding_pen import PEN_HELD
 from .log import (
     EVENT_CANDIDATE,
     EVENT_EFFECT_RESULT,
     EVENT_GATE_DECISION,
+    EVENT_HOLDING_PEN_ENTRY,
     EVENT_RECEIPT,
     EVENT_VERDICT,
 )
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .holding_pen import HoldingPen
 
 
 class LogView(Protocol):
@@ -60,6 +66,31 @@ class LogView(Protocol):
     def summary(self) -> dict[str, int]:
         """``{row type: count}``."""
         ...
+
+#: The substring that marks a gate refusal caused *only* by a missing second
+#: session. A marker rather than the whole message so the operator-facing
+#: wording can change without breaking the count; a test pins it to
+#: :data:`policy.gate.SESSION_B_REFUSAL`. ``views`` cannot import ``policy``
+#: (the import graph is one-way: ``policy`` → ``world``), hence the marker.
+SESSION_B_REFUSAL_MARKER = "no second session is wired"
+
+#: Technique names whose session-B refusal is a *capability check* — a
+#: measurement of a precondition — rather than a candidate's own experiment.
+#: These are the two-gate prober and the six elicitors; everything else (a
+#: technique's own probes and the verifiers) counts as a candidate. Pinned to
+#: the live elicitor registry by a test, so a new elicitor cannot silently
+#: change the split.
+CAPABILITY_CHECK_TECHNIQUES: frozenset[str] = frozenset(
+    {
+        "capability_prober",
+        "public_param",
+        "reflection",
+        "remote_fetch",
+        "sessions",
+        "storage",
+        "timing",
+    }
+)
 
 #: How a finding's evidence class reads in a report line.  Kept as a table so the
 #: prose cannot drift away from the class it claims to describe.
@@ -115,6 +146,41 @@ def gate_audit(log: LogView) -> dict:
         "out_of_scope_requests": len(out_of_scope),
         "internal_effects": len(internal),
         "refusals": refusals,
+    }
+
+
+def session_b_refusals(log: LogView) -> list[dict]:
+    """Every gate refusal whose only cause is a missing second session.
+
+    These are the refusals an operator can *unlock* by wiring
+    ``--session-b-cookie``; counted apart from the general refusal tally so the
+    report can say so instead of burying them among unrelated denials.
+    """
+    return [
+        row
+        for row in log.events(EVENT_GATE_DECISION)
+        if SESSION_B_REFUSAL_MARKER in str(row.get("reason", ""))
+    ]
+
+
+def blocked_on_session_b(log: LogView) -> int:
+    """How many gate refusals the missing ``--session-b-cookie`` alone caused."""
+    return len(session_b_refusals(log))
+
+
+def blocked_on_session_b_split(log: LogView) -> dict[str, int]:
+    """The same count split into capability checks vs candidate verifications."""
+    checks = 0
+    candidates_count = 0
+    for row in session_b_refusals(log):
+        if str(row.get("technique", "")) in CAPABILITY_CHECK_TECHNIQUES:
+            checks += 1
+        else:
+            candidates_count += 1
+    return {
+        "capability_checks": checks,
+        "candidates": candidates_count,
+        "total": checks + candidates_count,
     }
 
 
@@ -220,6 +286,65 @@ def leads(log: LogView) -> list[dict]:
     ]
 
 
+def holding_pen_summary(log: LogView, *, pen: "HoldingPen | None" = None) -> dict:
+    """Held hypotheses, counted by ``(needs_verifier, vuln_class | claim_shape)``.
+
+    The pen's backlog — hypotheses the verifier vocabulary cannot confirm yet —
+    grouped so an operator can see which single confirm kind would unlock the
+    most. Groups are sorted **descending by count** (ties broken by the group's
+    own names, so the order is stable), because the question the view answers is
+    "what should a new verifier unlock first".
+
+    The group key prefers ``vuln_class`` (what the run believes) and falls back
+    to ``claim_shape`` (what kind of claim it is) when no class was named.
+
+    **What counts as still held.** A ``holding_pen.entry`` row records that a
+    hypothesis was held; it does not record that it later left. Promotion and
+    demotion are transitions in the pen's *own* ledger
+    (``world/holding_pen.py``), the one place a code change or a decline is
+    written, so when the caller has the pen it is passed in and every entry
+    whose key has since left the pen is excluded. Without a pen the view can
+    only describe the entries themselves (``held == lifetime``) — stated rather
+    than guessed, because a promotion is not derivable from the world log.
+    """
+    rows = log.events(EVENT_HOLDING_PEN_ENTRY)
+    lifetime = len(rows)
+    left: frozenset[str] = frozenset()
+    if pen is not None:
+        left = frozenset(
+            str(entry.get("key", ""))
+            for entry in pen.entries()
+            if entry.get("status") != PEN_HELD
+        )
+    counts: dict[tuple[str, str], int] = {}
+    held = 0
+    for row in rows:
+        if left and str(row.get("proposal_id", "")) in left:
+            continue
+        needs_verifier = str(row.get("needs_verifier", "")) or "(unnamed)"
+        key = (
+            str(row.get("vuln_class", ""))
+            or str(row.get("claim_shape", ""))
+            or "(unknown)"
+        )
+        counts[(needs_verifier, key)] = counts.get((needs_verifier, key), 0) + 1
+        held += 1
+    # Descending by count; the group's names are the tiebreak so two runs over
+    # the same log cannot disagree on the order.
+    ranked: list[tuple[str, str, int]] = [
+        (needs, key, count) for (needs, key), count in counts.items()
+    ]
+    ranked.sort(key=lambda item: (-item[2], item[0], item[1]))
+    return {
+        "held": held,
+        "lifetime": lifetime,
+        "groups": [
+            {"needs_verifier": needs, "key": key, "count": count}
+            for needs, key, count in ranked
+        ],
+    }
+
+
 def receipts_by_arm(log: LogView) -> dict[str, dict[str, int]]:
     """``{arm: {outcome: count}}`` — the receipts ledger's view of the log.
 
@@ -289,19 +414,27 @@ def summary(log: LogView) -> dict:
         "findings": [finding.to_dict() for finding in found],
         "leads": len(leads(log)),
         "receipts": receipts_by_arm(log),
+        "blocked_on_session_b": blocked_on_session_b(log),
+        "holding_pen": holding_pen_summary(log),
     }
 
 
 __all__ = [
+    "CAPABILITY_CHECK_TECHNIQUES",
     "Finding",
     "GRADE_PROSE",
+    "SESSION_B_REFUSAL_MARKER",
     "arm_key",
+    "blocked_on_session_b",
+    "blocked_on_session_b_split",
     "candidates",
     "findings",
     "gate_audit",
+    "holding_pen_summary",
     "leads",
     "receipts_by_arm",
     "report_lines",
+    "session_b_refusals",
     "summary",
     "verdicts",
 ]
