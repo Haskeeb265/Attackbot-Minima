@@ -171,6 +171,16 @@ class RunReport:
     #: count. This run's window over the ledger, with the pen passed in so an
     #: entry that has since been promoted or demoted is not counted as waiting.
     holding_pen: dict = field(default_factory=dict)
+    #: Per-surface coverage (``views.coverage``): the last attempt's outcome
+    #: per ``(surface, technique)`` from the receipts ledger, conclusive or not.
+    coverage: dict = field(default_factory=dict)
+    #: The abductive junction's ledger (``views.abduction_summary``): proposals
+    #: and validator verdicts, counted by verdict and grouped by needs_verifier.
+    abduction: dict = field(default_factory=dict)
+    #: ``findings`` collapsed to the strongest per ``(surface, vuln_class)``
+    #: (``views.findings_deduplicated``), the losers' ids carried in
+    #: ``duplicate_ids``. The raw ``findings`` list above stays untouched.
+    findings_deduplicated: list[dict] = field(default_factory=list)
     log_path: str = ""
 
     def to_dict(self) -> dict:
@@ -192,6 +202,9 @@ class RunReport:
             "novelty": self.novelty,
             "closure": self.closure,
             "holding_pen": self.holding_pen,
+            "coverage": self.coverage,
+            "abduction": self.abduction,
+            "findings_deduplicated": self.findings_deduplicated,
             "log": self.log_path,
         }
 
@@ -362,6 +375,9 @@ class Engine:
             advisory=self._advisory_report(),
             closure=closure_report,
             holding_pen=views.holding_pen_summary(this_run, pen=self.pen),
+            coverage=views.coverage(this_run),
+            abduction=views.abduction_summary(this_run),
+            findings_deduplicated=views.findings_deduplicated(this_run),
             log_path=self.log.path.as_posix() if self.log.path else "",
         )
 

@@ -231,7 +231,7 @@ def test_the_report_carries_the_holding_pen_view(report: run_engine.RunReport) -
     """The machine report always names the pen, even when nothing is waiting."""
     payload = report.to_dict()
     assert "holding_pen" in payload
-    assert set(payload["holding_pen"]) == {"held", "lifetime", "groups"}
+    assert set(payload["holding_pen"]) == {"held", "lifetime", "value", "groups"}
     assert payload["holding_pen"]["held"] == 0
 
 

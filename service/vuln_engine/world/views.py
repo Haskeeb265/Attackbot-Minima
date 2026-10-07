@@ -25,6 +25,18 @@ The four views Phase 1 needs:
 ``report_lines``
     The reporting rule of ``engine_explained.md`` §10: what was proven, how, with
     what reproducibility, and which evidence class it rests on.
+
+Three views gap-closure batch 2 adds:
+
+``coverage``
+    Per-surface coverage from the receipts ledger: the last attempt's outcome
+    per ``(surface, technique)``, conclusive or not.
+``findings_deduplicated``
+    ``findings`` collapsed to the strongest per ``(surface, vuln_class)``,
+    with the losers' ids carried alongside rather than erased.
+``abduction_summary``
+    The abductive junction's ledger: proposals and validator verdicts, counted
+    by verdict so a run explains why an explanation was (or was not) pursued.
 """
 
 from __future__ import annotations
@@ -32,9 +44,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
-from ..kernel.evidence import EVIDENCE_HYPOTHESIS
+from ..kernel.claim import DIFFERENTIAL_PROVABLE
+from ..kernel.evidence import EVIDENCE_HYPOTHESIS, EVIDENCE_ORDER
 from .holding_pen import PEN_HELD
 from .log import (
+    EVENT_ABDUCTION_PROPOSED,
+    EVENT_ABDUCTION_VALIDATED,
     EVENT_CANDIDATE,
     EVENT_EFFECT_RESULT,
     EVENT_GATE_DECISION,
@@ -286,14 +301,206 @@ def leads(log: LogView) -> list[dict]:
     ]
 
 
+#: How much one proven finding of a class is worth in the holding pen's value
+#: weighting — the risk rank an operator's triage order would use, not a CVSS
+#: model. Static, in one place, and pinned by a test: editing a weight edits an
+#: operator's reading of the backlog, so the edit must be deliberate.
+SEVERITY_WEIGHTS: dict[str, float] = {
+    "command-injection": 5.0,
+    "sqli": 4.0,
+    "ssrf": 3.0,
+    "idor": 3.0,
+    "xss": 2.0,
+    "method-confusion": 2.0,
+    "path-traversal": 2.0,
+}
+#: The weight a class with no entry carries — deliberately below every named
+#: class, so an unknown can never outrank a known one in the sort.
+SEVERITY_WEIGHT_UNKNOWN = 1.0
+
+#: How provable a claim shape already is, as a multiplier: a shape a
+#: differential-class verifier can prove today (``kernel.claim.DIFFERENTIAL_PROVABLE``)
+#: is worth double a shape still waiting on one.
+PROVABILITY_WEIGHT_PROVABLE = 1.0
+PROVABILITY_WEIGHT_HELD = 0.5
+
+
+def severity_weight(vuln_class: str) -> float:
+    """The triage weight of one vuln class (unknown classes rank lowest)."""
+    return SEVERITY_WEIGHTS.get(vuln_class, SEVERITY_WEIGHT_UNKNOWN)
+
+
+def provability_weight(claim_shape: str) -> float:
+    """How much a claim shape's provability multiplies its pen value."""
+    return (
+        PROVABILITY_WEIGHT_PROVABLE
+        if claim_shape in DIFFERENTIAL_PROVABLE
+        else PROVABILITY_WEIGHT_HELD
+    )
+
+
+def coverage(log: LogView) -> dict[str, dict[str, dict]]:
+    """Per-surface coverage, from the receipts ledger — what was *tried*.
+
+    One row per ``(surface, technique)`` with the last attempt's outcome, its
+    conclusiveness and its ``at``. The receipt's ``technique`` field is the
+    driver's operation string (``technique:hypothesis id``), so the technique
+    column here is the arm's technique — the first ``@``-segment of ``arm`` —
+    not the operation that happened to run last.
+
+    Receipt rows carry no ``stage`` (the driver's ``_file_receipt`` writes
+    ``arm``/``technique``/``outcome``/``conclusive`` only), so hypothesis-only
+    visits — a technique that read a surface and proposed nothing — are *not*
+    in this view; they stay in the ``note stage=hypothesis`` rows. Stated
+    rather than implied: coverage here means "an attempt was filed", nothing
+    more.
+    """
+    out: dict[str, dict[str, dict]] = {}
+    for row in log.events(EVENT_RECEIPT):
+        technique, _, surface_key = str(row.get("arm", "")).partition("@")
+        out.setdefault(surface_key, {})[technique] = {
+            "outcome": str(row.get("outcome", "")),
+            "conclusive": bool(row.get("conclusive")),
+            "at": row.get("at", 0.0),
+        }
+    return out
+
+
+def _surface_key_of(surface: dict) -> str:
+    """A finding's surface key — the ``url#param`` spelling ``Surface.key`` uses."""
+    url = str(surface.get("url", ""))
+    param = str(surface.get("param", ""))
+    return f"{url}#{param}" if param else url
+
+
+def findings_deduplicated(log: LogView) -> list[dict]:
+    """The strongest finding per ``(surface, vuln_class)``, losers kept visible.
+
+    The raw ``findings`` list is untouched — this view has its own key and its
+    rows carry ``duplicate_ids``, because a collapse is an editorial claim the
+    report must show, not a silent rewrite of the ledger's findings.
+
+    The strongest is the highest evidence class (``kernel.evidence.EVIDENCE_ORDER``,
+    unknown grades weakest); ties break on reproducibility (a finding with a
+    reproducible URL outranks one without), then on log order, so two runs over
+    the same log cannot disagree.
+    """
+    rank = {grade: index for index, grade in enumerate(EVIDENCE_ORDER)}
+    groups: dict[tuple[str, str], list[tuple[int, Finding]]] = {}
+    for position, finding in enumerate(findings(log)):
+        groups.setdefault((_surface_key_of(finding.surface), finding.vuln_class), []).append(
+            (position, finding)
+        )
+    out: list[dict] = []
+    for (surface_key, vuln_class), members in groups.items():
+        ordered = sorted(
+            members,
+            key=lambda item: (
+                -rank.get(item[1].grade, -1),
+                not bool(item[1].repro_url),
+                item[0],
+            ),
+        )
+        _, winner = ordered[0]
+        out.append(
+            {
+                "vuln_class": vuln_class,
+                **winner.to_dict(),
+                # After the spread: the winner's own ``surface`` dict travels
+                # too, and the *key* the group collapsed on is named apart.
+                "surface_key": surface_key,
+                "duplicate_ids": [
+                    member.candidate_id
+                    for _, member in ordered[1:]
+                    if member.candidate_id != winner.candidate_id
+                ],
+            }
+        )
+    return out
+
+
+def abduction_summary(log: LogView) -> dict:
+    """The abductive junction's ledger, counted by verdict — the pen's mirror.
+
+    ``abduction.proposed`` rows are the explanations; ``abduction.validated``
+    rows are the three-valued validator's answers (``expressible_now``,
+    ``not_yet_expressible``, ``invalid`` — ``abduction/proposal.py``). Top-level
+    counts name what happened to every explanation; ``groups`` descends on
+    ``needs_verifier`` — the very field the holding-pen backlog groups on — so
+    both backlogs read the same way.
+    """
+    proposed = log.events(EVENT_ABDUCTION_PROPOSED)
+    validated = log.events(EVENT_ABDUCTION_VALIDATED)
+    by_proposal: dict[str, dict] = {}
+    for row in validated:
+        by_proposal[str(row.get("proposal_id", ""))] = {
+            "verdict": str(row.get("verdict", "")),
+            "reason": str(row.get("reason", "")),
+        }
+    by_verdict: dict[str, int] = {}
+    for entry in by_proposal.values():
+        verdict = entry["verdict"] or "(unvalidated)"
+        by_verdict[verdict] = by_verdict.get(verdict, 0) + 1
+    proposals: list[dict] = []
+    for row in proposed:
+        proposal = dict(row.get("proposal") or {})
+        entry = by_proposal.get(
+            str(row.get("proposal_id") or proposal.get("id", "")),
+            {},
+        )
+        proposals.append(
+            {
+                "id": str(proposal.get("id", "")),
+                "vuln_class": str(proposal.get("vuln_class", "")),
+                "claim_shape": str(proposal.get("claim_shape", "")),
+                "needs_verifier": str(proposal.get("needs_verifier", "")),
+                "source": str(row.get("source", "")),
+                "verdict": entry.get("verdict") or "(unvalidated)",
+                "reason": entry.get("reason", ""),
+                "at": row.get("at", 0.0),
+            }
+        )
+    needs: dict[str, dict[str, int]] = {}
+    for row in proposals:
+        bucket = needs.setdefault(row["needs_verifier"] or "(unnamed)", {})
+        bucket[row["verdict"]] = bucket.get(row["verdict"], 0) + 1
+    ranked = sorted(
+        needs.items(),
+        key=lambda item: (-sum(item[1].values()), sorted(item[1]), item[0]),
+    )
+    return {
+        "proposed": len(proposed),
+        "validated": len(validated),
+        "by_verdict": dict(sorted(by_verdict.items())),
+        "proposals": proposals,
+        "groups": [
+            {
+                "needs_verifier": needs_verifier,
+                "by_verdict": dict(sorted(counts.items())),
+                "count": sum(counts.values()),
+            }
+            for needs_verifier, counts in ranked
+        ],
+    }
+
+
 def holding_pen_summary(log: LogView, *, pen: "HoldingPen | None" = None) -> dict:
     """Held hypotheses, counted by ``(needs_verifier, vuln_class | claim_shape)``.
 
     The pen's backlog — hypotheses the verifier vocabulary cannot confirm yet —
     grouped so an operator can see which single confirm kind would unlock the
-    most. Groups are sorted **descending by count** (ties broken by the group's
+    most. Groups are sorted **descending by value** (ties broken by the group's
     own names, so the order is stable), because the question the view answers is
-    "what should a new verifier unlock first".
+    "what is this backlog worth, most valuable first".
+
+    **Value weighting.** Each held row is worth
+    ``severity_weight(vuln_class) × provability_weight(claim_shape)`` — the
+    triage risk of the class (``SEVERITY_WEIGHTS``) times how provable the
+    claim already is (differential-provable shapes double, everything else
+    half). A group's value is the sum of its rows'; ``count`` travels alongside
+    so "five cheap" stays distinguishable from "one expensive". Rows without a
+    class or shape still weigh in — unknown classes carry the floor weight — so
+    nothing in the backlog can disappear from the arithmetic.
 
     The group key prefers ``vuln_class`` (what the run believes) and falls back
     to ``claim_shape`` (what kind of claim it is) when no class was named.
@@ -316,31 +523,40 @@ def holding_pen_summary(log: LogView, *, pen: "HoldingPen | None" = None) -> dic
             for entry in pen.entries()
             if entry.get("status") != PEN_HELD
         )
-    counts: dict[tuple[str, str], int] = {}
+    groups: dict[tuple[str, str], dict] = {}
     held = 0
+    value = 0.0
     for row in rows:
         if left and str(row.get("proposal_id", "")) in left:
             continue
         needs_verifier = str(row.get("needs_verifier", "")) or "(unnamed)"
-        key = (
-            str(row.get("vuln_class", ""))
-            or str(row.get("claim_shape", ""))
-            or "(unknown)"
-        )
-        counts[(needs_verifier, key)] = counts.get((needs_verifier, key), 0) + 1
+        vuln_class = str(row.get("vuln_class", ""))
+        claim_shape = str(row.get("claim_shape", ""))
+        key = vuln_class or claim_shape or "(unknown)"
+        group = groups.setdefault((needs_verifier, key), {"count": 0, "value": 0.0})
+        weight = severity_weight(vuln_class) * provability_weight(claim_shape)
+        group["count"] += 1
+        group["value"] += weight
+        value += weight
         held += 1
-    # Descending by count; the group's names are the tiebreak so two runs over
+    # Descending by value; the group's names are the tiebreak so two runs over
     # the same log cannot disagree on the order.
-    ranked: list[tuple[str, str, int]] = [
-        (needs, key, count) for (needs, key), count in counts.items()
-    ]
-    ranked.sort(key=lambda item: (-item[2], item[0], item[1]))
+    ranked = sorted(
+        groups.items(),
+        key=lambda item: (-item[1]["value"], item[0][0], item[0][1]),
+    )
     return {
         "held": held,
         "lifetime": lifetime,
+        "value": value,
         "groups": [
-            {"needs_verifier": needs, "key": key, "count": count}
-            for needs, key, count in ranked
+            {
+                "needs_verifier": needs,
+                "key": key,
+                "count": group["count"],
+                "value": group["value"],
+            }
+            for (needs, key), group in ranked
         ],
     }
 
@@ -416,6 +632,9 @@ def summary(log: LogView) -> dict:
         "receipts": receipts_by_arm(log),
         "blocked_on_session_b": blocked_on_session_b(log),
         "holding_pen": holding_pen_summary(log),
+        "coverage": coverage(log),
+        "abduction": abduction_summary(log),
+        "findings_deduplicated": findings_deduplicated(log),
     }
 
 
@@ -423,18 +642,27 @@ __all__ = [
     "CAPABILITY_CHECK_TECHNIQUES",
     "Finding",
     "GRADE_PROSE",
+    "PROVABILITY_WEIGHT_HELD",
+    "PROVABILITY_WEIGHT_PROVABLE",
+    "SEVERITY_WEIGHTS",
+    "SEVERITY_WEIGHT_UNKNOWN",
     "SESSION_B_REFUSAL_MARKER",
+    "abduction_summary",
     "arm_key",
     "blocked_on_session_b",
     "blocked_on_session_b_split",
     "candidates",
+    "coverage",
     "findings",
+    "findings_deduplicated",
     "gate_audit",
     "holding_pen_summary",
     "leads",
+    "provability_weight",
     "receipts_by_arm",
     "report_lines",
     "session_b_refusals",
+    "severity_weight",
     "summary",
     "verdicts",
 ]

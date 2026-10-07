@@ -155,6 +155,64 @@ def print_holding_pen(report: "RunReport") -> None:
         )
 
 
+def print_coverage(report: "RunReport") -> None:
+    """Per-surface coverage, as the report's human lines (empty when nothing ran).
+
+    The machine shape travels under the ``coverage`` key of ``report.json`` and
+    ``--json``. "Covered" means a conclusive attempt is on file for the arm;
+    "suspected" means the arm ran and came back inconclusive — looked at, not
+    proven, and visible for exactly that reason.
+    """
+    coverage = getattr(report, "coverage", None) or {}
+    if not coverage:
+        return
+    tried = sum(len(attempts) for attempts in coverage.values())
+    conclusive = sum(
+        1
+        for attempts in coverage.values()
+        for attempt in attempts.values()
+        if attempt.get("conclusive")
+    )
+    _out(
+        f"  coverage:   {tried} technique(s) across {len(coverage)} surface(s); "
+        f"{conclusive} conclusive attempt(s)"
+    )
+    for surface_key in sorted(coverage):
+        covered = sorted(
+            technique
+            for technique, attempt in coverage[surface_key].items()
+            if attempt.get("conclusive")
+        )
+        suspected = sorted(
+            technique
+            for technique, attempt in coverage[surface_key].items()
+            if not attempt.get("conclusive")
+        )
+        parts: list[str] = []
+        if covered:
+            parts.append("covered: " + ", ".join(covered))
+        if suspected:
+            parts.append("suspected: " + ", ".join(suspected))
+        _out(f"    - {surface_key}: " + "; ".join(parts))
+
+
+def print_dedup_and_abduction(report: "RunReport") -> None:
+    """The dedup ratio and the abductive ledger, as compact human lines."""
+    deduplicated = getattr(report, "findings_deduplicated", None) or []
+    if deduplicated and len(deduplicated) < len(report.findings):
+        _out(
+            f"  dedup:      {len(report.findings)} finding(s) collapse to "
+            f"{len(deduplicated)} distinct (surface, class) proof(s)"
+        )
+    abduction = getattr(report, "abduction", None) or {}
+    if abduction.get("proposed"):
+        verdicts = abduction.get("by_verdict") or {}
+        _out(
+            f"  abduction:  {abduction['proposed']} proposal(s); "
+            f"by verdict: {verdicts}"
+        )
+
+
 def _out(line: str) -> None:
     """Print a line, losing a glyph rather than the report.
 
@@ -1192,6 +1250,8 @@ def main(argv: list[str] | None = None) -> int:
             "with --session-b-cookie to unlock them."
         )
     print_holding_pen(report)
+    print_coverage(report)
+    print_dedup_and_abduction(report)
     _out(f"  counts:     {report.counts}")
     _out(f"  findings:   {len(report.findings)}")
     for line in report.report_lines:

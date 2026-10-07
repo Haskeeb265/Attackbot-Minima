@@ -74,10 +74,12 @@ def test_holding_pen_summary_groups_and_sorts_descending_by_count() -> None:
     summary = views.holding_pen_summary(log)
     assert summary["held"] == 3
     assert summary["lifetime"] == 3
-    # Descending by count: the double first, the single second.
+    assert summary["value"] == 7.0
+    # Descending by value: the idor pair weighs 2 x (3 severity x 1 provable),
+    # the classless object-read weighs 1 x (1 unknown x 1 provable).
     assert summary["groups"] == [
-        {"needs_verifier": "authorization.state_change", "key": "idor", "count": 2},
-        {"needs_verifier": "authorization.differential", "key": "object_read", "count": 1},
+        {"needs_verifier": "authorization.state_change", "key": "idor", "count": 2, "value": 6.0},
+        {"needs_verifier": "authorization.differential", "key": "object_read", "count": 1, "value": 1.0},
     ]
 
 
@@ -95,10 +97,65 @@ def test_holding_pen_summary_ties_break_deterministically_by_name() -> None:
     assert [group["needs_verifier"] for group in groups] == ["a.verifier", "z.verifier"]
 
 
+def test_groups_rank_by_value_not_raw_count() -> None:
+    """One expensive class outranks several cheap ones: value, not raw count.
+
+    Five rows of a floor-weight class must not outrank a single held shell or
+    injection hypothesis — the sort answers "what is this backlog worth", not
+    "what is this backlog long".
+    """
+    log = WorldLog()
+    _append_entry(
+        log, at=1.0, proposal_id="p1", needs_verifier="authorization.state_change",
+        claim_shape="state_change", vuln_class="command-injection",
+    )
+    _append_entry(
+        log, at=2.0, proposal_id="p2", needs_verifier="authorization.differential",
+        claim_shape="object_read",
+    )
+    _append_entry(
+        log, at=3.0, proposal_id="p3", needs_verifier="authorization.differential",
+        claim_shape="object_read",
+    )
+
+    summary = views.holding_pen_summary(log)
+    assert summary["groups"] == [
+        {"needs_verifier": "authorization.state_change", "key": "command-injection", "count": 1, "value": 5.0},
+        {"needs_verifier": "authorization.differential", "key": "object_read", "count": 2, "value": 2.0},
+    ]
+    assert summary["value"] == 7.0
+
+
+def test_unprovable_claim_shapes_weigh_half_in_the_value() -> None:
+    """A shape outside ``DIFFERENTIAL_PROVABLE`` is speakable, not provable."""
+    log = WorldLog()
+    _append_entry(
+        log, at=1.0, proposal_id="p1", needs_verifier="future.kind",
+        claim_shape="exotic_shape",
+    )
+    _append_entry(
+        log, at=2.0, proposal_id="p2", needs_verifier="future.kind",
+        claim_shape="exotic_shape",
+    )
+    _append_entry(
+        log, at=3.0, proposal_id="p3", needs_verifier="known.kind",
+        claim_shape="object_read",
+    )
+
+    summary = views.holding_pen_summary(log)
+    # 2 x (1 unknown severity x 0.5) = 1.0 ties the provable single at 1.0 —
+    # the tie then breaks on the group's names, exactly as before weighting.
+    assert summary["groups"] == [
+        {"needs_verifier": "future.kind", "key": "exotic_shape", "count": 2, "value": 1.0},
+        {"needs_verifier": "known.kind", "key": "object_read", "count": 1, "value": 1.0},
+    ]
+
+
 def test_holding_pen_summary_is_empty_without_holds() -> None:
     assert views.holding_pen_summary(WorldLog()) == {
         "held": 0,
         "lifetime": 0,
+        "value": 0.0,
         "groups": [],
     }
 
@@ -141,7 +198,7 @@ def test_entries_that_left_the_pen_are_excluded_but_still_counted_lifetime() -> 
     assert summary["held"] == 1
     assert summary["lifetime"] == 3
     assert summary["groups"] == [
-        {"needs_verifier": "v.two", "key": CLAIM_STATE_CHANGE, "count": 1}
+        {"needs_verifier": "v.two", "key": CLAIM_STATE_CHANGE, "count": 1, "value": 1.0}
     ]
 
 
