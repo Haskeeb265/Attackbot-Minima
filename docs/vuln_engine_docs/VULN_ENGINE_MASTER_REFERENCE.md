@@ -383,8 +383,10 @@ a newcomer is noted at the end.
 
 `verification/__init__.py` (`VerificationLayer`, `CONFIRM_VERIFIERS`),
 `browser_runner.py`, `oob_verifier.py`, `timing_verifier.py`,
-`authorization_verifier.py`, `stored_xss_runner.py`, `registry.py`
-(the verifier-vocabulary registry).
+`authorization_verifier.py`, `state_change_verifier.py` (the
+setup-re-executing verifier), `stored_xss_runner.py`, `validator.py` (the
+confirmation-spec validator), `registry.py` (the verifier-vocabulary
+registry).
 
 ### `transports/` — raw effects, no opinions
 
@@ -451,6 +453,12 @@ them by design; the count is pinned by
 | `timing/` | `delayed_response` | `differential` | quiet/sleep + a short/long dose-response pair |
 | `sessions/` | `access_differs_by_session` | `differential` | one read per identity, status then body-length |
 | `storage/` | `server_stores_input` | `reflection` | submit canary, read the surface back |
+
+### root — the shared allowlist
+
+| File | What it defines |
+|---|---|
+| `paths.py` | `safe_component` — the one name→path-component allowlist both CLIs and the UI enforce before a target or run name can join a filesystem path (T1) |
 
 ### Suggested reading order
 
