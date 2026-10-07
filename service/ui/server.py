@@ -10,8 +10,8 @@ Endpoints (all JSON unless noted):
 * ``GET /api/recon/runs``      — the platform run timeline
 * ``GET /api/engine/overview`` — world-log shape for one engine run
 * ``GET /api/engine/log``      — realtime world-log rows (poll with after=<last at>)
-* ``GET /api/engine/inputs``   — what entered the engine (seed, techniques, gate)
-* ``GET /api/engine/report``   — the run's report.json
+* ``GET /api/engine/inputs``   — what entered the engine (seed, techniques, gate) * ``GET /api/engine/report``   — the run's report.json
+ * ``GET /api/engine/holding_pen`` — the run's holding-pen backlog (report.json's key)
 * ``POST /api/run``            — start a whitelisted recon/engine job
 * ``GET /api/jobs``            — job table
 * ``GET /api/jobs/output``     — stream a job's captured output after a byte offset
@@ -195,6 +195,8 @@ class UiHandler(BaseHTTPRequestHandler):
                 self._engine_inputs(query)
             elif path == "/api/engine/report":
                 self._engine_report(query)
+            elif path == "/api/engine/holding_pen":
+                self._engine_holding_pen(query)
             elif path == "/api/trace":
                 self._trace(query)
             elif path == "/api/trace/output":
@@ -340,6 +342,10 @@ class UiHandler(BaseHTTPRequestHandler):
     def _engine_report(self, query: dict) -> None:
         run = _name(query.get("run", ""))
         self._json(engine_view.report_view(run))
+
+    def _engine_holding_pen(self, query: dict) -> None:
+        run = _name(query.get("run", ""))
+        self._json(engine_view.holding_pen_view(run))
 
     def _trace(self, query: dict) -> None:
         # A trace key is a path relative to output/ ("vuln_engine/target" or a

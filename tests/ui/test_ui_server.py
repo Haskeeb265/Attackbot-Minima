@@ -226,6 +226,15 @@ REPORT = {
     "gate": {"decisions": 2, "by_verb": {"ALLOW": 1, "DENY": 1}, "uncleared_effects": 0,
              "out_of_scope_requests": 1},
     "counts": {"findings": 1},
+    "holding_pen": {
+        "held": 2,
+        "lifetime": 3,
+        "value": 6.0,
+        "groups": [
+            {"needs_verifier": "authorization.state_change", "key": "idor",
+             "count": 2, "value": 6.0},
+        ],
+    },
     "report_lines": ["xss — execution — http://example.test/search?q=x"],
 }
 
@@ -892,6 +901,32 @@ def test_http_engine_report(server):
     status, payload = get(server + "/api/engine/report?run=example.test")
     assert status == 200
     assert payload["report"]["findings"][0]["vuln_class"] == "xss"
+
+
+def test_http_engine_holding_pen(server):
+    """The backlog travels from report.json, value-weighted shape intact."""
+    status, payload = get(server + "/api/engine/holding_pen?run=example.test")
+    assert status == 200
+    assert payload["available"] is True
+    assert payload["source"] == "report.json"
+    pen = payload["holding_pen"]
+    assert pen["held"] == 2
+    assert pen["value"] == 6.0
+    assert pen["groups"][0]["needs_verifier"] == "authorization.state_change"
+    assert pen["groups"][0]["value"] == 6.0
+
+
+def test_http_engine_holding_pen_degrades_without_a_report(server):
+    """A campaign-style run (ledger only) answers honestly, not with zeros."""
+    status, payload = get(server + "/api/engine/holding_pen?run=twogate_demo")
+    assert status == 200
+    assert payload["available"] is False
+    assert "no report.json" in payload["reason"]
+
+
+def test_http_engine_holding_pen_refuses_bad_names(server):
+    status, _ = get(server + "/api/engine/holding_pen?run=" + "../.env")
+    assert status == 400
 
 
 def test_http_state_exposes_traces(server, monkeypatch):

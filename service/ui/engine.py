@@ -236,6 +236,30 @@ def inputs_view(run: str) -> dict:
     }
 
 
+def holding_pen_view(run: str) -> dict:
+    """One run's holding-pen backlog, from its report.json.
+
+    The single-pass runner embeds ``views.holding_pen_summary`` under the
+    ``holding_pen`` key of report.json — held hypotheses grouped by
+    ``(needs_verifier, vuln_class | claim_shape)``, descending by value. A run
+    that wrote no report (a campaign run) or one written before the key existed
+    gets an honest ``available: False`` with the reason, the same degradation
+    :func:`report_view` applies — the UI renders the panel either way.
+    """
+    run_dir = resolve_run(run)
+    report = read_json(run_dir / "report.json")
+    if not report:
+        return {"run": run, "available": False, "reason": "no report.json yet"}
+    pen = report.get("holding_pen")
+    if not isinstance(pen, dict) or not pen:
+        return {
+            "run": run,
+            "available": False,
+            "reason": "the report carries no holding_pen key",
+        }
+    return {"run": run, "available": True, "source": "report.json", "holding_pen": pen}
+
+
 def report_view(run: str) -> dict:
     """The run's report — report.json when it exists, the ledger otherwise.
 

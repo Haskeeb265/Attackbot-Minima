@@ -809,6 +809,28 @@ async function loadTraceOutput() {
 // 6. engine output
 // ------------------------------------------------------------------ //
 
+function penSection(pen) {
+  // The holding-pen backlog (report.json's `holding_pen` key): what the run
+  // believed but could not prove yet, grouped by the verifier that would
+  // unlock it, sorted by value. Nothing waiting means nothing rendered —
+  // the section disappears rather than announcing an empty queue.
+  if (!pen || !pen.held) return "";
+  const rows = (pen.groups || []).map((g) => `
+        <tr><td>${esc(g.needs_verifier || "?")}</td>
+        <td>${esc(g.key || "?")}</td>
+        <td>${g.count ?? 0}</td>
+        <td>${g.value ?? 0}</td></tr>`).join("");
+  return `
+      <h3>Holding pen</h3>
+      <div class="kv">
+        <div class="k">held</div><div class="v">${pen.held}</div>
+        <div class="k">lifetime</div><div class="v">${pen.lifetime ?? pen.held}</div>
+        <div class="k">total value</div><div class="v">${pen.value ?? 0}</div>
+      </div>
+      <table><thead><tr><th>needs verifier</th><th>key</th><th>count</th><th>value</th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+}
+
 async function loadOutput() {
   const run = $("engine-run-select").value;
   const body = $("output-body");
@@ -845,6 +867,7 @@ async function loadOutput() {
         <div class="k">decisions</div><div class="v">${esc(JSON.stringify((r.gate || {}).by_verb || {}))}</div>
         <div class="k">uncleared effects</div><div class="v">${esc((r.gate || {}).uncleared_effects ?? 0)}</div>
       </div>
+      ${penSection(r.holding_pen)}
       <h3>Report lines</h3>
       <div class="logbox">${esc((r.report_lines || []).join("\n"))}</div>
       <h3>Counts</h3>

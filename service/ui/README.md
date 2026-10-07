@@ -117,6 +117,7 @@ row index stable. A walk of the 241-row DVWA ledger at `limit=100` yields
 | GET | `/api/engine/log?run=&cursor=&limit=` | world-log rows after the cursor (the realtime feed) |
 | GET | `/api/engine/inputs?run=` | seed surfaces, techniques, capabilities, picks, hypotheses |
 | GET | `/api/engine/report?run=` | the run's `report.json` |
+| GET | `/api/engine/holding_pen?run=` | the run's holding-pen backlog, from `report.json` |
 | GET | `/api/trace?key=&cursor=&limit=` | normalized steps (phase, title, raw row) for one run, either flow; paged by the same append-only cursor |
 | GET | `/api/trace/output?key=` | the run's output: `twogate_report.json`, `report.json`, or a ledger derivation |
 | GET | `/api/jobs` · `/api/jobs/output?id=&offset=` | job table · a job's streamed output |
