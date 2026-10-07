@@ -54,6 +54,7 @@
 25. [Appendix C — Glossary](#appendix-c--glossary)
 26. [Appendix D — External-review gap resolution](#appendix-d--external-review-gap-resolution-2026-10)
 27. [Appendix E — Gap-closure batch](#appendix-e--gap-closure-batch-2026-10-07)
+28. [Appendix F — Gap-closure batch 2](#appendix-f--gap-closure-batch-2-2026-10-08)
 
 ---
 
@@ -2497,7 +2498,7 @@ directory (no prior `memory.json`), as `python run_engine.py --fixture
 
 ## 13. Verification — independent confirmation
 
-Six verifiers, one per confirmation shape a finding may rest on. The
+Seven verifiers, one per confirmation shape a finding may rest on. The
 `VerificationLayer` picks between them from the candidate's *confirmation spec*
 — the only thing a verifier is allowed to read from a candidate — after
 `verification/validator.py` has checked the spec itself.
@@ -2510,6 +2511,7 @@ Six verifiers, one per confirmation shape a finding may rest on. The
 | `timing.differential` | `TimingVerifier` | differential |
 | `authorization.differential` | `AuthorizationVerifier` | differential |
 | `authorization.state_change` | `StateChangeVerifier` | differential (re-executes setup) |
+| `differential.response` | `DifferentialResponseVerifier` | differential (baseline + control + injected; batch 2 Phase 3) |
 
 A candidate with no confirmation spec is refused, with that as the reason —
 those refusals are the engine's **leads**. A verifier that could not refuse
@@ -2914,8 +2916,11 @@ model's rewrite.
 Caps: `MAX_INPUT_PARAMS = 60`, `MAX_INPUT_URLS = 40`, `MAX_INPUT_GRAPH = 40`,
 `MAX_PROPOSED = 12`, `MAX_MEMORY_ARMS = 30`.
 `WHERE_VALUES = ("query", "body", "path")` — `header`/`url` exist in the kernel
-but no shipped technique aims a parameter probe at them, so a proposal the
-engine cannot act on is refused.
+but no shipped technique aims a parameter probe at them. A seed that names a
+`header`/`url` surface is **refused loudly** (exit 2 from both CLIs at
+seed validation, batch 2 Phase 4 — `gate_where` is a manifest field, checked
+in `seed/validate.py`), never silently accepted and silently dropped; adding
+the probe support itself remains open.
 
 ### 15.6 Junction 5 — `reflect.py`
 
@@ -3272,13 +3277,14 @@ independent knowledge distribution the proposer cannot see.
 `baseline_payload`, `control_payload`, `injected_payloads`, `samples`, `margin`,
 `length_delta`, `preconditions`, `transports`, `canary`, `marker`, `vuln_class`.
 
-The corpus (7 routines):
+The corpus (8 routines):
 
 | `routine_id` | label | confirm_kind | oracle | preconditions |
 |---|---|---|---|---|
 | `xss.browser.v1` | `xss` | `browser.run` | `script_executed` | reflects input |
 | `sqli.timing.v1` | `sqli` | `timing.differential` | `timing_differential` | delayed response |
-| `sqli.extraction.v1` | `sqli` | `differential.extraction` | `data_extracted` | public_param |
+| `command_injection.timing.v1` | `command_injection` | `timing.differential` | `timing_differential` | delayed response |
+| `sqli.extraction.v1` | `sqli-extraction` | `differential.extraction` | `data_extracted` | public_param |
 | `ssrf.oob.v1` | `ssrf` | `oob.read` | `oob_hit` | remote fetch |
 | `idor.authz.v1` | `idor` | `authorization.differential` | `authz_differential` | access differs |
 | `method_confusion.response.v1` | `method_confusion` | `differential.response` | `response_differs` | public_param |
@@ -3289,9 +3295,12 @@ injection exists, but that a **specific attacker-chosen value was read back**.
 Its payloads compute the canary (`0x76652d65787472616374` / `CHAR(118,…)`)
 rather than spelling it, so a reflecting target echoes the encoding and fails
 the oracle — only a target that runs the injected query returns `ve-extract`.
-That is why it can ride the cheap `public_param` precondition and share the
-`sqli` label with the timing routine: a distinct confirm kind and oracle make it
-a different experiment, not a re-run.
+That is why it can ride the cheap `public_param` precondition. It carries its
+own label (`sqli-extraction`, batch 2 Phase 6): the capability agent skips a
+label it has already tried on a surface, so the once-shared `sqli` label made
+the timing and extraction proofs mutually exclusive — a distinct label (plus
+the distinct confirm kind and oracle already there) makes both independently
+reachable, and the vuln class stays `sqli` for both.
 
 `select_routine(label, confirm_kind)` is the deterministic selection (first in
 registry order). `routine_ids()`, `routines_for_label`, `routines_for_kind`,
@@ -3299,7 +3308,7 @@ registry order). `routine_ids()`, `routines_for_label`, `routines_for_kind`,
 
 ### 19.3 `twogate/capability.py` — the prober
 
-Turns a declared claim into a *measured* fact. Five measurements, each a
+Turns a declared claim into a *measured* fact. Six measurements, each a
 low-noise probe through the policy gate:
 
 - **reflection** — does our canary (`ve-canary-7f3a91`) come back?
@@ -3307,10 +3316,15 @@ low-noise probe through the policy gate:
 - **timing** — does a sleep payload (`1 AND SLEEP(4.0)`) move the response by
   `TIMING_MARGIN_MS = 1000.0`?
 - **sessions** — do two identities see different content?
-- **stored** — (declared read-back; not in the current five probes).
+- **stored** — does a written marker survive a read-back (batch 2, Phase 2 —
+  rides the `elicit/storage` elicitor's request shape)?
+- **public_param** — does the target echo a value we chose (the sixth
+  measurement's `reflection` grade established it before the storage probe
+  made the prober's set six)?
 
 `MEASURABLE = (public_param, http_response_reflects_input,
-can_influence_remote_fetch, delayed_response, access_differs_by_session)`.
+can_influence_remote_fetch, delayed_response, access_differs_by_session,
+server_stores_input)`.
 `CAPABILITY_MEASURED = "capability.measured"` rows are written for each measured
 capability; nothing else.
 
@@ -3328,13 +3342,15 @@ carries `facts`, `by_surface`, `probes_sent`.
 | Capability | Labels |
 |---|---|
 | reflects input | `xss` |
-| delayed response | `sqli` |
+| delayed response | `sqli`, `command_injection` (batch 2 Phase 3) |
 | remote fetch | `ssrf` |
 | access differs | `idor` |
-| public_param | `method_confusion`, `path_traversal`, `sqli` (extraction, §19.2) |
+| public_param | `method_confusion`, `path_traversal`, `sqli-extraction` (§19.2) |
 
-Three routes share `public_param`; each round tries one, so a param surface
-works through `method_confusion` → `path_traversal` → `sqli` (extraction) and
+Two routes share `delayed_response` — the same measured timing fact admits two
+explanations (a SQL interpreter or a shell), each with its own dose-discriminated
+routine. Three share `public_param`; each round tries one, so a param surface
+works through `method_confusion` → `path_traversal` → `sqli-extraction` and
 stops at the first proof or the round bound.
 
 `CAPABILITY_ORDER` is cheapest/most-specific first. `CapabilityAgent.propose`
@@ -3385,6 +3401,16 @@ incomplete population is inconclusive, never a refutation. `_send` shapes the
 request for `where="body"` (JSON via `json_body_request`) or query. `_decide`
 applies the oracle and maps it to its evidence grade; `_refused` produces an
 inconclusive result.
+
+**Delegation (batch 2, Phase 1).** The runner no longer owns the two kinds the
+classic verifiers already measure: `timing.differential` and
+`authorization.differential` project the spec through `kernel/confirm.py`'s
+shared `ConfirmSpec` and delegate to `TimingVerifier` / `AuthorizationVerifier`
+via `confirm(spec)` — one measurement of a timing pair or a two-session read,
+whichever runtime asks. `differential.response` is answered on the classic side
+by `DifferentialResponseVerifier` (Phase 3). `differential.extraction` remains
+runner-only — label-indexed routines read the extracted value back, which the
+classic dispatcher does not model (pinned by `test_route_parity.py`).
 
 ### 19.6 `twogate/loop.py` — `TwoGateLoop`
 
@@ -3597,22 +3623,23 @@ Notable test modules:
 | `elicit/test_elicit.py` | discovery, each elicitor's positive/negative, and closure enriching the seed so a technique fires through it |
 | `twogate/test_sqli_extraction.py` | the `data_extracted` oracle wired end to end: measured capability → proven finding at `differential`, independent |
 | `world/test_session_b_blocked.py` | `blocked_on_session_b` in the classic, closure and two-gate paths; matches the log; marker pinned to the gate message |
-| `world/test_holding_pen_summary.py` | `holding_pen_summary` grouping and descending-by-count ordering, the promoted/demoted exclusion via the pen, and the driver's enriched `holding_pen.entry` row |
+| `world/test_holding_pen_summary.py` | `holding_pen_summary` grouping, the value weighting (severity × provability) and descending-by-value ordering, the promoted/demoted exclusion via the pen, and the driver's enriched `holding_pen.entry` row |
 | `scheduler/test_replay.py` | the deterministic abduced round is recomputed (a corrupted candidate and a deleted `anomaly.retained` row are both caught), while `rule=llm_abduction` and `candidate.junction` rows stay listed |
+| `world/test_coverage_view.py` | `coverage(log)`: the last attempt's outcome per (surface, technique) from the receipts ledger, conclusive vs inconclusive split, report + CLI wiring (batch 2 Phase 5) |
+| `world/test_findings_deduplicated.py` | `findings_deduplicated(log)`: strongest per (surface, class) by evidence class then reproducibility, `duplicate_ids` carried, raw findings untouched (batch 2 Phase 5) |
+| `world/test_abduction_summary.py` | `abduction_summary(log)`: proposals counted by the three-valued verdict, groups by `needs_verifier`, the unvalidated case, report + CLI wiring (batch 2 Phase 5) |
+| `twogate/test_sqli_extraction.py` | the extraction routine under its own `sqli-extraction` label (batch 2 Phase 6) |
 
-Verification at the time of writing (re-run 2026-10-07, after the gap-closure
-batch, Docker up): `python -m pytest tests/vuln_engine tests/ui -q` — the
-engine's and UI's suites together — is **813 passed, 2 skipped, 0 failed** (the
-2 skips are Neo4j-env-gated, not fixture tests; this round added nine — two to
-`world/test_holding_pen_summary.py`, five in the new `scheduler/test_replay.py`,
-and two to `eval/test_phase1.py`), and
-`mypy service/vuln_engine run_engine.py run_twogate.py` is clean across **137
-source files**. The whole tree (`pytest tests/`) stood at 2218 passed / 18
-skipped before this batch; the engine+UI slice is the number this batch was
-verified against. The hermetic UI suite additionally pins the trace phase
-mapping, a path-escape test (`?key=../../.env` is a 400), the DB-degrade path,
-the POST guard, the loopback-only default, and the demo's guard header
-(§20.1, §20.4).
+Verification at the time of writing (re-run 2026-10-08, after gap-closure
+batch 2, Docker up): `python -m pytest tests/vuln_engine tests/ui -q` — the
+engine's and UI's suites together — is **875 passed, 2 skipped, 0 failed** (the
+2 skips are OOB-collaborator-gated, not fixture tests), and
+`mypy service/vuln_engine run_engine.py run_twogate.py service/ui` is clean
+across **150 source files**. Batch 2 added 56 tests over batch 1's 813/137
+baseline (Appendix F has the per-phase count). The hermetic UI suite pins the
+trace phase mapping, a path-escape test (`?key=../../.env` is a 400), the
+DB-degrade path, the POST guard, the loopback-only default, the demo's guard
+header (§20.1, §20.4), and the holding-pen endpoint (§20.2).
 
 Live verification against the compose fixture (2026-10-07, `fixture_app` and
 `oob_collaborator` up, fresh output directories): the classic run
@@ -3734,6 +3761,7 @@ the Capability Closure pass when `--elicit` is on).
 | `timing.differential` | TimingVerifier | differential |
 | `authorization.differential` | AuthorizationVerifier | differential |
 | `authorization.state_change` | StateChangeVerifier | differential (re-executes setup) |
+| `differential.response` | DifferentialResponseVerifier | differential (batch 2 Phase 3) |
 
 ### 22.6 Decision outcomes and scheduling constants
 
@@ -3793,9 +3821,11 @@ today:
    `delayed_response`, `access_differs_by_session`, `server_stores_input`) —
    the other two (`script_execution`, `cross_account_readable`) are verifiers'
    postconditions, not gate inputs, so no elicitor exists for them by design —
-   so the graph's narrow supply is no longer the only
-   source — but a capability with no elicitor still has to be declared. This is
-   a recon-coverage limit, not a technique contract limit.
+   so the graph's narrow supply is no longer the only source — but a capability
+   with no elicitor still has to be declared. This is a recon-coverage limit,
+   not a technique contract limit. The two-gate prober independently measures
+   six capabilities per surface (§19.3 — including `server_stores_input`,
+   batch 2 Phase 2), so the closure pass is not the only measurement path.
 2. **Evidence-state gating.** `collect_candidates` filters on `scope_state`
    only; the graph's `evidence_state` (`historical` / `dead` /
    `actively_verified`) is not yet a hard filter.
@@ -3807,7 +3837,10 @@ today:
    `"query"` into `parameters.jsonl` today, so live graphs carry one location.
    The fix is on the recon side (emit what was actually observed); the bridge
    side is done and tested. `companions`/`read_back` remain always empty (the
-   stored-surface gap).
+   stored-surface gap). Related (batch 2 Phase 4): a seed naming a
+   `header`/`url` surface is now refused loudly at seed validation (exit 2)
+   instead of silently doing nothing — the *probe support* for those `where`
+   values is still open.
 5. **One param carries one declared capability** (strongest-wins). A surface's
    `capabilities` set may additionally hold whatever the elicitors measured
    (§12.10).
@@ -4055,7 +4088,7 @@ promoted. That is the difference the whole design is built to preserve.
 | **Capability claim** | a string on a `Surface` describing what the input is (`public_param`, `delayed_response`, …); it opens the door for a technique; verification decides whether it was true |
 | **Candidate** | something a technique believes it found, carrying the proposer's evidence and a *confirmation spec* |
 | **Chokepoint** | `PolicyGate` — the only code allowed to touch the network |
-| **Confirmation spec** | the plain dict on a candidate saying what a verifier should do (`browser.run`, `oob.read`, `timing.differential`, `authorization.differential`, `authorization.state_change`, `xss_stored.execute`) |
+| **Confirmation spec** | the plain dict on a candidate saying what a verifier should do (`browser.run`, `oob.read`, `timing.differential`, `authorization.differential`, `authorization.state_change`, `xss_stored.execute`, `differential.response`, `differential.extraction`) |
 | **Deviation** | a typed mismatch between an expectation and a clean measurement — advisory material for the abducer, never evidence |
 | **Evidence class / grade** | `hypothesis < reflection < semantic < execution < oob < differential`; only the last three may support a finding |
 | **Finding** | a candidate confirmed by a verifier in a different, finding-grade class |
@@ -4242,3 +4275,64 @@ rather than recomputed — the same recorded-fact rule as `candidate.junction`,
 not a gap. And `holding_pen_summary` can only exclude a promoted/demoted entry
 when the caller passes the pen; from the world log alone a transition is not
 derivable, so it reports `lifetime` honestly instead of guessing.
+
+---
+
+## Appendix F — Gap-closure batch 2 (2026-10-08)
+
+Seven phases, same shape as Appendix E: the gap named, what closed it, where
+the proof lives. Every phase was verified before its commit —
+`pytest tests/vuln_engine tests/ui` green and
+`mypy service/vuln_engine run_engine.py run_twogate.py` clean — and the final
+counts are at the bottom. No phase added a vuln class; the corpus's seven
+classes and eight techniques are unchanged.
+
+| Phase | The gap | What closed it | Commit |
+|---|---|---|---|
+| P1 | Verification rigor split by runtime: the two-gate runner measured a timing pair or a two-session read with its own code while the classic verifiers measured the same facts with theirs — one experiment, two measurements, drift between them | `kernel/confirm.py`'s shared `ConfirmSpec`; `TimingVerifier`/`AuthorizationVerifier` delegate through `confirm(spec)`; the twogate `ConfirmationSpec` projects onto it (`as_confirm_spec`); `check_alignment` is aware of two-gate kinds | `1162f01` |
+| P2 | The two-gate prober measured five capabilities while the closure pass measured six — `server_stores_input` had no twogate measurement, so a stored-input proof could not be reached on a surface only the prober touched | a sixth prober measurement reusing the `elicit/storage` elicitor's request shape (`CAP_PERSISTENT_STORAGE`) | `0b086f1` |
+| P3 | Route parity holes in both directions: `command_injection` had no two-gate route, and `differential.response` was a twogate-only confirm kind the classic dispatcher could not answer | `command_injection.timing.v1` routine + `CAP_DELAYED_RESPONSE` second route (dose-discriminated shell payloads); classic `DifferentialResponseVerifier`; the route-parity pin (`test_route_parity.py`) | `4ce31ef` |
+| P4 | A seed naming a `header`/`url` surface was accepted and silently never probed — no shipped technique aims a parameter probe at those `where` values | loud where-gate: `gate_where` manifest field, `TechniqueRegistry.accept_where()`, refusal in `seed/validate.py`, both CLIs exit 2 naming the surfaces | `998b261` |
+| P5 | The report could not answer three operator questions: what was *tried* per surface, which findings duplicate each other, what became of the abductive junction's explanations — and the holding pen ranked by raw count, not worth | `views.coverage` (last attempt per surface × technique from the receipts ledger; receipts carry no `stage`, stated in the docstring), `views.findings_deduplicated` (strongest per surface × class, `duplicate_ids` carried, raw list untouched), `views.abduction_summary` (proposals by verdict, grouped by `needs_verifier`); `holding_pen_summary` gained a value (severity × provability per held row) and sorts by it, `count` travelling alongside | `2457ccf` |
+| P6 | `sqli.extraction.v1` shared the timing routine's `sqli` label; the capability agent skips a tried label, so the two proofs were mutually exclusive on one surface | the extraction routine and its `CAP_PUBLIC_PARAM` route carry `sqli-extraction` (vuln class unchanged) — Appendix E's left-open paragraph on the shared label is resolved | `edcd79a` |
+| P7 | The holding pen was engine-visible but not operator-visible | `GET /api/engine/holding_pen` (`service/ui/engine.py`) reads report.json's backlog key, degrades honestly without one; the engine output panel renders held/lifetime/value and one row per group | `cf5925e` |
+
+**Invariants held.** P1 moves measurement sharing, not evidence grading — every
+finding still rests on a different class than its proposal, and the delegation
+is the same gate-mediated traffic the classic path sends. P2 adds a probe
+through the gate, recorded as a capability fact, never a finding. P3's new
+verifier is a different measurement from the reflection that proposes it, and
+the parity test pins the two-way mapping so a route without a routine (or a
+classic kind without a route) fails loudly. P4 adds refusals, not effects: a
+surface the engine cannot act on is named and exited on, never silently
+ignored. P5 is pure derivation over existing rows — the ledger stays the only
+truth, every new report key is a view, and the deduplication carries its losers
+rather than erasing them. P6 re-labels, it does not re-class: one vuln class,
+two independently reachable proofs. P7 reads one report key and renders it; no
+new write path, the guard header still on every POST.
+
+**Verified test count, counted from the phase test files** (collect-only, not
+guessed): P1 added `tests/vuln_engine/verification/test_confirm_spec.py` (6)
+and `twogate/test_runner_delegation.py` (4) — 10; P2 added
+`twogate/test_storage_measurement.py` (6); P3 added `test_route_parity.py`
+(10); P4 added `test_seed_where_gate.py` (8); P5 added
+`world/test_coverage_view.py` (6), `world/test_findings_deduplicated.py` (7)
+and `world/test_abduction_summary.py` (8), plus two value-weighting tests in
+`world/test_holding_pen_summary.py` (8 total, was 6) — 23; P6 modified one
+assertion in `twogate/test_sqli_extraction.py` (label spelling) — 0 new; P7
+added 3 tests to `tests/ui/test_ui_server.py` (63 total, was 60). **Batch total:
++60 tests.** Final verification (2026-10-08, compose fixture up):
+`pytest tests/vuln_engine tests/ui` → **875 passed, 2 skipped, 0 failed**
+(the skips are OOB-collaborator-gated); `mypy service/vuln_engine
+run_engine.py run_twogate.py service/ui` → clean, **150 source files**.
+
+**Deliberately left open.** Vuln-class breadth was out of scope for the whole
+batch — the seven classes and eight techniques stand as they were. The
+`header`/`url` surfaces are now refused loudly, but the probe support that
+would let techniques aim at them is still open (§22.10 #4); the recon-side
+location extraction that would supply such surfaces is likewise unchanged.
+P7 picked option (c) of the phase-7 menu; `--re-verify <candidate_id>` (a),
+`--hint FILE` (d) and the §1 precision edits (e) remain unbuilt. The holding
+pen's severity weights are a static triage map in `world/views.py`
+(`SEVERITY_WEIGHTS`) — a policy statement pinned by test, not a scoring model;
+editing it edits an operator's reading of the backlog.
