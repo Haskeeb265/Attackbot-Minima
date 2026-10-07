@@ -11,6 +11,7 @@ from __future__ import annotations
 from service.vuln_engine.abduction.proposal import EXPRESSIBLE_NOW, Proposal
 from service.vuln_engine.abduction.validator import Validator, verifier_vocabulary
 from service.vuln_engine.kernel.claim import DIFFERENTIAL_PROVABLE
+from service.vuln_engine.twogate.runner import TWOGATE_CONFIRM_KINDS
 from service.vuln_engine.verification import CONFIRM_VERIFIERS
 from service.vuln_engine.verification.registry import (
     VERIFIER_KINDS,
@@ -22,8 +23,29 @@ from service.vuln_engine.verification.registry import (
 
 
 def test_the_registry_covers_every_dispatched_kind() -> None:
-    assert check_alignment(CONFIRM_VERIFIERS) == []
-    assert set(registry()) == set(CONFIRM_VERIFIERS)
+    assert check_alignment(CONFIRM_VERIFIERS, two_gate_kinds=TWOGATE_CONFIRM_KINDS) == []
+    # Every classic-dispatched kind is registered, and the runner-only kinds
+    # (``differential.extraction``/``differential.response``) are the only
+    # registered entries the classic dispatcher does not answer.
+    assert set(CONFIRM_VERIFIERS) <= set(registry())
+    assert set(registry()) - set(CONFIRM_VERIFIERS) == {
+        "differential.extraction",
+        "differential.response",
+    }
+
+
+def test_the_two_gate_runner_is_held_to_the_same_registry() -> None:
+    # Every kind the runner handles is in the vocabulary — a kind handled by
+    # one dispatcher but unlisted is the same drift an unlisted classic kind
+    # is, and it must fail this check the same way.
+    problems = check_alignment(
+        CONFIRM_VERIFIERS,
+        two_gate_kinds=(*TWOGATE_CONFIRM_KINDS, "missing.route.v9"),
+    )
+    assert any("missing.route.v9" in problem for problem in problems)
+    # And a registered kind answered by neither dispatcher is drift too.
+    problems = check_alignment(CONFIRM_VERIFIERS, two_gate_kinds=())
+    assert any("answered by no dispatcher" in problem for problem in problems)
 
 
 def test_the_registry_names_which_verifier_proves_which_shape() -> None:
@@ -43,6 +65,22 @@ def test_the_registry_names_which_verifier_proves_which_shape() -> None:
 def test_the_validator_vocabulary_comes_from_the_registry() -> None:
     assert Validator().provable == provable_claim_shapes()
     assert verifier_vocabulary() == frozenset(DIFFERENTIAL_PROVABLE)
+
+
+def test_the_delegation_routes_are_in_the_registry_vocabulary() -> None:
+    # The runner delegates ``timing.differential`` and
+    # ``authorization.differential`` to the classic verifiers, and answers
+    # ``differential.extraction``/``differential.response`` itself; all four
+    # (plus the browser and oob routes) are described in one place.
+    from service.vuln_engine.twogate.routines import routines_for_kind
+
+    for kind in TWOGATE_CONFIRM_KINDS:
+        assert kind in registry(), f"the runner handles {kind!r}; the registry must name it"
+    # and every routine's confirm kind is one of the handled kinds
+    from service.vuln_engine.twogate.routines import ROUTINES
+
+    for routine in ROUTINES:
+        assert routine.confirm_kind in TWOGATE_CONFIRM_KINDS
 
 
 def test_a_new_confirm_kind_is_the_only_lever_that_frees_a_claim() -> None:

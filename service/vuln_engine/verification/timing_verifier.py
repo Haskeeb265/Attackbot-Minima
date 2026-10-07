@@ -2,10 +2,16 @@
 
 A timing claim is the easiest claim in security to half-prove: the proposer's own
 numbers, re-examined, always look the same. This verifier never sees them. Its
-whole input from the candidate is the confirmation spec — which surface, which
-parameter, what margin, and *which payloads* — and it re-runs both populations
-through the policy gate itself, alternating baseline and injected exactly like
-the technique's grammar, then compares the fresh medians.
+whole input is the shared confirmation spec (``kernel.confirm.ConfirmSpec``) —
+which surface, which parameter, what margin, and *which payloads* — and it
+re-runs both populations through the policy gate itself, alternating baseline and
+injected exactly like the technique's grammar, then compares the fresh medians.
+
+Both runtimes reach it through the same door: the classic path projects a
+candidate's ``confirm`` dict onto the shared spec (``verify``), and the two-gate
+runner projects its ``ConfirmationSpec`` onto the same shape and calls
+``confirm`` directly — which is what closed the rigor gap between the two
+flows' identically-labelled timing findings.
 
 Reading the payloads from the spec is not a leak. The independence that makes
 ``differential`` its own evidence class is that every *measurement* here is
@@ -34,6 +40,7 @@ import statistics
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from ..kernel.confirm import ConfirmSpec
 from ..kernel.evidence import EVIDENCE_DIFFERENTIAL, Evidence
 from ..kernel.exchange import RawHttpExchange
 from ..kernel.observation import OBS_HTTP_RESPONSE
@@ -83,43 +90,72 @@ class TimingVerifier:
 
     def verify(self, candidate: Candidate) -> Verdict:
         """Confirm or refuse *candidate*.  Never raises for an ordinary failure."""
-        confirm = dict(candidate.confirm or {})
-        if confirm.get("kind") != CONFIRM_KIND:
+        if str((candidate.confirm or {}).get("kind") or "") != CONFIRM_KIND:
             return refuse(
                 candidate,
                 "the proposer offered no differential confirmation for this candidate, "
                 "and a timing claim cannot be established any other way",
             )
-        url = str(confirm.get("url") or "")
-        param = str(confirm.get("param") or "")
-        margin = float(confirm.get("margin") or 0.0)
-        if not url or not param:
-            return refuse(candidate, "the confirmation spec names no surface or parameter")
+        spec = ConfirmSpec.from_confirm(candidate.confirm)
+        return self.confirm(
+            spec, candidate_id=candidate.id, proposer_grade=candidate.proposer_grade
+        )
 
-        baseline_payload = str(confirm.get("baseline_payload") or _BASELINE_PAYLOAD)
-        injected_payload = str(confirm.get("injected_payload") or _INJECTED_PAYLOAD)
+    def confirm(
+        self, spec: ConfirmSpec, *, candidate_id: str, proposer_grade: str = "hypothesis"
+    ) -> Verdict:
+        """Confirm the claim *spec* describes, for whichever runtime sent it.
+
+        The one measurement policy, reached from both runtimes: the classic
+        path projects ``Candidate.confirm`` onto the shared spec, the two-gate
+        runner projects its ``ConfirmationSpec`` — and both then get this same
+        dose-response discrimination, so a timing finding proves the same
+        thing no matter which flow proposed it.
+        """
+        if spec.kind != CONFIRM_KIND:
+            return self._refuse(
+                candidate_id,
+                proposer_grade,
+                "the proposer offered no differential confirmation for this candidate, "
+                "and a timing claim cannot be established any other way",
+            )
+        url = spec.url
+        param = spec.param
+        margin = float(spec.margin)
+        if not url or not param:
+            return self._refuse(
+                candidate_id,
+                proposer_grade,
+                "the confirmation spec names no surface or parameter",
+            )
+
+        baseline_payload = spec.baseline_payload or _BASELINE_PAYLOAD
+        injected_payload = spec.injected_payload or _INJECTED_PAYLOAD
         # The transport shape travels with the claim: a body-shaped surface is
         # re-measured with body-shaped requests — the same SQL, the same
         # transport the proposal used, so the populations stay comparable.
-        where = str(confirm.get("where") or "query")
-        companions = dict(confirm.get("companions") or {})
+        where = spec.where or "query"
+        companions = dict(spec.companions)
+        probe_label = spec.probe or candidate_id
 
         baseline = self._measure(
-            url, param, baseline_payload, candidate.id, where=where, companions=companions
+            url, param, baseline_payload, probe_label, where=where, companions=companions
         )
         injected = self._measure(
-            url, param, injected_payload, candidate.id, where=where, companions=companions
+            url, param, injected_payload, probe_label, where=where, companions=companions
         )
         if baseline is None or injected is None:
-            return refuse(
-                candidate,
+            return self._refuse(
+                candidate_id,
+                proposer_grade,
                 "a measurement failed before both populations were complete, so the "
                 "claim is inconclusive rather than refuted",
             )
         difference = statistics.median(injected) - statistics.median(baseline)
         if difference < margin:
-            return refuse(
-                candidate,
+            return self._refuse(
+                candidate_id,
+                proposer_grade,
                 (
                     f"fresh populations differ by {difference:.2f}s, below the "
                     f"declared margin of {margin:.2f}s: a slow target is not a finding"
@@ -139,17 +175,13 @@ class TimingVerifier:
             param,
             where=where,
             companions=companions,
-            dose_short=str(
-                confirm.get("dose_short_payload")
-                or f"1 AND SLEEP({DOSE_SHORT_SECONDS})"
-            ),
-            dose_long=str(
-                confirm.get("dose_long_payload") or f"1 AND SLEEP({DOSE_LONG_SECONDS})"
-            ),
+            dose_short=spec.dose_short_payload or f"1 AND SLEEP({DOSE_SHORT_SECONDS})",
+            dose_long=spec.dose_long_payload or f"1 AND SLEEP({DOSE_LONG_SECONDS})",
         )
         if dose is None:
-            return refuse(
-                candidate,
+            return self._refuse(
+                candidate_id,
+                proposer_grade,
                 "the populations separated, but a dose-response measurement failed "
                 "before both doses were complete, so the claim is inconclusive: "
                 "the effect was observed, the cause was not established",
@@ -161,7 +193,7 @@ class TimingVerifier:
         evidence = Evidence(
             kind=OBS_HTTP_RESPONSE,
             grade=EVIDENCE_DIFFERENTIAL,
-            probe=str(confirm.get("probe") or candidate.id),
+            probe=probe_label,
             at=at,
             payload={
                 "baseline_median": round(statistics.median(baseline), 4),
@@ -177,7 +209,7 @@ class TimingVerifier:
                 "dose_gap_seconds": dose_gap,
                 "dose_margin": round(dose_margin, 4),
                 "dose_tracks": dose_difference >= dose_margin,
-                "variant": str(confirm.get("variant") or ""),
+                "variant": str(getattr(spec, "variant", "") or ""),
                 "reason": (
                     "fresh differential measurement through the policy gate, with a "
                     "dose-response discrimination of the delay's cause"
@@ -185,27 +217,38 @@ class TimingVerifier:
             },
         )
         if dose_difference < dose_margin:
-            return refuse(
-                candidate,
+            return self._refuse(
+                candidate_id,
+                proposer_grade,
                 (
                     f"the populations separated, but the delay does not track the "
-                    f"SQL dose (dose {DOSE_LONG_SECONDS}s - {DOSE_SHORT_SECONDS}s moved "
+                    f"injection dose (dose {DOSE_LONG_SECONDS}s - {DOSE_SHORT_SECONDS}s moved "
                     f"the median {dose_difference:.2f}s, wanted >= {dose_margin:.2f}s): "
                     "a timing effect without an interpreter behind it is not a "
-                    "SQL finding"
+                    "finding"
                 ),
             )
-        Verdict.check_independence(candidate.proposer_grade, evidence)
+        Verdict.check_independence(proposer_grade, evidence)
         return Verdict(
-            candidate_id=candidate.id,
+            candidate_id=candidate_id,
             proven=True,
             evidence=evidence,
             reason=(
                 f"fresh differential measurement separated the populations by "
                 f"{difference:.2f}s (margin {margin:.2f}s) and the delay tracked "
-                f"the SQL dose ({dose_difference:.2f}s across a {dose_gap:.1f}s gap)"
+                f"the injection dose ({dose_difference:.2f}s across a {dose_gap:.1f}s gap)"
             ),
-            proposer_grade=candidate.proposer_grade,
+            proposer_grade=proposer_grade,
+        )
+
+    @staticmethod
+    def _refuse(candidate_id: str, proposer_grade: str, reason: str) -> Verdict:
+        """The shared-spec refusal shape: not proven, with the reason."""
+        return Verdict(
+            candidate_id=candidate_id,
+            proven=False,
+            reason=reason,
+            proposer_grade=proposer_grade,
         )
 
     # ------------------------------------------------------------------ #

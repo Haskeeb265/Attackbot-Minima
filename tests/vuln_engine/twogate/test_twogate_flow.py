@@ -38,15 +38,27 @@ PAGE = (
 
 
 def _reflecting_and_slow(url: str) -> RawHttpExchange:
-    """A target that reflects our value, and sleeps when asked to."""
+    """A target that reflects our value, and sleeps when asked to.
+
+    The sleep tracks the *dose* — the delay equals the sleep argument — the way
+    a real interpreter reading the injected value would. The timing verifier's
+    dose-response discrimination needs this shape: a target that sleeps a fixed
+    4s under every dose is refused by the delegated verifier ("a timing effect
+    without an interpreter behind it is not a finding"), which is the added
+    rigor this flow now inherits from the classic path.
+    """
     value = (parse_qs(urlsplit(url).query).get("q") or [""])[0]
     if "SLEEP" in value:
+        try:
+            delay = float(value.split("SLEEP(", 1)[1].split(")", 1)[0])
+        except (IndexError, ValueError):
+            delay = 4.0
         return RawHttpExchange(
             url=url,
             status=200,
             body=PAGE.replace("{q}", "").encode("utf-8"),
             headers={"content-type": "text/html"},
-            elapsed=4.0,
+            elapsed=delay,
         )
     return RawHttpExchange(
         url=url,

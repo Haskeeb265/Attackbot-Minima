@@ -2,13 +2,19 @@
 
 A differential claim is self-confirming the moment the verifier reads the
 proposer's numbers: "session B got a 200" re-examined by whoever asked for it
-is an opinion with a receipt. This verifier never sees those numbers. Its
-input from the candidate is the confirmation spec — which URL, and nothing
-else — and it re-asks the target itself, through the policy gate, under both
-declared identities, **in the flipped order**: session B first, session A
-second. Flipping the order is what makes the confirmation a different
+is an opinion with a receipt. This verifier never sees those numbers. Its input
+is the shared confirmation spec (``kernel.confirm.ConfirmSpec``) — which URL,
+and nothing else — and it re-asks the target itself, through the policy gate,
+under both declared identities, **in the flipped order**: session B first,
+session A second. Flipping the order is what makes the confirmation a different
 measurement in kind — a cache, a flaky proxy, or an ordering artifact that
 produced the proposer's pair will not reproduce it in reverse.
+
+Both runtimes reach it through the same door: the classic path projects a
+candidate's ``confirm`` dict onto the shared spec (``verify``), and the two-gate
+runner projects its ``ConfirmationSpec`` onto the same shape and calls
+``confirm`` directly — which is what closed the rigor gap between the two
+flows' identically-labelled authorization findings.
 
 The oracle (``DIFFERENTIAL_SESSIONS`` — "two sessions, one object") needs
 both directions to agree:
@@ -36,6 +42,7 @@ from ..kernel.claim import (
     STATE_CHANGE_MISROUTE_REASON,
     is_differential_provable,
 )
+from ..kernel.confirm import ConfirmSpec
 from ..kernel.evidence import (
     DIFFERENTIAL_SESSIONS,
     EVIDENCE_DIFFERENTIAL,
@@ -75,21 +82,47 @@ class AuthorizationVerifier:
 
     def verify(self, candidate: Candidate) -> Verdict:
         """Confirm or refuse *candidate*.  Never raises for an ordinary failure."""
-        confirm = dict(candidate.confirm or {})
-        if confirm.get("kind") != CONFIRM_KIND:
+        if str((candidate.confirm or {}).get("kind") or "") != CONFIRM_KIND:
             return refuse(
                 candidate,
                 "the proposer offered no authorization-differential confirmation "
                 "for this candidate, and a session claim cannot be established "
                 "any other way",
             )
-        url = str(confirm.get("url") or "")
-        oracle = str(confirm.get("oracle") or "")
+        spec = ConfirmSpec.from_confirm(candidate.confirm)
+        return self.confirm(
+            spec, candidate_id=candidate.id, proposer_grade=candidate.proposer_grade
+        )
+
+    def confirm(
+        self, spec: ConfirmSpec, *, candidate_id: str, proposer_grade: str = "hypothesis"
+    ) -> Verdict:
+        """Confirm the claim *spec* describes, for whichever runtime sent it.
+
+        The one measurement policy, reached from both runtimes: the classic
+        path projects ``Candidate.confirm`` onto the shared spec, the two-gate
+        runner projects its ``ConfirmationSpec`` — and both then get the same
+        flipped-order, content-comparing proof, so an authorization finding
+        means the same thing no matter which flow proposed it.
+        """
+        url = spec.url
+        oracle = spec.oracle
+        if spec.kind != CONFIRM_KIND:
+            return self._refuse(
+                candidate_id,
+                proposer_grade,
+                "the proposer offered no authorization-differential confirmation "
+                "for this candidate, and a session claim cannot be established "
+                "any other way",
+            )
         if not url:
-            return refuse(candidate, "the confirmation spec names no URL to re-measure")
+            return self._refuse(
+                candidate_id, proposer_grade, "the confirmation spec names no URL to re-measure"
+            )
         if oracle != DIFFERENTIAL_SESSIONS:
-            return refuse(
-                candidate,
+            return self._refuse(
+                candidate_id,
+                proposer_grade,
                 f"the confirmation spec's oracle is {oracle!r}, not "
                 f"{DIFFERENTIAL_SESSIONS!r}: the two sides cannot drift silently",
             )
@@ -105,18 +138,20 @@ class AuthorizationVerifier:
         # it — loudly, never silently downgraded. Legacy specs with no shape
         # are grandfathered: every hand-written technique (IDOR) predates
         # shapes and proves exactly what this verifier measures.
-        claim_shape = str(confirm.get("claim_shape") or "")
+        claim_shape = spec.claim_shape
         if claim_shape and claim_shape not in CLAIM_SHAPES:
-            return refuse(
-                candidate,
+            return self._refuse(
+                candidate_id,
+                proposer_grade,
                 f"the confirmation spec's claim_shape {claim_shape!r} is not one "
                 f"the engine speaks: {', '.join(CLAIM_SHAPES)}",
             )
         if claim_shape == CLAIM_STATE_CHANGE:
-            return refuse(candidate, STATE_CHANGE_MISROUTE_REASON)
+            return self._refuse(candidate_id, proposer_grade, STATE_CHANGE_MISROUTE_REASON)
         if claim_shape and not is_differential_provable(claim_shape):
-            return refuse(
-                candidate,
+            return self._refuse(
+                candidate_id,
+                proposer_grade,
                 f"no verifier proves the {claim_shape!r} claim shape at "
                 "differential today",
             )
@@ -127,11 +162,12 @@ class AuthorizationVerifier:
         # 200 envelope", each measurement keeps its body long enough to hash
         # and size it, then drops it. The bodies are never logged, never
         # carried on the evidence: only their hashes and lengths are.
-        b_response = self._measure(url, session="b", probe=candidate.id)
-        a_response = self._measure(url, session=None, probe=candidate.id)
+        b_response = self._measure(url, session="b", probe=spec.probe or candidate_id)
+        a_response = self._measure(url, session=None, probe=spec.probe or candidate_id)
         if b_response is None or a_response is None:
-            return refuse(
-                candidate,
+            return self._refuse(
+                candidate_id,
+                proposer_grade,
                 "a flipped measurement failed before both identities answered, so "
                 "the claim is inconclusive rather than refuted",
             )
@@ -146,7 +182,7 @@ class AuthorizationVerifier:
         evidence = Evidence(
             kind=OBS_HTTP_RESPONSE,
             grade=EVIDENCE_DIFFERENTIAL,
-            probe=str(confirm.get("probe") or candidate.id),
+            probe=spec.probe or candidate_id,
             at=at,
             payload={
                 "oracle": DIFFERENTIAL_SESSIONS,
@@ -171,8 +207,9 @@ class AuthorizationVerifier:
             # verifier could not ask. B's 200 must carry the *object*, not an
             # empty shell or a generic envelope.
             if length_b == _EMPTY_LENGTH:
-                return refuse(
-                    candidate,
+                return self._refuse(
+                    candidate_id,
+                    proposer_grade,
                     (
                         f"session B answered {status_b} with an empty body: a 200 that "
                         "carries nothing is not access to the object — partial, "
@@ -182,8 +219,9 @@ class AuthorizationVerifier:
             if not same_content:
                 fraction = abs(length_a - length_b) / max(length_a, length_b, 1)
                 if fraction >= _LENGTH_DELTA_FRACTION:
-                    return refuse(
-                        candidate,
+                    return self._refuse(
+                        candidate_id,
+                        proposer_grade,
                         (
                             f"session B's body differs materially from session A's "
                             f"({length_b} vs {length_a} bytes, {fraction:.0%}): a 200 "
@@ -191,9 +229,9 @@ class AuthorizationVerifier:
                             "access to the object"
                         ),
                     )
-            Verdict.check_independence(candidate.proposer_grade, evidence)
+            Verdict.check_independence(proposer_grade, evidence)
             return Verdict(
-                candidate_id=candidate.id,
+                candidate_id=candidate_id,
                 proven=True,
                 evidence=evidence,
                 reason=(
@@ -206,23 +244,35 @@ class AuthorizationVerifier:
                     )
                     + " — the declared access boundary is absent"
                 ),
-                proposer_grade=candidate.proposer_grade,
+                proposer_grade=proposer_grade,
             )
         if status_b in _DENIED:
-            return refuse(
-                candidate,
+            return self._refuse(
+                candidate_id,
+                proposer_grade,
                 (
                     f"the flipped measurement denied session B (status {status_b}): "
                     "the proposer's pair did not reproduce, and a one-off pair is "
                     "not a finding"
                 ),
             )
-        return refuse(
-            candidate,
+        return self._refuse(
+            candidate_id,
+            proposer_grade,
             (
                 f"the flipped measurement produced statuses A={status_a}, B={status_b}, "
                 "which neither proves nor refutes the claim — inconclusive"
             ),
+        )
+
+    @staticmethod
+    def _refuse(candidate_id: str, proposer_grade: str, reason: str) -> Verdict:
+        """The shared-spec refusal shape: not proven, with the reason."""
+        return Verdict(
+            candidate_id=candidate_id,
+            proven=False,
+            reason=reason,
+            proposer_grade=proposer_grade,
         )
 
     # ------------------------------------------------------------------ #

@@ -24,7 +24,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..kernel.confirm import ConfirmSpec
 from ..kernel.evidence import (
+    DIFFERENTIAL_SESSIONS,
     EVIDENCE_DIFFERENTIAL,
     EVIDENCE_EXECUTION,
     EVIDENCE_OOB,
@@ -288,6 +290,12 @@ class ConfirmationSpec:
     baseline_payload: str = ""
     control_payload: str = ""
     injected_payload: str = ""
+    #: The causal discriminator's two doses in the winning payload's own shape
+    #: (gap-closure batch 2, Phase 3): a timing spec that names them is
+    #: dose-discriminated on *this* injection, not on the verifier's SQL
+    #: fallback spelling. Empty keeps the fallback behavior.
+    dose_short_payload: str = ""
+    dose_long_payload: str = ""
     samples: int = 3
     oracle: str = ORACLE_RESPONSE_DIFFERS
     margin: float = 0.0
@@ -310,6 +318,8 @@ class ConfirmationSpec:
             "baseline_payload": self.baseline_payload,
             "control_payload": self.control_payload,
             "injected_payload": self.injected_payload,
+            "dose_short_payload": self.dose_short_payload,
+            "dose_long_payload": self.dose_long_payload,
             "samples": self.samples,
             "oracle": self.oracle,
             "margin": self.margin,
@@ -330,6 +340,45 @@ class ConfirmationSpec:
             self._content(), sort_keys=True, separators=(",", ":"), default=str
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def as_confirm_spec(self) -> ConfirmSpec:
+        """This spec, as the kernel's shared :class:`~..kernel.confirm.ConfirmSpec`.
+
+        The one projection the delegation rides: the runner hands the classic
+        verifiers this shape, so a two-gate timing or authorization finding is
+        measured by exactly the logic a classic candidate's is. Two conversions,
+        both pinned by test:
+
+        * **units** — this spec's ``margin`` is milliseconds (the runner's
+          feature vocabulary); the shared spec's is seconds (the classic
+          verifiers' spelling). The division happens here, once, and nowhere
+          else.
+        * **the authorization oracle** — this spec's oracle names a runner
+          predicate (``authz_differential``); the shared spec carries the
+          verifier-side contract (``DIFFERENTIAL_SESSIONS``), which the
+          authorization verifier checks and the timing verifier ignores.
+        """
+        kind = self.kind
+        oracle = self.oracle
+        if kind == "authorization.differential":
+            oracle = DIFFERENTIAL_SESSIONS
+        return ConfirmSpec(
+            kind=kind,
+            url=self.url,
+            host=self.host,
+            param=self.param,
+            where=self.where,
+            companions=dict(self.companions),
+            baseline_payload=self.baseline_payload,
+            control_payload=self.control_payload,
+            injected_payload=self.injected_payload,
+            dose_short_payload=self.dose_short_payload,
+            dose_long_payload=self.dose_long_payload,
+            samples=self.samples,
+            margin=self.margin / 1000.0,
+            oracle=oracle,
+            probe=f"confirm:{self.routine_id}",
+        )
 
 
 @dataclass(frozen=True)

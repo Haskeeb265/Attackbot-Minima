@@ -4,21 +4,39 @@ This is the only module in the two-gate flow that sends traffic, and it sends it
 exclusively through :class:`~..policy.gate.PolicyGate` — the same chokepoint every
 other probe uses. It never calls a model, never reads a clock into a pure
 decision (the gate's clock stamps the effects), and never decides a verdict by
-any means other than :func:`~.spec.apply_oracle` over measured features.
+any means other than a deterministic oracle over measured features.
 
 The independence property it implements: the runner reads the *spec* and nothing
 else. The proposer's rationale, confidence, or numbers are unreachable from here,
 which is what stops a proposal from being re-read as its own proof.
+
+**One measurement policy, two runtimes (gap-closure batch 2, Phase 1).** The
+timing and authorization routes no longer measure here: they project the spec
+onto the kernel's shared :class:`~..kernel.confirm.ConfirmSpec` and delegate to
+the classic :class:`~..verification.timing_verifier.TimingVerifier` /
+:class:`~..verification.authorization_verifier.AuthorizationVerifier`. Before
+this, a two-gate timing finding proved only "the populations separated" and a
+two-gate authorization finding proved only "the sessions differed" — weaker than
+the identically-labelled classic findings, which add a dose-response
+discrimination and a content comparison. Delegation means both runtimes' findings
+rest on the same evidence, and the runner keeps only the routes the classic
+layer does not have (``differential.extraction``/``differential.response``, plus
+the browser and OOB routes, which are the same transports but a declarative-spec
+interface).
 """
 
 from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+from ..kernel.evidence import EVIDENCE_HYPOTHESIS
 from ..kernel.exchange import RawHttpExchange
 from ..kernel.technique import Surface, oob_sentinel
+from ..kernel.verdict import Verdict
 from ..policy.gate import EffectRequest, PolicyGate
 from ..techniques.common import json_body_request, with_parameter
+from ..verification.authorization_verifier import AuthorizationVerifier
+from ..verification.timing_verifier import TimingVerifier
 from .spec import (
     ConfirmationResult,
     ConfirmationSpec,
@@ -27,6 +45,19 @@ from .spec import (
     apply_oracle,
     feature_from_browser,
     feature_from_exchange,
+)
+
+#: The confirm kinds this runner answers through the classic verifiers, and the
+#: kinds only this runner answers. The verification registry's alignment check
+#: takes this tuple, so a kind handled here but unlisted in the registry is a
+#: test failure, the same way an unlisted classic kind is.
+TWOGATE_CONFIRM_KINDS: tuple[str, ...] = (
+    "browser.run",
+    "oob.read",
+    "authorization.differential",
+    "timing.differential",
+    "differential.extraction",
+    "differential.response",
 )
 
 
@@ -53,6 +84,43 @@ class ConfirmationSpecRunner:
         return self._run_response(spec)
 
     # ------------------------------------------------------------------ #
+    # routes delegated to the classic verifiers (one measurement policy)
+    # ------------------------------------------------------------------ #
+
+    def _run_timing(self, spec: ConfirmationSpec) -> ConfirmationResult:
+        """Delegate the timing route to the classic :class:`TimingVerifier`.
+
+        The projection converts this spec's margin (milliseconds) to the shared
+        spec's seconds and carries the routine's payloads, companions and dose
+        payloads. The verdict — populations re-measured fresh, dose-response
+        discrimination, refusals naming their numbers — is the classic one,
+        which is the point.
+        """
+        verifier = TimingVerifier(self.gate)
+        verdict = verifier.confirm(
+            spec.as_confirm_spec(),
+            candidate_id=f"confirm:{spec.routine_id}",
+            proposer_grade=EVIDENCE_HYPOTHESIS,
+        )
+        return _from_verdict(spec, verdict)
+
+    def _run_authorization(self, spec: ConfirmationSpec) -> ConfirmationResult:
+        """Delegate the authorization route to the classic ``AuthorizationVerifier``.
+
+        The projection maps this spec's runner-side oracle name to the
+        verifier-side contract (``DIFFERENTIAL_SESSIONS``), so the proof is the
+        classic one: flipped order, and session B must answer with the *object*
+        (2xx with equivalent content), not merely with a different page.
+        """
+        verifier = AuthorizationVerifier(self.gate)
+        verdict = verifier.confirm(
+            spec.as_confirm_spec(),
+            candidate_id=f"confirm:{spec.routine_id}",
+            proposer_grade=EVIDENCE_HYPOTHESIS,
+        )
+        return _from_verdict(spec, verdict)
+
+    # ------------------------------------------------------------------ #
     # HTTP-shaped routines
     # ------------------------------------------------------------------ #
 
@@ -67,39 +135,6 @@ class ConfirmationSpecRunner:
             injected=tuple(injected),
             control=(control[0] if control else None),
             length_delta=spec.length_delta,
-        )
-        return _decide(spec, ctx)
-
-    def _run_timing(self, spec: ConfirmationSpec) -> ConfirmationResult:
-        baseline = self._sample(spec, spec.baseline_payload)
-        injected = self._sample(spec, spec.injected_payload)
-        if not baseline or not injected:
-            return _refused(spec, "a population failed before both were complete (inconclusive)")
-        ctx = OracleContext(
-            baseline=baseline[0],
-            injected=tuple(injected),
-            control=None,
-            margin=spec.margin,
-        )
-        return _decide(spec, ctx)
-
-    # ------------------------------------------------------------------ #
-    # session-differential routine
-    # ------------------------------------------------------------------ #
-
-    def _run_authorization(self, spec: ConfirmationSpec) -> ConfirmationResult:
-        session_a = self._sample(spec, spec.injected_payload, session="")
-        session_b = self._sample(spec, spec.injected_payload, session="b")
-        if not session_a or not session_b:
-            return _refused(
-                spec,
-                "one session produced no measurement (inconclusive, not refuted)",
-            )
-        ctx = OracleContext(
-            baseline=session_a[0],
-            injected=(session_b[0],),
-            session_a=session_a[0],
-            session_b=session_b[0],
         )
         return _decide(spec, ctx)
 
@@ -206,6 +241,72 @@ class ConfirmationSpecRunner:
 # --------------------------------------------------------------------------- #
 
 
+def _from_verdict(spec: ConfirmationSpec, verdict: Verdict) -> ConfirmationResult:
+    """A delegated verdict, as the runner's own result shape.
+
+    The oracle question is answered by the verifier's own policy (proven or
+    not), so ``oracle_true`` mirrors ``proven`` here — a delegated route has no
+    second oracle to apply. The features carried forward are the measurements
+    the decision actually used: the shared verifiers summarize their fresh
+    populations into their evidence payloads, and those numbers — not raw
+    per-sample features — are what an operator reads.
+    """
+    evidence_payload: dict = {}
+    if verdict.evidence is not None:
+        evidence_payload = dict(verdict.evidence.payload or {})
+    return ConfirmationResult(
+        spec=spec,
+        proven=verdict.proven,
+        oracle_true=verdict.proven,
+        reason=verdict.reason,
+        context=_context_from_payload(spec, evidence_payload),
+        evidence_grade=verdict.grade,
+    )
+
+
+def _context_from_payload(
+    spec: ConfirmationSpec, payload: dict
+) -> OracleContext | None:
+    """The measured numbers of a delegated verdict, as an ``OracleContext``.
+
+    Empty payload → ``None`` (the refusal paths carry no measurement). The
+    field names are the shared verifiers' own evidence keys, so a drift between
+    the evidence shape and this reduction is caught by the delegation test.
+    """
+    if not payload:
+        return None
+    if spec.kind == "timing.differential":
+        baseline = Features(elapsed_ms=round(float(payload.get("baseline_median", 0.0)) * 1000.0, 3))
+        injected = (
+            Features(elapsed_ms=round(float(payload.get("injected_median", 0.0)) * 1000.0, 3)),
+        )
+        return OracleContext(
+            baseline=baseline,
+            injected=injected,
+            margin=float(payload.get("margin", 0.0)),
+        )
+    if spec.kind == "authorization.differential":
+        return OracleContext(
+            baseline=Features(
+                status=payload.get("flipped_session_a_status"),
+                length=int(payload.get("session_a_body_length", 0) or 0),
+                body_hash=str(payload.get("session_a_body_hash", ""))[:16],
+            ),
+            injected=(Features(),),
+            session_a=Features(
+                status=payload.get("flipped_session_a_status"),
+                length=int(payload.get("session_a_body_length", 0) or 0),
+                body_hash=str(payload.get("session_a_body_hash", ""))[:16],
+            ),
+            session_b=Features(
+                status=payload.get("flipped_session_b_status"),
+                length=int(payload.get("session_b_body_length", 0) or 0),
+                body_hash=str(payload.get("session_b_body_hash", ""))[:16],
+            ),
+        )
+    return None
+
+
 def _decide(spec: ConfirmationSpec, ctx: OracleContext) -> ConfirmationResult:
     from .spec import ORACLE_EVIDENCE
 
@@ -244,4 +345,4 @@ def _refused(spec: ConfirmationSpec, reason: str) -> ConfirmationResult:
     )
 
 
-__all__ = ["ConfirmationSpecRunner"]
+__all__ = ["TWOGATE_CONFIRM_KINDS", "ConfirmationSpecRunner"]

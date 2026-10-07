@@ -25,7 +25,7 @@ are not expressed as differential claim shapes today.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field as _field
 
 from ..kernel.claim import CLAIM_OBJECT_READ, CLAIM_SHAPES, CLAIM_STATE_CHANGE
@@ -101,6 +101,24 @@ VERIFIER_KINDS: tuple[VerifierKind, ...] = (
         measurement="execution",
         re_executes_setup=True,
     ),
+    # The two routes only the two-gate runner answers (its
+    # ``ConfirmationSpecRunner`` executes them over its declarative specs).
+    # They are in the vocabulary so the alignment check can hold the runner to
+    # the same discipline as the classic dispatcher: a kind handled anywhere
+    # must be described here. ``response`` is the runner's response-difference
+    # oracle route (Phase 3 of batch 2 lands a classic verifier for it, at
+    # which point it dispatches classically too); ``extraction`` stays
+    # runner-only.
+    VerifierKind(
+        name="extraction",
+        confirm_kind="differential.extraction",
+        measurement="differential",
+    ),
+    VerifierKind(
+        name="response_differential",
+        confirm_kind="differential.response",
+        measurement="differential",
+    ),
 )
 
 
@@ -126,15 +144,24 @@ def provable_claim_shapes() -> frozenset[str]:
     return shapes
 
 
-def check_alignment(dispatch: Mapping[str, str]) -> list[str]:
-    """Cross-check the vocabulary against *dispatch* (``CONFIRM_VERIFIERS``).
+def check_alignment(
+    dispatch: Mapping[str, str],
+    *,
+    two_gate_kinds: Collection[str] = (),
+) -> list[str]:
+    """Cross-check the vocabulary against both dispatchers.
 
-    Returns the problems — a kind that dispatches without a registry entry, or
-    vice versa, or a name mismatch. An empty list is the healthy answer; the
-    test suite asserts it, so the registry cannot drift from the dispatcher.
+    ``dispatch`` is the classic table (``CONFIRM_VERIFIERS``);
+    ``two_gate_kinds`` are the confirm kinds the two-gate runner handles
+    (``twogate.runner.TWOGATE_CONFIRM_KINDS``). Returns the problems — a kind
+    handled by either dispatcher without a registry entry, a registered kind
+    handled by neither, or a name mismatch. An empty list is the healthy
+    answer; the test suite asserts it, so the registry cannot drift from
+    either dispatcher.
     """
     problems: list[str] = []
     registered = registry()
+    two_gate = set(two_gate_kinds)
     for confirm_kind, name in dispatch.items():
         entry = registered.get(confirm_kind)
         if entry is None:
@@ -143,9 +170,14 @@ def check_alignment(dispatch: Mapping[str, str]) -> list[str]:
             problems.append(
                 f"{confirm_kind!r} dispatches to {name!r} but is registered as {entry.name!r}"
             )
+    for confirm_kind in sorted(two_gate):
+        if confirm_kind not in registered:
+            problems.append(f"{confirm_kind!r} is handled by the two-gate runner but is not registered")
     for kind in VERIFIER_KINDS:
-        if kind.confirm_kind not in dispatch:
-            problems.append(f"{kind.confirm_kind!r} is registered but does not dispatch")
+        if kind.confirm_kind not in dispatch and kind.confirm_kind not in two_gate:
+            problems.append(
+                f"{kind.confirm_kind!r} is registered but is answered by no dispatcher"
+            )
         for shape in kind.claim_shapes:
             if shape not in CLAIM_SHAPES:
                 problems.append(
