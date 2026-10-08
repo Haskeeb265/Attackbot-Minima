@@ -53,6 +53,7 @@ from ..kernel.technique import (
     oob_sentinel,
 )
 from ..kernel.verdict import Candidate, Verdict
+from ..memory.anomaly import corroborated
 from ..policy.gate import EffectRequest, PolicyGate
 from ..registry import Registration, TechniqueRegistry
 from ..verification import VerificationLayer
@@ -186,6 +187,11 @@ class RunReport:
     #: ``llm.junction`` rows. All zeros on a keyless run — the deterministic
     #: engine's model spend is exactly nothing, and the report says so.
     llm_cost: dict = field(default_factory=dict)
+    #: The joined abduction economics (``views.abduction_cost_summary``, H3):
+    #: proposal → verdict → abduced experiment → candidate → finding, with the
+    #: channel's cost split by rule — the LLM abduction channel's spend against
+    #: the deterministic abducer's zero. ``{}``-shaped plain data, derived.
+    abduction_cost: dict = field(default_factory=dict)
     log_path: str = ""
 
     def to_dict(self) -> dict:
@@ -211,6 +217,7 @@ class RunReport:
             "abduction": self.abduction,
             "findings_deduplicated": self.findings_deduplicated,
             "llm_cost": self.llm_cost,
+            "abduction_cost": self.abduction_cost,
             "log": self.log_path,
         }
 
@@ -236,6 +243,7 @@ class Engine:
         pool: "HypothesisPool | None" = None,
         elicit: bool = False,
         elicit_registry: "ElicitorRegistry | None" = None,
+        anomaly_memory: dict | None = None,
     ) -> None:
         self.seed = seed
         self.gate = gate
@@ -274,6 +282,16 @@ class Engine:
         #: byte-for-byte the declared-claims-only engine.
         self.elicit = elicit
         self.elicit_registry = elicit_registry
+        #: The cross-engagement anomaly distillate (``memory/anomaly.py``, H1),
+        #: or ``None``. Read-only and advisory: a predicate family a prior
+        #: engagement retained ranks this run's matching proposals ahead of the
+        #: rest in the abduced round, and rides the LLM abduction junction's
+        #: prompt. It never bypasses the validator's three-valued check and
+        #: never promotes anything on its own — nothing here can become a
+        #: finding except through the ordinary gate and verifier. ``None`` (the
+        #: default) is the byte-for-byte memoryless engine of every batch
+        #: before this one.
+        self.anomaly_memory = anomaly_memory
 
     # ------------------------------------------------------------------ #
     # the run
@@ -385,6 +403,7 @@ class Engine:
             abduction=views.abduction_summary(this_run),
             findings_deduplicated=views.findings_deduplicated(this_run),
             llm_cost=views.llm_cost_summary(this_run),
+            abduction_cost=views.abduction_cost_summary(this_run),
             log_path=self.log.path.as_posix() if self.log.path else "",
         )
 
@@ -566,10 +585,27 @@ class Engine:
                 deviation=deviation_dict,
                 at=self.clock(),
             )
-            for proposal in self._proposals_for(anomaly, arm, model):
-                self._consider(proposal, arm=arm, anomaly=key, counts=counts, validator=validator)
+            memory_backed = bool(self.anomaly_memory) and corroborated(
+                self.anomaly_memory, anomaly
+            )
+            for proposal in self._proposals_for(
+                anomaly,
+                arm,
+                model,
+                memory_backed=memory_backed,
+            ):
+                self._consider(
+                    proposal,
+                    arm=arm,
+                    anomaly=key,
+                    counts=counts,
+                    validator=validator,
+                    memory_backed=memory_backed,
+                )
 
-    def _proposals_for(self, anomaly: "Anomaly", arm: str, model: bool) -> list["Proposal"]:
+    def _proposals_for(
+        self, anomaly: "Anomaly", arm: str, model: bool, *, memory_backed: bool = False
+    ) -> list["Proposal"]:
         """Every explanation for one anomaly: deterministic first, model second.
 
         The deterministic abducer is the control arm; the LLM channel (A3) is
@@ -578,6 +614,13 @@ class Engine:
         the pen, the abduced round — cannot tell them apart, which is exactly
         the point: a model-proposed claim is still an experiment the verifier
         has seen.
+
+        H1: when an anomaly distillate is wired, the LLM junction's prompt
+        carries the memory cells (its ``memory`` input, plumbed and previously
+        unwired), and ``memory_backed`` — the distillate corroborating this
+        anomaly's predicate family — rides the proposal into the pool's
+        ranking. Neither path can bypass the validator: the ranking changes
+        what is tried first, never what may be believed.
         """
         proposals: list[Proposal] = []
         if self.abducer is not None:
@@ -592,6 +635,7 @@ class Engine:
             result = self.advisory.abduced(
                 anomaly_dict,
                 self.seed.surfaces,
+                memory=self.anomaly_memory,
                 log_handle=self.log,
                 now=self.clock(),
             )
@@ -638,6 +682,7 @@ class Engine:
         counts: dict[str, int],
         validator: "Validator",
         source: str = "abduction",
+        memory_backed: bool = False,
     ) -> None:
         """Log one explanation, route it three-valued, and shelve it.
 
@@ -646,7 +691,10 @@ class Engine:
         and an invalid one is only on the record. The validator's verdict is
         the whole influence. ``source`` records which channel asked
         (``abduction`` for an anomaly-driven explanation, ``property`` for
-        A3's static-context proposal); the routing is identical.
+        A3's static-context proposal); the routing is identical. H1:
+        ``memory_backed`` (the anomaly distillate corroborating the witnessing
+        family) rides into the pool's ranking only — expressible or held is
+        still the validator's word alone.
         """
         counts["abductions"] = counts.get("abductions", 0) + 1
         self.log.append(
@@ -667,7 +715,13 @@ class Engine:
             reason=validation.reason,
         )
         if validation.expressible and self.pool is not None:
-            self.pool.add(proposal, arm=arm, verdict=validation.verdict, source=source)
+            self.pool.add(
+                proposal,
+                arm=arm,
+                verdict=validation.verdict,
+                source=source,
+                memory_backed=memory_backed,
+            )
         if validation.holds and self.pen is not None:
             self.pen.hold(
                 key=proposal.id,

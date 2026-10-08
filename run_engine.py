@@ -58,6 +58,11 @@ from service.vuln_engine.llm.wiring import (
     load_recon_artifacts,
     remember,
 )
+from service.vuln_engine.memory.anomaly import (
+    distill as distill_anomaly_memory,
+    read_memory as read_anomaly_memory,
+    write_memory as write_anomaly_memory,
+)
 from service.vuln_engine.paths import safe_component  # noqa: E402
 from service.vuln_engine.policy.eligibility import (  # noqa: E402
     ProgramPolicy,
@@ -79,6 +84,7 @@ from service.vuln_engine.scheduler.driver import Engine, RunReport  # noqa: E402
 from service.vuln_engine.scheduler.pool import HypothesisPool  # noqa: E402
 from service.vuln_engine.scheduler.replay import replay  # noqa: E402
 from service.vuln_engine.scheduler.tree import AndNode, OrNode, Tree  # noqa: E402
+from service.vuln_engine.world.anomalies import AnomalyLedger  # noqa: E402
 from service.vuln_engine.world.holding_pen import HoldingPen  # noqa: E402
 from service.vuln_engine.world.log import WorldLog  # noqa: E402
 
@@ -214,6 +220,40 @@ def print_dedup_and_abduction(report: "RunReport") -> None:
             f"  abduction:  {abduction['proposed']} proposal(s); "
             f"by verdict: {verdicts}"
         )
+    # H3 — the joined economics, printed when the run actually used the model
+    # channel: what the LLM abducer spent to earn its findings, against the
+    # deterministic abducer's zero.
+    abduction_cost = getattr(report, "abduction_cost", None) or {}
+    llm_channel = (abduction_cost.get("by_rule") or {}).get("llm_abduction") or {}
+    if llm_channel.get("calls"):
+        findings = int(llm_channel.get("findings") or 0)
+        per = llm_channel.get("cost_per_finding_usd")
+        per_text = f" (${per}/finding)" if per is not None else ""
+        _out(
+            f"  abd cost:   ${llm_channel.get('cost_usd', 0.0)} over "
+            f"{llm_channel['calls']} model call(s), "
+            f"{llm_channel.get('proposals', 0)} proposal(s) -> {findings} finding(s)"
+            f"{per_text} (deterministic rules: $0.0)"
+        )
+
+
+def _remember_anomaly_memory(output_dir: Path) -> None:
+    """Distill this run's retained anomalies beside the findings memory (H1).
+
+    ``--remember`` now writes the pair the engine speaks of: ``memory.json``
+    (findings memory, for ``--hypothesize-from-recon``) and
+    ``anomaly_memory.json`` (the capped predicate-family distillate of
+    ``memory/anomaly.py``, for ``--anomaly-memory-file``). The distillate is
+    built through the anomaly ledger — the same ingest the engine itself uses,
+    so the file cannot hold a shape the log does not — and a wrong entry sits
+    in the repository where an operator can read and correct it.
+    """
+    ledger = AnomalyLedger(output_dir / "world" / "anomalies.jsonl")
+    ledger.ingest(WorldLog(output_dir / "world.jsonl"))
+    anomaly_record = distill_anomaly_memory(ledger.entries())
+    anomaly_path = output_dir / "anomaly_memory.json"
+    write_anomaly_memory(anomaly_path, anomaly_record)
+    _out(f"  anomaly memory: {anomaly_path} (feed back with --anomaly-memory-file)")
 
 
 def _out(line: str) -> None:
@@ -443,6 +483,7 @@ def run(
     force: bool = False,
     advisory: Advisory | None = None,
     elicit: bool = False,
+    anomaly_memory: dict | None = None,
 ) -> RunReport:
     """Wire the engine and run it.  The only function in this file that sends traffic."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -489,6 +530,7 @@ def run(
         pen=HoldingPen(output_dir / "holding_pen.jsonl"),
         pool=HypothesisPool(),
         elicit=elicit,
+        anomaly_memory=anomaly_memory,
     )
     report = engine.run()
     (output_dir / "report.json").write_text(
@@ -507,6 +549,7 @@ def campaign_run(
     widening: dict | None = None,
     elicit: bool = False,
     tree: "Tree | None" = None,
+    anomaly_memory: dict | None = None,
 ) -> CampaignReport:
     """Wire the campaign and spend its round budget.  Phase 2's runner, CLI-exposed."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -545,6 +588,7 @@ def campaign_run(
         pen=HoldingPen(output_dir / "holding_pen.jsonl"),
         elicit=elicit,
         tree=tree,
+        anomaly_memory=anomaly_memory,
     )
     return campaign.run(Budget(rounds=rounds))
 
@@ -877,6 +921,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="after the run, write a memory record (arms, contexts, timings, leads) beside the report for the next engagement",
     )
+    parser.add_argument(
+        "--anomaly-memory-file",
+        default="",
+        metavar="PATH",
+        help="a previous engagement's anomaly distillate (written by --remember) to inform the abduction loop — advisory ranking and prompt context only",
+    )
     parser.add_argument("--replay", default="", metavar="LOG", help="recompute a finished run offline")
     parser.add_argument("--json", action="store_true", help="print the machine report only")
     args = parser.parse_args(argv)
@@ -1103,6 +1153,21 @@ def main(argv: list[str] | None = None) -> int:
 
     advisory = Advisory.from_env() if (args.llm_draft or args.hypothesize_from_recon or args.graph_agent) else None
 
+    # H1 — the anomaly distillate is the abduction loop's cross-engagement
+    # input, read the way the hypothesize junction reads its findings memory:
+    # as an input file, advisory, never evidence. A missing or empty file is
+    # stated and the run continues memoryless — a wrong path must not look
+    # like a remembered target.
+    anomaly_memory: dict | None = None
+    if args.anomaly_memory_file:
+        anomaly_memory = read_anomaly_memory(args.anomaly_memory_file)
+        if not (anomaly_memory.get("cells") or []):
+            _out(
+                f"anomaly memory: {args.anomaly_memory_file} carries no cells "
+                "(missing or empty) — continuing memoryless"
+            )
+            anomaly_memory = None
+
     # Item 2.5 — a run is a directory, and two runs are two directories. The
     # old default dropped every run for a target into the same folder, so a
     # second run appended to the first one's world.jsonl: the ledger — the
@@ -1258,6 +1323,7 @@ def main(argv: list[str] | None = None) -> int:
             widening=widening,
             elicit=args.elicit,
             tree=attack_tree,
+            anomaly_memory=anomaly_memory,
         )
         campaign_payload = campaign_report.to_dict()
         # Same provenance the single-run report carries: what the graph-derived
@@ -1283,15 +1349,16 @@ def main(argv: list[str] | None = None) -> int:
             _out(f"    {finding.get('summary', finding.get('vuln_class', '?'))}")
         if campaign_report.problems:
             _out(f"  notes:      {'; '.join(campaign_report.problems)}")
-        if args.remember:
-            memory_path = output_dir / "memory.json"
-            record = remember(
-                output_dir / "world.jsonl", campaign_report.target
-            )
-            memory_path.write_text(
-                json.dumps(record, indent=2), encoding="utf-8", newline="\n"
-            )
-            _out(f"  memory:     {memory_path} (feed back with --memory-file)")
+    if args.remember:
+        memory_path = output_dir / "memory.json"
+        record = remember(
+            output_dir / "world.jsonl", campaign_report.target
+        )
+        memory_path.write_text(
+            json.dumps(record, indent=2), encoding="utf-8", newline="\n"
+        )
+        _out(f"  memory:     {memory_path} (feed back with --memory-file)")
+        _remember_anomaly_memory(output_dir)
         if campaign_report.widening:
             _out(
                 f"  widened:    {campaign_report.widening.get('added', 0)} surface(s) "
@@ -1312,7 +1379,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if campaign_report.findings else 1
 
     report = run(
-        profile, output_dir=output_dir, force=args.force, advisory=advisory, elicit=args.elicit
+        profile,
+        output_dir=output_dir,
+        force=args.force,
+        advisory=advisory,
+        elicit=args.elicit,
+        anomaly_memory=anomaly_memory,
     )
     payload = report.to_dict()
     if graph_seed is not None:
@@ -1351,6 +1423,7 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(record, indent=2), encoding="utf-8", newline="\n"
         )
         _out(f"  memory:     {memory_path} (feed back with --memory-file)")
+        _remember_anomaly_memory(output_dir)
 
     if args.json:
         _out(json.dumps(payload, indent=2))

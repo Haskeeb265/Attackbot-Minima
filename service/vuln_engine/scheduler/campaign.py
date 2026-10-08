@@ -138,6 +138,7 @@ class Campaign:
         elicit: bool = False,
         elicit_registry: "ElicitorRegistry | None" = None,
         tree: Tree | None = None,
+        anomaly_memory: dict | None = None,
     ) -> None:
         self.seed = seed
         self.gate = gate
@@ -179,6 +180,10 @@ class Campaign:
         #: selector ranks every eligible arm flat, exactly as Phase 2 did; the
         #: tree narrows *where the campaign may spend*, it never re-orders.
         self.tree = tree
+        #: The cross-engagement anomaly distillate (``memory/anomaly.py``, H1),
+        #: threaded to every round's engine exactly as the abducer is: advisory
+        #: ranking input and LLM-prompt context, never a gate and never evidence.
+        self.anomaly_memory = anomaly_memory
         self._priors: dict[str, float] | None = None
 
     def run(self, budget: Budget) -> CampaignReport:
@@ -407,6 +412,7 @@ class Campaign:
             pool=HypothesisPool(),
             elicit=self.elicit,
             elicit_registry=self.elicit_registry,
+            anomaly_memory=self.anomaly_memory,
         )
         return engine.run()
 

@@ -6,7 +6,11 @@ Two small things Phase 5 adds to the scheduler:
   candidates in **one** in-memory ranking, per §7.2's "hypothesis pool
   (in-memory per run)". A pool entry is an abduced proposal plus the arm that
   produced it and the validator's verdict; expressible entries are candidates
-  for the next round, held ones already live in the pen.
+  for the next round, held ones already live in the pen. The ranking is the
+  cell key, except that a family the cross-engagement anomaly distillate
+  corroborates (H1, ``memory_backed``) ranks ahead of uncorroborated ones —
+  advisory ordering only: it changes *what is tried first*, never what may be
+  believed.
 
 * :func:`novelty_cells_from_log` — the A2 novelty term, derived from the
   ledger's own ``anomaly.retained`` rows rather than from a counter the
@@ -40,6 +44,12 @@ class PoolEntry:
     #: skip a *property* that merely re-proposes an experiment the ordinary pass
     #: already ran — a surprise is worth re-measuring, a plain duplicate is not.
     source: str = "abduction"
+    #: The anomaly distillate corroborated this entry's predicate family (H1):
+    #: a prior engagement against this target retained the same surprise.
+    #: Advisory by definition — it ranks the entry ahead of uncorroborated ones
+    #: in the abduced round, it never bypasses the validator's verdict and never
+    #: promotes anything on its own.
+    memory_backed: bool = False
     proposal: dict = _field(default_factory=dict)
 
     @property
@@ -57,6 +67,7 @@ class PoolEntry:
             "verdict": self.verdict,
             "source": self.source,
             "expressible": self.expressible,
+            "memory_backed": self.memory_backed,
             "proposal": dict(self.proposal),
         }
 
@@ -67,7 +78,10 @@ class HypothesisPool:
     def __init__(self) -> None:
         self._entries: dict[str, PoolEntry] = {}
 
-    def add(self, proposal, *, arm: str, verdict: str, source: str = "abduction") -> PoolEntry:
+    def add(
+        self, proposal, *, arm: str, verdict: str, source: str = "abduction",
+        memory_backed: bool = False,
+    ) -> PoolEntry:
         """Add one proposal; a repeated cell is idempotent (first verdict wins)."""
         entry = PoolEntry(
             cell=proposal.witness or proposal.id,
@@ -76,13 +90,19 @@ class HypothesisPool:
             claim_shape=proposal.claim_shape,
             verdict=verdict,
             source=source,
+            memory_backed=memory_backed,
             proposal=proposal.to_dict(),
         )
         self._entries.setdefault(entry.cell, entry)
         return self._entries[entry.cell]
 
     def entries(self) -> list[PoolEntry]:
-        return [self._entries[key] for key in sorted(self._entries)]
+        """Every entry, ranked: memory-corroborated families first (H1), then
+        the cell key — so a run without a distillate orders exactly as before."""
+        return [
+            self._entries[key]
+            for key in sorted(self._entries, key=lambda key: (not self._entries[key].memory_backed, key))
+        ]
 
     def expressible(self) -> list[PoolEntry]:
         return [entry for entry in self.entries() if entry.expressible]

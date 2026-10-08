@@ -75,6 +75,41 @@ def distill(anomalies: Iterable[Anomaly | dict], *, cap: int = DEFAULT_CAP) -> d
     }
 
 
+def family_of(anomaly: Anomaly | dict) -> tuple[str, str, str, str]:
+    """The predicate family one anomaly belongs to — the distillate's cell key.
+
+    The same four fields a cell carries (``technique, kind, probe_suffix,
+    field``), deliberately surface-free: the family is the generalisable fact,
+    the particular host belongs in the ledger.
+    """
+    return _family(_as_anomaly(anomaly))
+
+
+def corroborated(record: object, anomaly: Anomaly | dict) -> bool:
+    """True when *anomaly*'s predicate family appears in a distillate.
+
+    The one question a consumer is allowed to ask of anomaly memory, kept here
+    so the family semantics cannot drift between consumers. Read-only and
+    advisory by construction: a corroboration is a count over past surprises,
+    never evidence, never a gate — it may order what gets proposed, it may not
+    decide what gets believed.
+    """
+    if not isinstance(record, dict):
+        return False
+    family = family_of(anomaly)
+    for cell in record.get("cells") or []:
+        if not isinstance(cell, dict):
+            continue
+        if (
+            str(cell.get("technique", "")),
+            str(cell.get("kind", "")),
+            str(cell.get("probe_suffix", "")),
+            str(cell.get("field", "")),
+        ) == family:
+            return True
+    return False
+
+
 def write_memory(path: Path | str, record: dict) -> dict:
     """Write a distillate to *path*; returns the record unchanged."""
     file = Path(path)
@@ -97,4 +132,4 @@ def read_memory(path: Path | str) -> dict:
     return record
 
 
-__all__ = ["DEFAULT_CAP", "distill", "read_memory", "write_memory"]
+__all__ = ["DEFAULT_CAP", "corroborated", "distill", "family_of", "read_memory", "write_memory"]

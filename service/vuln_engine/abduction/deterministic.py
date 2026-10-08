@@ -144,6 +144,17 @@ def abduce(anomaly: Anomaly, surfaces: Sequence[Surface]) -> list[Proposal]:
 
     Returns proposals in a deterministic order (the plan builders' order), each
     naming the rule that produced it and the anomaly that witnessed it.
+
+    Deliberately memory-free (H1): the cross-engagement anomaly distillate
+    (``memory/anomaly.py``) is advisory input to the *loop*, not to this
+    function — every proposal one anomaly yields shares the anomaly's predicate
+    family, so a per-call corroboration rank would be uniform and could reorder
+    nothing. The distillate's measurable influence on what gets proposed lives
+    where proposals from different anomalies compete: the hypothesis pool's
+    ranking (``scheduler/pool.py``), which the driver feeds via the memory
+    module's ``corroborated`` helper, and the LLM junction's prompt, which gets
+    the cells via the ``memory`` parameter that was already plumbed and is now
+    wired (H1).
     """
     from ..techniques.generic_differential.plan import (
         ROLE_TARGET,

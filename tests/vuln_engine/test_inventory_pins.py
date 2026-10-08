@@ -12,12 +12,13 @@ least once:
   manifest) and the OR-gate derives its eligibility from the plan table. The
   reference said "three" ("the timing pair and the OR-gate") and missed that
   the XSS pair had joined them. Counted here against the real registry.
-* **The memory pair is half-wired.** Findings memory (`llm/wiring.remember`
-  and `load_memory`) is reached from `run_engine.py`; the anomaly distillate
-  (`memory/anomaly.py`) is built and tested but consumed by nothing — a
-  documented limitation, not a defect, and this file holds the boundary: the
-  day something imports the anomaly module, the pin fails and the reference's
-  §18 must change with it.
+* **The memory pair, wired as a pair (H1).** Findings memory
+  (`llm/wiring.remember` and `load_memory`) is reached from `run_engine.py`;
+  the anomaly distillate (`memory/anomaly.py`) is consumed by the abduction
+  loop — the driver's pool ranking and the LLM abduction junction's prompt —
+  and by nothing else. Advisory consumers only: the day a transport, a
+  verifier or the policy gate imports it, this file fails, because a memory
+  file that could route a packet or grade a verdict would not be memory.
 """
 
 from __future__ import annotations
@@ -150,19 +151,28 @@ def test_observed_gates_covers_every_capability_the_gates_read() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# the memory pair: findings memory wired, anomaly distillate not (yet)
+# the memory pair: both halves wired, both halves advisory (H1)
 # --------------------------------------------------------------------------- #
 
-#: What wiring the anomaly distillate would look like: an import of the
-#: `memory.anomaly` module from anywhere outside itself.
+#: Where the anomaly distillate may be consumed: the engine's abduction loop
+#: (the driver ranks the hypothesis pool with it and feeds the LLM junction's
+#: prompt) and the CLI that loads and writes the file. Anything else importing
+#: it — a transport, a verifier, the policy gate, a technique — turns a memory
+#: file into a decision path, and that is the invariant this pin holds.
+_ANOMALY_CONSUMERS = frozenset(
+    {
+        ENGINE_ROOT / "scheduler" / "driver.py",
+        REPO_ROOT / "run_engine.py",
+    }
+)
 _ANOMALY_WIRING = re.compile(
     r"memory\.anomaly|from \.anomaly import|from \.\.memory import|\bimport memory\b"
 )
 
 
-def test_the_anomaly_distillate_exists_but_is_consumed_by_nothing() -> None:
+def test_the_anomaly_distillate_is_consumed_only_by_the_abduction_loop() -> None:
     module = ENGINE_ROOT / "memory" / "anomaly.py"
-    assert module.is_file(), "the limitation this pins vanished with the module"
+    assert module.is_file(), "the memory this pins vanished with the module"
 
     wired: list[Path] = []
     for path in ENGINE_ROOT.rglob("*.py"):
@@ -172,9 +182,17 @@ def test_the_anomaly_distillate_exists_but_is_consumed_by_nothing() -> None:
             continue
         if _ANOMALY_WIRING.search(path.read_text(encoding="utf-8")):
             wired.append(path)
-    assert not wired, (
-        f"memory.anomaly is now imported from {wired} — the §18/§22.10 "
-        "'unwired distillate' limitation is stale; update the reference"
+    unexpected = {
+        path for path in wired if path.resolve() not in {item.resolve() for item in _ANOMALY_CONSUMERS}
+    }
+    assert not unexpected, (
+        f"memory.anomaly is now imported from {sorted(map(str, unexpected))} — "
+        "the distillate is advisory input to the abduction loop (driver + CLI) "
+        "and to nothing else; if a new consumer is legitimate, the reference's "
+        "§18/Appendix H must change with it and this set must be widened"
+    )
+    assert wired, (
+        "memory.anomaly lost its abduction-loop consumer — the H1 wiring is gone"
     )
 
 

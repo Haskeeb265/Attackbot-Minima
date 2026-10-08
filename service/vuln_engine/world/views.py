@@ -54,6 +54,7 @@ from .log import (
     EVENT_EFFECT_RESULT,
     EVENT_GATE_DECISION,
     EVENT_HOLDING_PEN_ENTRY,
+    EVENT_NOTE,
     EVENT_RECEIPT,
     EVENT_VERDICT,
 )
@@ -94,6 +95,19 @@ SESSION_B_REFUSAL_MARKER = "no second session is wired"
 #: ``llm`` → ``world``), hence the literal — pinned by test to
 #: :data:`llm.client.EVENT_LLM_JUNCTION`.
 LLM_JUNCTION_EVENT = "llm.junction"
+
+#: The abduction channel's join constants (H3). ``views`` sits below ``llm``,
+#: ``abduction`` and ``scheduler`` in the import graph, so each is a literal
+#: here, pinned by test to the owning module's constant:
+#: ``abduction.deterministic.RULE_LLM_ABDUCTION``, ``llm.runtime.ABDUCE_NAME`` /
+#: ``PROPERTY_NAME``, and the driver's ``note`` stage spelling.
+LLM_ABDUCTION_RULE = "llm_abduction"
+ABDUCE_JUNCTION = "abduce"
+PROPERTY_JUNCTION = "propose.properties"
+ABDUCED_NOTE_STAGE = "hypothesis.abduced"
+#: The validator's expressible verdict (``abduction/proposal.py``), as a
+#: literal for the same one-way-import reason as the constants above.
+EXPRESSIBLE_NOW_VERDICT = "expressible_now"
 
 #: Technique names whose session-B refusal is a *capability check* — a
 #: measurement of a precondition — rather than a candidate's own experiment.
@@ -594,6 +608,210 @@ def llm_cost_summary(log: LogView) -> dict:
     }
 
 
+def abduction_cost_summary(log: LogView) -> dict:
+    """The abduction channel's economics, joined end to end (H3).
+
+    Three unjoined views existed before this one: ``llm_cost_summary`` (cost
+    per junction call), ``abduction_summary`` (proposals by validator verdict)
+    and ``findings`` (what got proven). Answering "what did one verified
+    finding cost out of the LLM abducer, against the deterministic abducer's
+    zero" meant hand-correlating all three through the proposal/candidate
+    lineage. This view performs that join, as pure derivation over the rows:
+
+        proposal → validated verdict → (expressible_now) → the abduced
+        experiment (``note stage=hypothesis.abduced``) → the candidates it
+        produced → (proven) → finding
+
+    and sums the channel's cost across that chain, split by rule — the LLM
+    channel's ``llm_abduction`` against the deterministic plan-table rules,
+    whose model spend is exactly zero by construction and the report says so.
+
+    **Cost attribution.** A junction call is a fact about one ask. Its cost
+    and tokens are additive, so they split evenly across the proposals the
+    join traces to that call (an ``abduce`` call joins on the anomaly arm its
+    input carries; a ``propose.properties`` call feeds the property channel's
+    proposals); its latency is not additive, so a bucket carries the worst
+    latency of the calls that fed it. A call the join cannot trace to any
+    surviving proposal — a degraded answer, or one that proposed nothing —
+    lands in ``unattributed`` rather than being silently dropped, so the
+    channel's whole spend reconciles.
+
+    Attribution follows the *rules*, not the surface: a deterministic rule's
+    proposal for the same anomaly never inherits the LLM call's cost, and the
+    ``deterministic`` bucket's calls/cost stay zero no matter how busy the
+    model was — that zero *is* the control-arm number the docstring in
+    ``abduction/deterministic.py`` sets up.
+    """
+    proposed = log.events(EVENT_ABDUCTION_PROPOSED)
+    verdict_by_proposal = {
+        str(row.get("proposal_id", "")): str(row.get("verdict", ""))
+        for row in log.events(EVENT_ABDUCTION_VALIDATED)
+    }
+    # The abduced round: one note row per run arm, naming the proposal that
+    # won it — so proposal → the arm whose candidates/findings are its lineage.
+    arm_by_proposal: dict[str, str] = {}
+    for row in log.events(EVENT_NOTE):
+        if str(row.get("stage", "")) != ABDUCED_NOTE_STAGE:
+            continue
+        proposal_id = str(row.get("proposal_id", ""))
+        arm_by_proposal.setdefault(proposal_id, str(row.get("arm", "")))
+    candidates_by_arm: dict[str, list[str]] = {}
+    for row in log.events(EVENT_CANDIDATE):
+        candidates_by_arm.setdefault(str(row.get("arm", "")), []).append(
+            str(row.get("id", ""))
+        )
+    proven_by_candidate = {
+        str(row.get("candidate", "")): bool(row.get("proven"))
+        for row in log.events(EVENT_VERDICT)
+    }
+
+    proposals: list[dict] = []
+    for row in proposed:
+        proposal = dict(row.get("proposal") or {})
+        proposal_id = str(row.get("proposal_id") or proposal.get("id", ""))
+        rule = str(proposal.get("rule", ""))
+        source = str(row.get("source", ""))
+        arm = str(row.get("arm", ""))
+        experiment_arm = arm_by_proposal.get(proposal_id, "")
+        candidate_ids = candidates_by_arm.get(experiment_arm, []) if experiment_arm else []
+        findings = sum(1 for cid in candidate_ids if proven_by_candidate.get(cid))
+        proposals.append(
+            {
+                "id": proposal_id,
+                "rule": rule,
+                "source": source,
+                "arm": arm,
+                "verdict": verdict_by_proposal.get(proposal_id) or "(unvalidated)",
+                "expressible": verdict_by_proposal.get(proposal_id) == EXPRESSIBLE_NOW_VERDICT,
+                "experiment_run": bool(experiment_arm),
+                "candidates": len(candidate_ids),
+                "findings": findings,
+                "cost_usd": 0.0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            }
+        )
+
+    # The channel's calls, attributed to the proposals they produced. A rule
+    # that is not the LLM channel's never inherits a call: the deterministic
+    # abducer asks no model, and its bucket's zero is the point of the split.
+    unattributed = {"calls": 0, "cost_usd": 0.0}
+    abduce_arms = {
+        entry["arm"]
+        for entry in proposals
+        if entry["rule"] == LLM_ABDUCTION_RULE and entry["source"] == "abduction"
+    }
+    for call in log.events(LLM_JUNCTION_EVENT):
+        junction = str(call.get("junction", ""))
+        if junction not in (ABDUCE_JUNCTION, PROPERTY_JUNCTION):
+            continue  # another junction's spend belongs to ``llm_cost_summary``
+        cost = float(call.get("cost_usd") or 0.0)
+        prompt_tokens = int(call.get("prompt_tokens") or 0)
+        completion_tokens = int(call.get("completion_tokens") or 0)
+        owners: list[dict] = []
+        if junction == ABDUCE_JUNCTION:
+            call_arm = str((call.get("junction_input") or {}).get("anomaly", {}).get("arm", ""))
+            if call_arm in abduce_arms:
+                owners = [
+                    entry
+                    for entry in proposals
+                    if entry["rule"] == LLM_ABDUCTION_RULE
+                    and entry["source"] == "abduction"
+                    and entry["arm"] == call_arm
+                ]
+        elif junction == PROPERTY_JUNCTION:
+            owners = [
+                entry
+                for entry in proposals
+                if entry["rule"] == LLM_ABDUCTION_RULE and entry["source"] == "property"
+            ]
+        if not owners:
+            unattributed["calls"] = int(unattributed["calls"]) + 1
+            unattributed["cost_usd"] = float(unattributed["cost_usd"]) + cost
+            continue
+        share_cost = cost / len(owners)
+        share_prompt = prompt_tokens / len(owners)
+        share_completion = completion_tokens / len(owners)
+        for entry in owners:
+            entry["cost_usd"] = float(entry["cost_usd"]) + share_cost
+            entry["prompt_tokens"] = int(entry["prompt_tokens"]) + share_prompt
+            entry["completion_tokens"] = int(entry["completion_tokens"]) + share_completion
+
+    def _bucket(*, llm: bool) -> dict:
+        # Two buckets, not a rule lookup: the LLM channel's rule, and
+        # everything else — every deterministic rule is part of the control
+        # arm, whatever its name.
+        rows = [
+            entry
+            for entry in proposals
+            if (entry["rule"] == LLM_ABDUCTION_RULE) == llm
+        ]
+        by_verdict: dict[str, int] = {}
+        for entry in rows:
+            by_verdict[entry["verdict"]] = by_verdict.get(entry["verdict"], 0) + 1
+        findings = sum(entry["findings"] for entry in rows)
+        experiments = sum(1 for entry in rows if entry["experiment_run"])
+        calls = sum(
+            1
+            for call in log.events(LLM_JUNCTION_EVENT)
+            if str(call.get("junction", "")) in (ABDUCE_JUNCTION, PROPERTY_JUNCTION)
+            and _call_feeds_any(call, rows)
+        )
+        cost = round(sum(float(entry["cost_usd"]) for entry in rows), 6)
+        worst = max(
+            (
+                float(call.get("latency") or 0.0)
+                for call in log.events(LLM_JUNCTION_EVENT)
+                if _call_feeds_any(call, rows)
+            ),
+            default=0.0,
+        )
+        return {
+            "proposals": len(rows),
+            "by_verdict": dict(sorted(by_verdict.items())),
+            "experiments_run": experiments,
+            "candidates": sum(entry["candidates"] for entry in rows),
+            "findings": findings,
+            "calls": calls,
+            "cost_usd": cost,
+            "prompt_tokens": int(sum(entry["prompt_tokens"] for entry in rows)),
+            "completion_tokens": int(sum(entry["completion_tokens"] for entry in rows)),
+            "worst_latency": worst,
+            "cost_per_finding_usd": (round(cost / findings, 6) if findings else None),
+        }
+
+    def _call_feeds_any(call: dict, rows: list[dict]) -> bool:
+        """Whether this junction call's cost reached any of ``rows``. Only the
+        LLM rule's rows can be fed: a deterministic proposal answering the same
+        anomaly never inherits the model's spend."""
+        junction = str(call.get("junction", ""))
+        if junction == ABDUCE_JUNCTION:
+            call_arm = str((call.get("junction_input") or {}).get("anomaly", {}).get("arm", ""))
+            return call_arm in abduce_arms and any(
+                entry["rule"] == LLM_ABDUCTION_RULE
+                and entry["source"] == "abduction"
+                and entry["arm"] == call_arm
+                for entry in rows
+            )
+        if junction == PROPERTY_JUNCTION:
+            return any(
+                entry["rule"] == LLM_ABDUCTION_RULE and entry["source"] == "property"
+                for entry in rows
+            )
+        return False
+
+    return {
+        "by_rule": {
+            LLM_ABDUCTION_RULE: _bucket(llm=True),
+            "deterministic": _bucket(llm=False),
+        },
+        "unattributed": {
+            "calls": int(unattributed["calls"]),
+            "cost_usd": round(float(unattributed["cost_usd"]), 6),
+        },
+    }
+
+
 def receipts_by_arm(log: LogView) -> dict[str, dict[str, int]]:
     """``{arm: {outcome: count}}`` — the receipts ledger's view of the log.
 
@@ -667,6 +885,7 @@ def summary(log: LogView) -> dict:
         "holding_pen": holding_pen_summary(log),
         "coverage": coverage(log),
         "abduction": abduction_summary(log),
+        "abduction_cost": abduction_cost_summary(log),
         "findings_deduplicated": findings_deduplicated(log),
         "llm_cost": llm_cost_summary(log),
     }
@@ -682,6 +901,12 @@ __all__ = [
     "SEVERITY_WEIGHTS",
     "SEVERITY_WEIGHT_UNKNOWN",
     "SESSION_B_REFUSAL_MARKER",
+    "ABDUCE_JUNCTION",
+    "ABDUCED_NOTE_STAGE",
+    "EXPRESSIBLE_NOW_VERDICT",
+    "LLM_ABDUCTION_RULE",
+    "PROPERTY_JUNCTION",
+    "abduction_cost_summary",
     "abduction_summary",
     "arm_key",
     "blocked_on_session_b",

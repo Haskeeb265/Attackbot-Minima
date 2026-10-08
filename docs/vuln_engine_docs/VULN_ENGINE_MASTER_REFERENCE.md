@@ -3,12 +3,15 @@
 > **Status:** current-state reference, written against the code on branch
 > `attackbot/feature/vuln-engine` (revision current as of 2026-10-08, after the
 > hardening batch (T1–T9), the gap-closure batch, gap-closure batch 2
-> (Appendix F), **and gap-closure batch 3** (Appendix G: browser subresource
+> (Appendix F), gap-closure batch 3 (Appendix G: browser subresource
 > gating, oob_fetch blind-SSRF candidates, the stored-XSS two-gate route, the
 > timing-retry throttle exclusion, the versioned junction digest, the exposed
 > UI's bearer token, the fail-closed scope and run-separation CLI gates,
 > operator-string validation, the recon-side parameter locations, the
-> header/url probe support, and the LLM cost stamps) —
+> header/url probe support, and the LLM cost stamps), **and gap-closure batch
+> 4** (Appendix H: the anomaly distillate wired into the abduction loop, the
+> §22.10 notebook reconciled against Appendices D–G, and the joined
+> abduction-cost view) —
 > on top of Capability Closure (`service/vuln_engine/elicit/`), the timing
 > verifier's dose-response discriminator, and the authorization verifier's
 > content comparison). Every path, constant and field named below was read from
@@ -54,6 +57,7 @@
 27. [Appendix E — Gap-closure batch](#appendix-e--gap-closure-batch-2026-10-07)
 28. [Appendix F — Gap-closure batch 2](#appendix-f--gap-closure-batch-2-2026-10-08)
 29. [Appendix G — Gap-closure batch 3](#appendix-g--gap-closure-batch-3-2026-10-08)
+30. [Appendix H — Gap-closure batch 4](#appendix-h--gap-closure-batch-4-2026-10-08)
 
 ---
 
@@ -93,8 +97,9 @@ implementation that answered its three correct findings:
    compares session B's body against session A's, so a generic `2xx` envelope is
    no longer a finding.
 
-The engine's and UI's suites together are at **950 passed, 2 skipped**, `mypy`
-clean across 152 source files (see §21).
+The engine's and UI's suites together are at **961 passed, 2 skipped**, `mypy`
+clean across 152 source files (see §21, and Appendix H for this batch's
+counts).
 
 ### The single most important distinction
 
@@ -294,14 +299,15 @@ supports. Key flags (see [§22](#22-appendices--vocabularies-tables-flags-env)):
 | `--hypothesize-from-recon` | let the model widen the seed from recon artifacts |
 | `--graph-agent` | let the model navigate the recon graph tool-by-tool |
 | `--llm-draft` | model prose beside the canonical report lines |
-| `--remember` | write the findings-memory distillate (`memory.json`: per-arm receipts, contexts, timing medians) for a later run's `--hypothesize-from-recon` |
+| `--remember` | write the memory pair: the findings-memory distillate (`memory.json`: per-arm receipts, contexts, timing medians) for a later run's `--hypothesize-from-recon`, and the anomaly distillate (`anomaly_memory.json`: the capped predicate-family count of §18) for a later run's `--anomaly-memory-file` |
+| `--anomaly-memory-file PATH` | feed a previous engagement's anomaly distillate into this run's abduction loop (H1). Advisory and read-only: a predicate family a prior engagement retained ranks this run's matching proposals ahead of the rest and rides the LLM abduction junction's prompt; it never bypasses the validator and never promotes anything on its own. A missing or empty file is stated and the run continues memoryless |
 | `--force` | ignore the receipts ledger and re-probe |
 | `--elicit` | Capability Closure: before the pass, measure the preconditions techniques gate on (`reflection`, `remote_fetch`, `timing`, `sessions`, `storage`, `public_param`) with the elicitor corpus, and let the measured facts open gates a declared claim alone used to open. **Opt-in by design** — elicitation sends live requests against the target (timing doses, second-identity reads), so it never runs by accident |
 | `--json` | machine report |
 
 The run directory holds: `world.jsonl`, `report.json`,
 `report.draft.json` (model prose, flagged), `receipts.jsonl`, `memory.json`
-(with `--remember`).
+and `anomaly_memory.json` (both with `--remember`).
 
 ### 4.4 `run_twogate.py`
 
@@ -417,7 +423,9 @@ capabilities, Playwright/CDP drivers), `oob.py` (`OobEffect`,
 
 ### `memory/`
 
-`anomaly.py` (`distill`, `read_memory`, `write_memory`).
+`anomaly.py` (`distill`, `family_of`, `corroborated`, `read_memory`,
+`write_memory`) — the anomaly half of the memory pair, wired into the
+abduction loop since H1 (§18).
 
 ### `twogate/` — the measured-capability flow
 
@@ -3168,30 +3176,43 @@ deterministic order. The conventions (deliberate, and pinned by
   and `candidates_for_nodes` accepts all three kinds, so a graph agent that
   selects a service or cloud id gets the same expansion an operator would.
 
-> **Measured limitation (recon coverage, not the bridge):** the graph's
-> `observed_parameter` edges carry `location: "query"` only today —
-> `url_endpoint/extract.py` writes that one value — so while the bridge maps
-> `body`/`path`/`header`/`url` whenever recon observes them (G4), no live run
-> produces them yet. Extending the extractor is a recon-side change; the
-> bridge side is done and tested.
+> **Recon coverage (updated, G3.1):** the extractor used to write
+> `location: "query"` for every parameter, so live graphs carried one location
+> no matter what was observed; the bundle crawler now records the position its
+> own strings spell (`query` for `?a=1`, `path` for `/u/{id}`) and its
+> observations merge into `parameters.jsonl` (deduped on
+> `(url, parameter, location)`, append-only). The bridge maps every location
+> the graph carries (G4) and stays honest about unknown ones. What remains
+> open is the stored-surface gap — `companions`/`read_back` are always empty
+> (§22.10 item 3).
 
 ---
 
 ## 18. Memory — cross-engagement distillates
 
-Memory is a pair, and today only one half is wired:
+Memory is a pair, and both halves are wired (H1, Appendix H):
 
 - **Findings memory — wired.** `llm/wiring.remember(log_path, target)` writes
   the cross-engagement distillate of receipts (`memory.json`), and
   `load_memory` reads it back into `--hypothesize-from-recon`; `run_engine.py
   --remember` is the operator's handle (§15.10).
-- **Anomaly memory — built, not wired (a documented limitation, §22.10).**
-  `memory/anomaly.py` is a deterministic, capped distillate of retained
-  surprises, cross-engagement, advisory, never evidence. Nothing imports it:
-  the abducer reads memory as an input *file*, so wiring it into a consumer is
-  a deliberate next step, not something that happened silently — pinned by
-  `tests/vuln_engine/test_inventory_pins.py`, which fails the day an import
-  appears without the reference changing with it.
+- **Anomaly memory — wired (H1).** `memory/anomaly.py` is a deterministic,
+  capped distillate of retained surprises, cross-engagement, advisory, never
+  evidence. `run_engine.py --remember` writes it (`anomaly_memory.json`,
+  distilled through the same `AnomalyLedger` ingest the engine itself uses, so
+  the file cannot hold a shape the log does not) and `--anomaly-memory-file`
+  feeds a prior engagement's distillate back into the abduction loop: the
+  driver's abduction pass asks `memory.anomaly.corroborated` whether the
+  anomaly's predicate family appears in the distillate, corroborated proposals
+  rank ahead of uncorroborated ones in the hypothesis pool (`scheduler/pool.py`,
+  `memory_backed`), and the LLM abduction junction's prompt carries the cells
+  via the `memory` input that had been plumbed since batch 2 and stayed dead
+  until now. The consumers are pinned by
+  `tests/vuln_engine/test_inventory_pins.py` — the distillate is advisory
+  input to the abduction loop (driver + CLI) and to nothing else: the day a
+  transport, a verifier or the policy gate imports it, the pin fails, because
+  a memory file that could route a packet or grade a verdict would not be
+  memory.
 
 The distillate is a count over **predicate families**, deliberately
 surface-free: a surprise that keeps recurring across engagements — the same
@@ -3204,10 +3225,23 @@ primitive so two distillates of the same input are byte-identical.
 - `distill(anomalies, cap)` → `{advisory: True, total, cap, truncated, cells}`;
   each cell is a family `(technique, kind, probe_suffix, field)` with a `count`
   and per-status counts.
+- `family_of(anomaly)` — the family one anomaly belongs to (the cell key).
+- `corroborated(record, anomaly)` — the one question a consumer is allowed to
+  ask: does this anomaly's family appear in a distillate? Kept in the memory
+  module so the family semantics cannot drift between consumers.
 - `write_memory(path, record)`, `read_memory(path)` — a missing/corrupt file
   yields an empty record.
 
-The abducer reads memory as an input file, so the run stays replayable and a
+What the wiring deliberately does *not* do (§22.10): the distillate carries no
+outcome — it counts surprises, not explanations that worked — so it ranks what
+to try first; it cannot prefer a proposal that previously proved, and it
+cannot demote one that previously failed. And because it is surface-free,
+every proposal one anomaly yields shares the anomaly's family, so a per-call
+rank inside `abduce()` would be uniform and could reorder nothing — the
+measurable effect lives in the pool, where proposals from different anomalies
+compete. `abduction/deterministic.abduce` stays memory-free, docstring-stated.
+
+The loop reads memory as an input file, so the run stays replayable and a
 wrong entry sits in the repository where an operator can read and correct it.
 ---
 
@@ -3833,6 +3867,10 @@ Timing verifier dose-response: `DOSE_SHORT_SECONDS = 2.0`,
 
 ### 22.10 Notebook of measured limitations (honest gaps)
 
+Reconciled against Appendices D–G and H (batch 4, H2): every item below was
+walked against what those batches closed. Closed gaps are gone from this
+list — a stale "boundary of truth" would mislead a reader who trusts the
+label — and what batch 4 itself left open is recorded here in the same voice.
 These are recorded here, not hidden, because they bound what the engine can do
 today:
 
@@ -3849,21 +3887,22 @@ today:
    not a technique contract limit. The two-gate prober independently measures
    six capabilities per surface (§19.3 — including `server_stores_input`,
    batch 2 Phase 2), so the closure pass is not the only measurement path.
-2. **Evidence-state gating.** `collect_candidates` filters on `scope_state`
-   only; the graph's `evidence_state` (`historical` / `dead` /
-   `actively_verified`) is not yet a hard filter.
-3. **No scope lookup by default.** `scope_state` is a caller-supplied callable;
+2. **No scope lookup by default.** `scope_state` is a caller-supplied callable;
    with none, `skipped_out_of_scope` is 0.
-4. **Recon collects `location: "query"` only.** The bridge maps every location
-   the graph carries — `query`, `body`, `path`, `header`, `url` — onto the
-   surface's `where` (G4, closed), but `url_endpoint/extract.py` writes only
-   `"query"` into `parameters.jsonl` today, so live graphs carry one location.
-   The fix is on the recon side (emit what was actually observed); the bridge
-   side is done and tested. `companions`/`read_back` remain always empty (the
-   stored-surface gap). Related (batch 2 Phase 4): a seed naming a
-   `header`/`url` surface is now refused loudly at seed validation (exit 2)
-   instead of silently doing nothing — the *probe support* for those `where`
-   values is still open.
+3. **`companions`/`read_back` are always empty** — the stored-surface gap.
+   The recon location half of the old item is closed (G3.1: the bundle crawler
+   records the position its own strings spell and the observations merge into
+   `parameters.jsonl`; G4 had already made the bridge carry every location the
+   graph observes), and so is the probe half (G3.2: the seed gate accepts all
+   five positions and `xss_reflected` aims by position). What remains is that
+   no surface declares the fixed form fields a stored submission must carry or
+   where stored input renders back, so `xss_stored` chains only where the
+   operator (or the two-gate prober) supplies them.
+4. **A header/url XSS surface is a lead, never a finding.** G3.2 gave the
+   reflected grammar positions for `header` and `url`, but the browser
+   execution probes stay on the three positions a navigation can reach — the
+   execution grammar that would confirm a header/url XSS is the named
+   follow-up (Appendix G's "deliberately left open").
 5. **One param carries one declared capability** (strongest-wins). A surface's
    `capabilities` set may additionally hold whatever the elicitors measured
    (§12.10).
@@ -3887,6 +3926,25 @@ today:
    to the flipped two-session read verifier is refused with a named reason
    (`kernel/claim.py`), because that verifier proves the read, not the
    change.
+9. **The anomaly distillate ranks; it does not remember outcomes (H1's
+   remainder).** The cross-engagement memory (§18) is a count over predicate
+   families, surface-free and outcome-free: it can put a recurring family's
+   proposal first and put its shape in the model's prompt, but it cannot
+   prefer a proposal whose experiment previously *proved* (success-aware
+   memory is unbuilt), it cannot demote one that previously failed, and it
+   carries no per-surface or per-plan granularity. It is advisory input to
+   the abduction loop and nothing else — pinned to exactly that by
+   `tests/vuln_engine/test_inventory_pins.py`.
+10. **The joined abduction economics attribute a call's cost evenly across
+   the proposals the join traces to it (H3's remainder).**
+   `views.abduction_cost_summary` splits an `abduce`/`propose.properties`
+   call's cost and tokens evenly over the surviving proposals it produced and
+   keeps latency at call granularity (worst of the calls that fed a bucket);
+   a call that produced nothing traceable lands in `unattributed` so the
+   channel's spend reconciles. The split is an honest approximation, not a
+   per-proposal meter — the junction does not price individual answers — and
+   every dollar figure ultimately derives from the static `MODEL_PRICES`
+   table, the same policy-statement caveat Appendix G records for it.
 
 These are the honest boundary of "everything the engine is today". A document
 that claimed more would be the error this whole design exists to prevent.
@@ -4350,15 +4408,18 @@ added 3 tests to `tests/ui/test_ui_server.py` (63 total, was 60). **Batch total:
 run_engine.py run_twogate.py service/ui` → clean, **152 source files**.
 
 **Deliberately left open.** Vuln-class breadth was out of scope for the whole
-batch — the seven classes and eight techniques stand as they were. The recon
+batch — the seven classes and eight techniques stand as they were. ~~The recon
 side now records more than one parameter location, but live graphs still carry
-one until a live harvest writes a second (§22.10 #4); the browser half cannot
-yet carry a header or rewrite a path template, so a header/url XSS surface is
-still a lead rather than a finding (§22.10 and the verifier nit). The
+one until a live harvest writes a second (§22.10 #4)~~ — **resolved (Appendix
+G, item 3.1)**: the bundle crawler records the position its own strings spell
+and its observations merge into `parameters.jsonl`, so live graphs now carry
+more than `query`. ~~The browser half cannot yet carry a header or rewrite a
+path template, so a header/url XSS surface is still a lead rather than a
+finding~~ — the *probe* half was **resolved (Appendix G, item 3.2)**; the
+execution grammar that would *confirm* one remains open (§22.10 item 4). The
 `header`/`url` surfaces are no longer refused — they are probeable through the
 `xss_reflected` canary and the two new builders, and the seed gate now accepts
-all five positions — but the probe grammars that would confirm them are still
-out of scope. P7 picked option (c) of the phase-7 menu; `--re-verify <candidate_id>` (a),
+all five positions. P7 picked option (c) of the phase-7 menu; `--re-verify <candidate_id>` (a),
 `--hint FILE` (d) and the §1 precision edits (e) remain unbuilt. The holding
 pen's severity weights are a static triage map in `world/views.py`
 (`SEVERITY_WEIGHTS`) — a policy statement pinned by test, not a scoring model;
@@ -4419,10 +4480,73 @@ source files**.
 
 **Deliberately left open.** The browser half cannot yet carry a header or
 rewrite a path template, so a header/url XSS surface is a lead, never a
-finding — the execution grammar that would confirm one is the named follow-up.
+finding — the execution grammar that would confirm one is the named follow-up
+(§22.10 item 4).
 `MODEL_PRICES` is a static triage table pinned by test, not a pricing feed;
 editing it edits an operator's reading of the spend, the same policy-statement
 caveat `SEVERITY_WEIGHTS` carries. The default per-run directory naming means
 the UI's run list shows one entry per *run* rather than per *target* — an
 intended consequence of 2.5, not a regression. Vuln-class breadth remains out
 of scope: the seven classes and eight techniques stand as they were.
+
+---
+
+## Appendix H — Gap-closure batch 4 (2026-10-08)
+
+Three items, same shape as Appendices E/F/G: the gap named, what closed it,
+where the proof lives. Vuln-class breadth was out of scope for this batch too
+— the seven classes and eight techniques are unchanged, same as every batch
+before it.
+
+| Item | The gap | What closed it | Tests |
+|---|---|---|---|
+| H1 | The anomaly distillate was the oldest unwired half of the memory pair: built and tested since the batch-2 pass while §18 said "nothing imports it". A predicate violation recurring across engagements against the same target taught the next run nothing — the deterministic abducer (the driver's abduction pass) consulted no memory, and the LLM junction's `memory` prompt input sat plumbed but dead | `memory/anomaly.py` gained the consumer-facing helpers (`family_of`, `corroborated`) and was wired into the abduction loop, read-only and advisory: the driver asks `corroborated(distillate, anomaly)` per retained surprise and stamps the matching proposals `memory_backed`, and the hypothesis pool ranks corroborated families first (`scheduler/pool.py`, `entries()` by `(not memory_backed, cell)` — a memoryless pool orders exactly as before); `--remember` now writes the pair (`memory.json` + `anomaly_memory.json`, distilled through the same `AnomalyLedger` ingest the engine uses) and `--anomaly-memory-file` feeds a prior engagement's distillate back, threaded through `Engine` and `Campaign` and into the LLM junction's `memory` prompt input (whitelisted, bounded cells — `llm/abduce.py`'s construction, previously dead). **Choice: proposal ranking, not novelty scoring.** `world/novelty.py` levels are recomputed by replay from the log alone (`levels_for_log`); letting an out-of-ledger memory file move a level would break the property that makes a level a fact rather than a boast. Ranking is an in-memory scheduling decision the log records the *outcome* of (the abduced round's note rows) without needing the input re-derivable — the same standing the reflect junction's re-ask has. And `abduce()` itself stays memory-free, docstring-stated: the distillate is surface-free, so every proposal one anomaly yields shares its family and a per-call rank would be uniform — the measurable effect lives in the pool, where proposals from different anomalies compete | `test_anomaly_memory_wiring.py` (5, incl. the repeat-engagement ranking flip end to end); the memory-pair pin rewritten in `test_inventory_pins.py` (consumers = driver + CLI, nothing else) |
+| H2 | §22.10 billed itself as "the honest boundary of everything the engine is today" and was stale: its item 4 still said recon collects `location: "query"` only (closed by G3.1) and that header/url probe support "is still open" (closed by G3.2); item 2's evidence-state gating had been closed since G5 | documentation-only reconciliation: every item walked against D–G; closed items removed (old #2), partial closures split so exactly what remains is named (old #4 → the `companions`/`read_back` stored-surface gap, plus the header/url *execution* grammar as its own item); batch 4's own remainders added honestly (§22.10 items 9–10); §17's recon-coverage note and Appendix F's "deliberately left open" paragraph updated in Appendix E's resolved-marking style; §18 rewritten to the wired pair | docs only — the existing suite is the regression guard |
+| H3 | Cost-per-proven-finding for the LLM abduction channel existed only as three unjoined views (`llm_cost_summary`, `abduction_summary`, `findings`); answering "what did one verified finding cost out of the LLM abducer, against the deterministic abducer's zero" meant hand-correlating the proposal/candidate lineage | `views.abduction_cost_summary(log)` — a pure view, same pattern as `holding_pen_summary`/`abduction_summary` (takes a `LogView`, returns plain data, nothing holds state) — joins proposal → validated verdict → (expressible_now) → the abduced experiment (`note stage=hypothesis.abduced`) → its candidates → (proven) → finding, and sums cost/tokens across the chain, split by rule (`llm_abduction` vs every deterministic rule — the control arm's number is exactly zero, stated). Cost and tokens split evenly across the proposals a call's join traces to it (an `abduce` call joins on the anomaly arm its input carries; a `propose.properties` call feeds the property channel); latency stays at call granularity (worst); a call nothing traces to lands in `unattributed` so the spend reconciles. Surfaced on `RunReport.abduction_cost` (the way `llm_cost` and `holding_pen` are), in `views.summary`, in `report.json`, and in the CLI when the run used the model | `world/test_abduction_cost_summary.py` (6, incl. the row-by-row join, the rule-not-surface attribution pin, the zeroed shape, and a driver-surface test) |
+
+**Invariants held.** H1 is the first time memory from a prior engagement is
+allowed to influence what gets proposed in a new one, so it is worth spelling
+out why the zero-LLM-in-the-deciding-path claim survives, and more: the
+**zero-memory-in-the-deciding-path** claim survives with it. The distillate
+never reaches the deciding path — the paths that decide are the validator's
+three-valued check, the verifier's `check_independence`, and the gate, and the
+distillate touches none of them: it changes only the *order* the abduced round
+tries already-validated explanations in, and the cells the model is *told
+about* in its prompt (typed structural fields, never bodies). A corroborated
+proposal is still a hypothesis-grade lead; it becomes a finding only through
+the ordinary probe, the ordinary gate, and an independent verifier in a
+different class — the test pins that the validator's verdicts, the proposal
+set, and the findings are identical with and without memory. The influence is
+read-only at the file (a wrong entry sits in the repository where an operator
+can read and correct it), advisory at the row (`memory_backed` is a fact the
+ledger records about a ranking decision, the way the reflect junction's re-ask
+is), and memoryless-identical at the pool (no distillate ⇒ the exact cell-key
+order of every earlier batch, so the no-key, no-memory run is byte-for-byte
+the engine of Appendix G). H2 adds no code. H3 is pure derivation over rows
+the log already holds — the ledger stays the only truth the report reads, a
+keyless run's channel cost is exactly zero and the report says so, and the
+split-then-round arithmetic carries its approximation in the view's docstring
+and §22.10 rather than presenting an even split as a meter.
+
+**Verified test count, counted from the item test files** (collect-only, not
+guessed): H1 — 5 (`test_anomaly_memory_wiring.py`: the distillate helpers, the
+file round-trip, the pool ranking, the repeat-engagement ranking flip end to
+end, the LLM prompt cells) plus the rewritten memory-pair pin in
+`test_inventory_pins.py` (1, was 1); H3 — 6 (`world/test_abduction_cost_summary.py`).
+Final verification (2026-10-08): `pytest tests/vuln_engine tests/ui` → **961
+passed, 2 skipped, 0 failed** (the skips are OOB-collaborator-gated; a
+post-run `PythonFinalizationError` from the recon side's psycopg pool at
+interpreter shutdown is environmental noise after the summary — the run exits
+0); `mypy service/vuln_engine run_engine.py run_twogate.py service/ui` →
+clean, **152 source files**.
+
+**Deliberately left open.** Success-aware memory: the distillate counts
+surprises, not explanations that worked, so it can rank a recurring family
+first but cannot prefer the proposal that previously proved (§22.10 item 9).
+The junction does not price individual answers, so the cost view's per-proposal
+split is an honest even share, not a meter (§22.10 item 10). The campaign's
+per-round engines receive the distillate the same way the single pass does,
+but no test drives a multi-round memory-shaped campaign end to end — the
+ranking is exercised at the driver level, where it lives. Vuln-class breadth
+remains out of scope: the seven classes and eight techniques stand as they
+were.
