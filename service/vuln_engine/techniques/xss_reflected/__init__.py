@@ -43,6 +43,16 @@ class XssReflected:
     #: the measured route reachable instead of a silent dead arm.
     gate_capabilities = (CAP_PUBLIC_PARAM, CAP_RESPONSE_REFLECTS_INPUT)
 
+    #: The positions this technique's canary can aim at (item 3.2) — the
+    #: classic core's three plus ``header``/``url``, reached through the
+    #: shared ``header_request`` / ``with_url_parameter`` builders. Kept here
+    #: rather than widened in ``EngagementSeed.with_param`` on purpose: the
+    #: kernel accessor still answers for the *classic* grammar every technique
+    #: inherits, and only a technique whose probes actually aim at the new
+    #: positions offers itself to them. The manifest's ``gate_where`` names the
+    #: same set for the loud where-gate.
+    CANARY_WHERE = ("query", "body", "path", "header", "url")
+
     def surfaces(self, seed: EngagementSeed) -> list[Surface]:
         """Parameterised surfaces, in the order the operator declared them.
 
@@ -55,13 +65,20 @@ class XssReflected:
         *measured* ``public_param`` riding the surface's capabilities set, and a
         surface the reflection elicitor measured as reflecting (Capability
         Closure). ``claims()`` is the one accessor that reads both sources.
+        Item 3.2 widens the position filter to this technique's own
+        ``CANARY_WHERE``: a header or url surface is probeable here now, while
+        the kernel's classic accessor stays the classic grammar.
         """
         return [
             surface
-            for surface in seed.with_param()
-            if surface.capability in ("", CAP_PUBLIC_PARAM)
-            or surface.claims(CAP_PUBLIC_PARAM)
-            or surface.claims(CAP_RESPONSE_REFLECTS_INPUT)
+            for surface in seed.surfaces
+            if surface.param
+            and surface.where in self.CANARY_WHERE
+            and (
+                surface.capability in ("", CAP_PUBLIC_PARAM)
+                or surface.claims(CAP_PUBLIC_PARAM)
+                or surface.claims(CAP_RESPONSE_REFLECTS_INPUT)
+            )
         ]
 
     def hypotheses(self, surface: Surface) -> list[Hypothesis]:

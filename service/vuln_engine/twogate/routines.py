@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..kernel.technique import CONFIRM_STORED_EXECUTE
 from .spec import (
     ORACLE_AUTHZ_DIFFERENTIAL,
     ORACLE_DATA_EXTRACTED,
@@ -77,6 +78,8 @@ class Routine:
     canary: str = ""
     #: The marker name a browser oracle asks for.
     marker: str = ""
+    #: The JavaScript expression that answers the marker (browser routines).
+    marker_expression: str = ""
     vuln_class: str = ""
 
     def to_dict(self) -> dict:
@@ -91,6 +94,8 @@ class Routine:
             "margin": self.margin,
             "dose_short_payload": self.dose_short_payload,
             "dose_long_payload": self.dose_long_payload,
+            "marker": self.marker,
+            "marker_expression": self.marker_expression,
             "preconditions": list(self.preconditions),
             "transports": list(self.transports),
             "vuln_class": self.vuln_class,
@@ -144,6 +149,18 @@ _SHELL_DOSE_LONG = "ve-noop0; sleep 6.0"
 #: The collaborator marker an SSRF routine injects; the runner replaces the
 #: sentinel with a real per-probe URL before sending.
 _SSRF_PAYLOAD = "http://ooburlsentinel_ssrf/probe"
+
+#: The stored-XSS routine's payload and execution signal. The payload is the
+#: reflected grammar's most common breakout (double-quoted attribute) with the
+#: stored-XSS verifier's own expected dialog text, so the proof is the same two
+#: re-inject-then-read-back experiment the classic candidate's confirmation
+#: spec names — the routine carries the payload family, the classic verifier
+#: (``verification/stored_xss_runner.py``) runs it.
+_XSS_STORED_PAYLOAD = (
+    '"><script>window.__ve_stored_exec=1;confirm(\'vuln-engine-xss\')</script>'
+)
+_XSS_STORED_MARKER = "xss_stored.dq_attr"
+_XSS_STORED_MARKER_EXPRESSION = "window.__ve_stored_exec === 1"
 
 #: The value a UNION-based extraction routine reads back. It is deliberately
 #: NOT spelled in any payload: the payloads ask the database to *compute* it
@@ -224,6 +241,21 @@ ROUTINES: tuple[Routine, ...] = (
         # target to answer a query whose result we chose.
         preconditions=(CAP_PUBLIC_PARAM,),
         transports=("http1",),
+    ),
+    Routine(
+        routine_id="xss.stored.v1",
+        label="xss_stored",
+        vuln_class="xss",
+        confirm_kind=CONFIRM_STORED_EXECUTE,
+        oracle=ORACLE_SCRIPT_EXECUTED,
+        injected_payloads=(_XSS_STORED_PAYLOAD,),
+        samples=1,
+        marker=_XSS_STORED_MARKER,
+        marker_expression=_XSS_STORED_MARKER_EXPRESSION,
+        # A measured storage fact is the door; the delegated classic verifier
+        # still re-injects and proves execution in a browser.
+        preconditions=(CAP_PERSISTENT_STORAGE,),
+        transports=("http1", "browser"),
     ),
     Routine(
         routine_id="ssrf.oob.v1",

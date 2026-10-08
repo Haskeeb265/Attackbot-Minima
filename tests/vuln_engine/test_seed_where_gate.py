@@ -1,15 +1,14 @@
 """The loud where-gate: a declared surface nobody accepts is refused, named.
 
-Batch 2, Phase 4. ``Surface.where`` speaks five positions but no registered
-technique's probing grammar accepts ``header`` or ``url`` yet — so a surface
-declared at one of those positions used to be *silently skipped* (filtered by
-``EngagementSeed.with_param``, or gated off technique by technique), and a run
-ended looking like a clean negative when it had actually never probed a
-declared surface. The gate makes that loud: seed assembly refuses the surface
-with a named reason, and the accepted set is *derived from the registry*
+Batch 2, Phase 4; item 3.2 of batch 3 widened the stock registry: the
+``xss_reflected`` manifest declares ``gate_where`` covering all five positions
+(its canary aims at header via ``header_request`` and at url via
+``with_url_parameter``), so with the stock registry nothing is refused and the
+interesting question moves to registries whose techniques accept fewer. The
+invariant is unchanged — the accepted set is *derived from the registry*
 (``gate_where`` on a manifest, the classic core default when absent), the same
 way the capability gate's vocabulary is derived — a technique that starts
-accepting ``header`` widens the accepted set by declaring it, never by editing
+accepting a position widens the accepted set by declaring it, never by editing
 a second copy of the tuple.
 """
 
@@ -45,15 +44,17 @@ def registry() -> TechniqueRegistry:
 def test_the_accepted_set_covers_every_position_some_technique_accepts(
     registry: TechniqueRegistry,
 ) -> None:
-    # No manifest declares gate_where yet, so the set is the classic core
-    # default — spelled in one place (registry.DEFAULT_WHERE_GRAMMAR), not
-    # re-transcribed here.
+    # Item 3.2: the stock registry's xss_reflected declares gate_where over all
+    # five positions, so the derived set is the full vocabulary — derived, not
+    # transcribed (assert against DEFAULT_WHERE_GRAMMAR ∪ the declaration).
     from service.vuln_engine.registry import DEFAULT_WHERE_GRAMMAR
 
-    assert registry.accept_where() == frozenset(DEFAULT_WHERE_GRAMMAR)
+    assert registry.accept_where() == frozenset(
+        {*DEFAULT_WHERE_GRAMMAR, "header", "url"}
+    )
     assert "query" in registry.accept_where()
-    assert "header" not in registry.accept_where()
-    assert "url" not in registry.accept_where()
+    assert "header" in registry.accept_where()
+    assert "url" in registry.accept_where()
 
 
 def _widened_registry(registry: TechniqueRegistry) -> TechniqueRegistry:
@@ -86,7 +87,12 @@ def _widened_registry(registry: TechniqueRegistry) -> TechniqueRegistry:
 def test_a_manifest_that_declares_gate_where_widens_the_accepted_set(
     registry: TechniqueRegistry,
 ) -> None:
-    widened = _widened_registry(registry)
+    # Over a classic-core-only base (the pre-3.2 shape) the widener's
+    # declaration is visible exactly: header joins, url does not.
+    base = TechniqueRegistry(
+        [r for r in registry.all() if not r.manifest.gate_where]
+    )
+    widened = _widened_registry(base)
     assert widened.accept_where() == frozenset({"query", "body", "path", "header"})
 
 
@@ -123,15 +129,25 @@ def test_a_manifest_cannot_declare_an_unknown_gate_where_value() -> None:
 def test_a_header_or_url_surface_is_refused_with_a_named_reason(
     registry: TechniqueRegistry,
 ) -> None:
+    # A registry whose techniques accept only the classic core (the pre-3.2
+    # shape, and any future technique set that aims nowhere new) still refuses
+    # header/url loudly. Built from one registration, not by mutating the real
+    # registry: the accepted set is derived, so the derivation is what's tested.
+    classic_only = TechniqueRegistry(
+        [r for r in registry.all() if not r.manifest.gate_where]
+    )
+    assert classic_only.accept_where() == frozenset(
+        ("query", "body", "path")
+    )
     for where in ("header", "url"):
         seed = EngagementSeed(target="127.0.0.1", surfaces=(_surface(where),))
-        problems = validate_seed(seed, registry)
+        problems = validate_seed(seed, classic_only)
         assert len(problems) == 1
         problem: SurfaceProblem = problems[0]
         assert problem.surface.where == where
         assert f"where={where!r}" in problem.reason
         assert "not accepted by any registered technique" in problem.reason
-        assert HEADER_URL_NOTE.split(" — ")[0] in problem.reason
+        assert HEADER_URL_NOTE in problem.reason
 
 
 def test_query_body_and_path_surfaces_pass_the_gate(
@@ -147,7 +163,13 @@ def test_query_body_and_path_surfaces_pass_the_gate(
 def test_a_registry_that_accepts_header_stops_refusing_it(
     registry: TechniqueRegistry,
 ) -> None:
-    widened = _widened_registry(registry)
+    # A header-only declaration widens exactly that far: header passes, and —
+    # over a classic-core-only base — url stays refused. The base excludes the
+    # declaring techniques so the set is exactly what this widener accepts.
+    base = TechniqueRegistry(
+        [r for r in registry.all() if not r.manifest.gate_where]
+    )
+    widened = _widened_registry(base)
     seed = EngagementSeed(target="127.0.0.1", surfaces=(_surface("header"),))
     assert validate_seed(seed, widened) == []
     # ...while url stays refused — the set is exactly what the registry accepts.
@@ -166,11 +188,14 @@ def test_the_problem_row_carries_the_surface_for_the_report(
     registry: TechniqueRegistry,
 ) -> None:
     surface = _surface("header")
+    classic_only = TechniqueRegistry(
+        [r for r in registry.all() if not r.manifest.gate_where]
+    )
     (problem,) = validate_seed(
-        EngagementSeed(target="127.0.0.1", surfaces=(surface,)), registry
+        EngagementSeed(target="127.0.0.1", surfaces=(surface,)), classic_only
     )
     row = problem.to_dict()
     assert row["surface"] == surface.key
     assert row["where"] == "header"
     assert row["label"] == "the declared parameter"
-    assert "header/url" in row["reason"]
+    assert "probeable exactly when" in row["reason"]

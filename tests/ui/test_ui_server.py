@@ -353,6 +353,22 @@ def get(url: str) -> tuple[int, dict | str]:
         return status, body
 
 
+def get_with_headers(url: str, headers: dict) -> tuple[int, dict | str]:
+    """GET with explicit headers (e.g. an Authorization bearer)."""
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=10) as res:
+            body = res.read().decode("utf-8")
+            status = res.status
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        status = exc.code
+    try:
+        return status, json.loads(body)
+    except ValueError:
+        return status, body
+
+
 def post(url: str, payload: dict) -> tuple[int, dict]:
     """POST as the app does: JSON plus the X-Requested-With guard header."""
     request = urllib.request.Request(
@@ -483,6 +499,59 @@ def test_the_server_accepts_loopback_hosts_without_expose(monkeypatch):
     assert created["addr"][0] == "127.0.0.1"
     # And the non-loopback refusal does not fire for a loopback alias.
     assert server_mod.main(["--host", "localhost", "--port", "0"]) == 0
+
+
+def test_exposing_without_an_auth_token_is_refused_at_startup(capsys):
+    # Item 2.3: an exposed UI without a bearer token hands the host's
+    # job-starting authority to whoever can route to the port, so main()
+    # refuses before any socket is opened — the same fail-before-bind
+    # pattern the loopback check pins above.
+    assert server_mod.main(["--host", "0.0.0.0", "--expose"]) == 2
+    assert "--auth-token" in capsys.readouterr().err
+    # Loopback mode never needs a token, exposed or not.
+    assert server_mod.main(["--expose", "--host", "127.0.0.1"]) == 2
+    assert "--auth-token" in capsys.readouterr().err
+
+
+def test_an_exposed_server_requires_the_bearer_token():
+    # The real handler over real HTTP, with the token main() would set.
+    handler = type("H", (UiHandler,), {})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.auth_token = "s3cret"  # type: ignore[attr-defined]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        # No Authorization header at all: refused on the headers alone.
+        status, body = get(base + "/api/state")
+        assert status == 401
+        assert "authentication required" in body["error"]
+        # A wrong token is the same refusal...
+        status, body = get_with_headers(
+            base + "/api/state", {"Authorization": "Bearer nope"}
+        )
+        assert status == 401
+        # ...and the auth check fires before the CSRF guard: a bearer-less
+        # POST never reaches dispatch, so the error is 401, not 403.
+        request = urllib.request.Request(
+            base + "/api/jobs", data=b"{}",
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as res:
+                status = res.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        assert status == 401
+        # The right token passes and the response is the ordinary view.
+        status, payload = get_with_headers(
+            base + "/api/state", {"Authorization": "Bearer s3cret"}
+        )
+        assert status == 200
+        assert "programs" in payload
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 # --------------------------------------------------------------------------- #

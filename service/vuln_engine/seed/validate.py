@@ -31,10 +31,13 @@ from ..kernel.technique import EngagementSeed, Surface
 from ..registry import TechniqueRegistry
 
 #: The reason spelled on every where-refusal — one sentence, shared, so a
-#: report's reasons and a test's assertions read the same words.
+#: report's reasons and a test's assertions read the same words. Since batch
+#: 3's item 3.2 ``xss_reflected`` accepts all five positions, so with the
+#: stock registry nothing is refused; the gate still fires for any registry
+#: whose techniques accept fewer.
 HEADER_URL_NOTE = (
-    "no registered technique's probing grammar accepts it yet — header/url "
-    "support is a named open follow-up (batch 2 deliberately left it open)"
+    "no registered technique's probing grammar accepts it — a position is "
+    "probeable exactly when some registered technique's grammar aims there"
 )
 
 

@@ -122,7 +122,7 @@ class ScriptedBrowser:
     driver: str = "scripted"
     runs: list[str] = field(default_factory=list)
 
-    def run(self, url: str, *, markers: dict[str, str] | None = None, at: float = 0.0) -> RawBrowserRun:
+    def run(self, url: str, *, markers: dict[str, str] | None = None, at: float = 0.0, subresource_gate=None) -> RawBrowserRun:
         self.runs.append(url)
         if not self.ok:
             return RawBrowserRun(url=url, driver=self.driver, ok=False, error=self.error)

@@ -17,8 +17,8 @@ the target. Confirming a blind fetch must not mean asking the target again.
 
 from __future__ import annotations
 
-from ...kernel.evidence import EVIDENCE_REFLECTION, Evidence
-from ...kernel.observation import OBS_REFLECTION, Observation
+from ...kernel.evidence import EVIDENCE_HYPOTHESIS, EVIDENCE_REFLECTION, Evidence
+from ...kernel.observation import OBS_HTTP_RESPONSE, OBS_REFLECTION, Observation
 from ...kernel.technique import Hypothesis, oob_sentinel
 from ...kernel.verdict import Candidate
 from ..common import surface_id_prefix, with_parameter
@@ -46,13 +46,66 @@ def _echo(observations: list[Observation], probe: str) -> Observation | None:
     return found[-1] if found else None
 
 
+def _sent_exchange(observations: list[Observation], probe: str) -> Observation | None:
+    """The response observation for *this probe*, when the exchange completed.
+
+    The blind-SSRF shape has no echo: the target fetched our collaborator URL
+    and its own response says nothing about it. What this module can still
+    honestly claim is *hypothesis* — "the probe was submitted and the server
+    answered without a transport failure" — and that claim rests on the
+    ``observation.http`` row the driver always records for a sent probe. The
+    verifier (``OobVerifier``, ``oob`` grade) still has to prove the fetch
+    actually happened from the collaborator's own interaction record; nothing
+    here claims it did.
+    """
+    found = [
+        item
+        for item in observations
+        if item.kind == OBS_HTTP_RESPONSE and item.probe == probe and item.payload.get("ok")
+    ]
+    return found[-1] if found else None
+
+
 def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[Candidate]:
     """Candidates this hypothesis's observations support.  Usually zero or one."""
     surface = hypothesis.surface
     probe = probe_grammar.probe_id(hypothesis)
     echo = _echo(observations, probe)
-    if echo is None:
+    sent = _sent_exchange(observations, probe)
+    if echo is None and sent is None:
         return []
+    # Two grades of lead, honestly separated:
+    #
+    # * an echo in the target's own response keeps ``reflection`` — the
+    #   response *contained our collaborator's answer*, which is stronger than
+    #   "we asked and nothing contradicts a fetch";
+    # * no echo (the common blind-SSRF shape) is only ``hypothesis``: the probe
+    #   was submitted and the target answered, which is what the proposer
+    #   measured, nothing more. Either way the finding-grade proof is the
+    #   same ``oob.read`` spec below, settled by OobVerifier from the
+    #   collaborator's interaction record — never by this module.
+    if echo is not None:
+        grade = EVIDENCE_REFLECTION
+        evidence_kind = OBS_REFLECTION
+        evidence_payload = dict(echo.payload)
+        evidence_probe = echo.probe
+        evidence_at = echo.at
+        summary = (
+            f"the response to a caller-supplied {surface.param!r} contained our "
+            "collaborator's answer, which a server-side fetch would explain"
+        )
+    else:
+        grade = EVIDENCE_HYPOTHESIS
+        evidence_kind = OBS_HTTP_RESPONSE
+        evidence_payload = dict(sent.payload) if sent is not None else {}
+        evidence_probe = probe
+        evidence_at = sent.at if sent is not None else 0.0
+        summary = (
+            f"a caller-supplied {surface.param!r} was submitted with a collaborator "
+            "URL and the target answered without error — consistent with a blind "
+            "server-side fetch; only the collaborator's interaction record, which "
+            "the confirmation spec reads, can prove it"
+        )
     # The URL as it was actually sent, with the placeholder visible: the real
     # collaborator URL is per-probe and only meaningful while the collaborator is
     # up, so showing where it goes is more honest than inventing a working link.
@@ -74,16 +127,13 @@ def candidates(hypothesis: Hypothesis, observations: list[Observation]) -> list[
                 "where": surface.where,
                 "host": surface.host,
             },
-            summary=(
-                f"the response to a caller-supplied {surface.param!r} contained our "
-                "collaborator's answer, which a server-side fetch would explain"
-            ),
+            summary=summary,
             evidence=Evidence(
-                kind=OBS_REFLECTION,
-                grade=EVIDENCE_REFLECTION,
-                payload=dict(echo.payload),
-                probe=echo.probe,
-                at=echo.at,
+                kind=evidence_kind,
+                grade=grade,
+                payload=evidence_payload,
+                probe=evidence_probe,
+                at=evidence_at,
             ),
             confirm={
                 "kind": "oob.read",

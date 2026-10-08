@@ -31,11 +31,12 @@ from urllib.parse import urlsplit
 
 from ..kernel.evidence import EVIDENCE_HYPOTHESIS
 from ..kernel.exchange import RawHttpExchange
-from ..kernel.technique import Surface, oob_sentinel
+from ..kernel.technique import CONFIRM_STORED_EXECUTE, Surface, oob_sentinel
 from ..kernel.verdict import Verdict
 from ..policy.gate import EffectRequest, PolicyGate
 from ..techniques.common import json_body_request, with_parameter
 from ..verification.authorization_verifier import AuthorizationVerifier
+from ..verification.stored_xss_runner import StoredXssVerifier
 from ..verification.timing_verifier import TimingVerifier
 from .spec import (
     ConfirmationResult,
@@ -58,6 +59,9 @@ TWOGATE_CONFIRM_KINDS: tuple[str, ...] = (
     "timing.differential",
     "differential.extraction",
     "differential.response",
+    # Item 1.3: the stored route answers through the classic
+    # :class:`StoredXssVerifier` (one measurement policy, see the module doc).
+    "xss_stored.execute",
 )
 
 
@@ -81,7 +85,24 @@ class ConfirmationSpecRunner:
             return self._run_authorization(spec)
         if spec.kind == "timing.differential":
             return self._run_timing(spec)
+        if spec.kind == CONFIRM_STORED_EXECUTE:
+            return self._run_stored(spec)
         return self._run_response(spec)
+
+    def _run_stored(self, spec: ConfirmationSpec) -> ConfirmationResult:
+        """Delegate the stored route to the classic ``StoredXssVerifier``.
+
+        The spec's payload, companion fields, read-back page and marker are
+        projected onto the candidate-confirm dict the classic verifier reads,
+        so the proof is the same re-inject-then-browser-read-back chain a
+        classic candidate gets — a new label proposes it, nothing new
+        implements it.
+        """
+        verifier = StoredXssVerifier(self.gate)
+        verdict = verifier.verify(
+            _stored_candidate(spec)
+        )
+        return _from_verdict(spec, verdict)
 
     # ------------------------------------------------------------------ #
     # routes delegated to the classic verifiers (one measurement policy)
@@ -239,6 +260,62 @@ class ConfirmationSpecRunner:
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
+
+
+def _stored_candidate(spec: ConfirmationSpec):
+    """The classic verifier's input shape for *spec* (a one-off Candidate).
+
+    The verifier reads ``confirm`` and the candidate's id/technique only; the
+    proposer grade is the hypothesis the capability agent carries, and the
+    injected payload plus the surface's companions form the inject step.
+    """
+    from ..kernel.evidence import EVIDENCE_HYPOTHESIS as _GRADE
+    from ..kernel.observation import OBS_HTTP_RESPONSE as _KIND
+    from ..kernel.verdict import Candidate as _Candidate
+    from ..kernel.evidence import Evidence as _Evidence
+
+    return _Candidate(
+        id=f"confirm:{spec.routine_id}",
+        technique="capability_agent",
+        vuln_class="xss",
+        surface={
+            "url": spec.url,
+            "param": spec.param,
+            "where": spec.where,
+            "host": spec.host,
+        },
+        summary="two-gate stored-xss confirmation",
+        evidence=_Evidence(
+            kind=_KIND,
+            grade=_GRADE,
+            payload={"rationale": "measured server_stores_input capability"},
+        ),
+        confirm={
+            "kind": CONFIRM_STORED_EXECUTE,
+            "inject": {
+                "url": spec.url,
+                "method": "POST",
+                "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+                "content": _form_body(spec, spec.param, spec.injected_payload),
+            },
+            "read_back": spec.read_back or spec.url,
+            "markers": {spec.marker or "ve-marker": spec.marker_expression or "1"},
+            "context": "double_quoted_attribute",
+            "dialog": "vuln-engine-xss",
+        },
+        payload=spec.injected_payload,
+    )
+
+
+def _form_body(spec: ConfirmationSpec, param: str, value: str) -> str:
+    """The urlencoded inject body: the payload plus the surface's companions."""
+    from urllib.parse import quote
+
+    pairs = [(param, value)]
+    for name, fixed in (spec.companions or {}).items():
+        if name != param:
+            pairs.append((name, fixed))
+    return "&".join(f"{quote(name, safe='')}={quote(item, safe='')}" for name, item in pairs)
 
 
 def _from_verdict(spec: ConfirmationSpec, verdict: Verdict) -> ConfirmationResult:

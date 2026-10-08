@@ -13,6 +13,7 @@ vulnerability is, the contract would be leaking.
 from __future__ import annotations
 
 import json
+import re
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from ..kernel.technique import Surface
@@ -91,6 +92,44 @@ def with_parameter(url: str, param: str, value: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
+def header_request(
+    surface: Surface, param: str, value: str
+) -> tuple[str, dict[str, str], str]:
+    """``(url, headers, content)`` with ``{param: value}`` riding a header.
+
+    Item 3.2's first new position. Where a query parameter travels in the URL
+    and a JSON API's parameter travels in the body, a ``where="header"``
+    surface's parameter travels as a request header named after the parameter —
+    the shape an app reads ``X-Tenant-Id``-style inputs in. Same return shape
+    and the same discipline as :func:`json_body_request`: the transport stays
+    dumb, the gate still sees only whitelisted detail fields.
+    """
+    return surface.url, {param: value}, ""
+
+
+def with_url_parameter(url: str, param: str, value: str) -> str:
+    """*url* with its ``{param}`` / ``:param`` placeholder set to *value*.
+
+    Item 3.2's second new position: a ``where="url"`` surface's parameter is
+    part of the URL's own structure, spelled the way the app's routes spell it
+    (``/users/{id}`` / ``/users/:id``). The value is percent-encoded like every
+    other payload this engine puts on a wire. **Loud, not silent:** a URL with
+    no placeholder for *param* is a declaration the probe cannot aim at, so
+    this raises instead of quietly injecting somewhere nobody meant — the same
+    refusal discipline the seed gate applies at assembly.
+    """
+    parts = urlsplit(url)
+    name = re.escape(param)
+    placeholder = re.compile(rf"\{{{name}\}}|:{name}(?![a-zA-Z0-9_])")
+    if not placeholder.search(parts.path):
+        raise ValueError(
+            f"where=url surface has no {{{param}}}/:{param} placeholder to aim "
+            f"at: {url!r} — spell the parameter's position in the path"
+        )
+    path = placeholder.sub(quote(value, safe=""), parts.path)
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+
 def json_body_request(
     surface: Surface, param: str, value: str
 ) -> tuple[str, dict[str, str], str]:
@@ -126,7 +165,9 @@ __all__ = [
     "DOM_Q_URLATTR",
     "JSON_CONTENT_TYPE",
     "dom_marker",
+    "header_request",
     "json_body_request",
     "surface_id_prefix",
     "with_parameter",
+    "with_url_parameter",
 ]

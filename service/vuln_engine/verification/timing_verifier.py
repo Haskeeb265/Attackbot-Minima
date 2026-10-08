@@ -350,6 +350,14 @@ class TimingVerifier:
             exchange: RawHttpExchange = outcome.effect
             if not exchange.ok:
                 return None
+            transports = getattr(self.gate, "_http", None)
+            if transports is not None and getattr(transports, "throttled", False):
+                # Item 2.1: the transport honors a Retry-After inside the
+                # measured window, so this elapsed is the rate limiter's wait
+                # plus the server's time — not a comparable timing sample. The
+                # population refuses rather than reports, which is the honest
+                # shape: an incomplete population is inconclusive.
+                return None
             samples.append(exchange.elapsed)
         return samples
 

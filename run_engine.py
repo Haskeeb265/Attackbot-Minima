@@ -32,13 +32,16 @@ import argparse
 import json
 import os
 import sys
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent
 
 from service.recon_pipeline.platform import dispatch, escalation  # noqa: E402
-from service.recon_pipeline.platform.scope import ScopeEngine  # noqa: E402
+from service.recon_pipeline.platform.scope import IN_SCOPE, ScopeEngine  # noqa: E402
 from service.recon_pipeline.platform.receipt import Receipt  # noqa: E402
 from service.vuln_engine.abduction.deterministic import abduce  # noqa: E402
 from service.vuln_engine.abduction.validator import Validator  # noqa: E402
@@ -628,6 +631,45 @@ def parse_surface(token: str) -> Surface:
     )
 
 
+def operator_string_problems(args: argparse.Namespace) -> list[str]:
+    """Item 2.6 — operator strings that ride protocol boundaries, checked.
+
+    ``--cookie``/``--session-b-cookie`` become a raw ``Cookie`` header value
+    (``policy/gate.py`` → the http transport), and the collaborator URLs become
+    the base of payload URLs the target is asked to fetch: a CR or LF in any of
+    them is a header-injection attempt against our own transport. A header
+    value must also be latin-1 encodable — better refused here than as a
+    UnicodeEncodeError halfway through a run. Returns human-readable problems;
+    empty means the strings are safe to wire.
+    """
+    problems: list[str] = []
+    for label, tokens in (
+        ("cookie", args.cookie),
+        ("session-b-cookie", args.session_b_cookie),
+    ):
+        for token in tokens:
+            name, sep, value = token.partition("=")
+            if not sep:
+                problems.append(f"--{label} {token!r} is not NAME=VALUE")
+                continue
+            for part_label, part in (("name", name), ("value", value)):
+                if any(char in part for char in "\r\n\x00"):
+                    problems.append(
+                        f"--{label} {part_label} contains CR/LF/NUL — header injection"
+                    )
+                try:
+                    part.encode("latin-1")
+                except UnicodeEncodeError:
+                    problems.append(
+                        f"--{label} {part_label} is not latin-1 encodable (a header value must be)"
+                    )
+    for label in ("collaborator-url", "collaborator-local", "output-dir"):
+        value = getattr(args, label.replace("-", "_"))
+        if value and any(char in value for char in "\r\n\x00"):
+            problems.append(f"--{label} contains CR/LF/NUL")
+    return problems
+
+
 def check_seed_where(profile: Profile) -> int:
     """The loud where-gate (batch 2, Phase 4): refuse what no technique accepts.
 
@@ -677,6 +719,12 @@ def main(argv: list[str] | None = None) -> int:
         help="a declared input surface (repeatable)",
     )
     parser.add_argument("--declare", action="append", default=[], help="extra declared domain/CIDR")
+    parser.add_argument(
+        "--allow-unscoped",
+        action="store_true",
+        help="run even when a --surface host is not in the declared scope (the "
+        "gate still refuses every request to it; this only waives the startup check)",
+    )
     parser.add_argument("--collaborator-url", default="", help="collaborator URL the TARGET must reach")
     parser.add_argument("--collaborator-local", default="", help="collaborator URL we read records from")
     parser.add_argument("--chrome-path", default="", help="explicit chrome/chromium binary")
@@ -700,7 +748,18 @@ def main(argv: list[str] | None = None) -> int:
         help="per-host action budget (default 50; raise it for wide surface sets - a policy number, not a safety one)",
     )
     parser.add_argument("--driver", default="auto", choices=("auto", "playwright", "cdp"))
-    parser.add_argument("--output-dir", default="", help="where the run writes (default: per target)")
+    parser.add_argument("--output-dir", default="", help="where the run writes (default: a fresh per-run directory under output/vuln_engine)")
+    parser.add_argument(
+        "--run-id",
+        default="",
+        metavar="NAME",
+        help="name this run's directory under output/vuln_engine (mutually exclusive with --output-dir)",
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="append to a run directory that already holds a world.jsonl, deliberately (the ledger then mixes both runs)",
+    )
     parser.add_argument("--force", action="store_true", help="ignore the receipts ledger")
     parser.add_argument(
         "--elicit",
@@ -826,6 +885,14 @@ def main(argv: list[str] | None = None) -> int:
     # one HERE, before any graph, policy or network work happens.
     if args.target:
         safe_component(args.target)
+    # Item 2.6: the same fail-fast for the operator strings that ride protocol
+    # boundaries — cookies become header values, collaborator URLs become
+    # payload URL bases. Refused before any graph, policy or network work.
+    string_problems = operator_string_problems(args)
+    if string_problems:
+        for problem in string_problems:
+            print(f"refusing: {problem}", file=sys.stderr)
+        return 2
     # Secrets before anything that could want them: the advisory junctions read
     # the environment lazily at client construction, which happens inside run().
     load_env_file()
@@ -927,9 +994,57 @@ def main(argv: list[str] | None = None) -> int:
             collaborator_local=args.collaborator_local or f"http://127.0.0.1:{COLLABORATOR_PORT}",
             chrome_path=args.chrome_path,
         )
-    else:
+    elif args.fixture:
         profile = fixture_profile(chrome_path=args.chrome_path)
+    else:
+        # Item 2.4, fail-closed: the fixture is the local Phase 1 compose app —
+        # a deliberate choice, not a fallback. An operator who forgot -t used
+        # to get a run against it silently; now the run stops and names the
+        # three ways to say what was meant.
+        print(
+            "no target: pass -t/--target (a declared domain), --program (an "
+            "ingested program), or --fixture (the local Phase 1 compose app)",
+            file=sys.stderr,
+        )
+        return 2
     profile.policy = policy
+
+    # Item 2.4, fail-closed on the seed: an operator-declared surface whose
+    # host the ScopeEngine does not call in_scope is refused here, at startup,
+    # instead of being carried into a run where every probe to it is refused
+    # per-request by the gate — noisy, and easy to misread as the engine
+    # having tried and failed against an asset nobody authorized.
+    # --allow-unscoped is the operator's explicit "I know": the run proceeds
+    # unchanged and the gate still refuses those requests one by one (the
+    # chokepoint invariant is not waived by a CLI flag); the warning below
+    # names what will be refused.
+    unscoped: list[tuple[str, str]] = []
+    for seed_surface in profile.seed.surfaces:
+        host = urlsplit(seed_surface.url).hostname or ""
+        if not host:
+            continue
+        decision = profile.scope.check_host(host)
+        if decision.state != IN_SCOPE:
+            unscoped.append((seed_surface.url, decision.reason))
+    if unscoped and not args.allow_unscoped:
+        print(
+            f"refusing to run: {len(unscoped)} declared surface(s) are not in "
+            "the declared scope:",
+            file=sys.stderr,
+        )
+        for surface_url, reason in unscoped:
+            print(f"  {surface_url}  ({reason})", file=sys.stderr)
+        print(
+            "declare the host with --declare, or pass --allow-unscoped to run "
+            "anyway (every request to these surfaces is still refused by the gate)",
+            file=sys.stderr,
+        )
+        return 2
+    if unscoped:
+        _out(
+            f"warning: {len(unscoped)} declared surface(s) are outside the "
+            "declared scope — the gate will refuse every request to them (--allow-unscoped)"
+        )
 
     graph_seed: dict | None = None
     graph_context: list[dict] | None = None
@@ -987,10 +1102,40 @@ def main(argv: list[str] | None = None) -> int:
         profile.host_budget = args.host_budget
 
     advisory = Advisory.from_env() if (args.llm_draft or args.hypothesize_from_recon or args.graph_agent) else None
-    output_dir = (
-        Path(args.output_dir) if args.output_dir
-        else DEFAULT_OUTPUT_ROOT / safe_component(profile.target)
-    )
+
+    # Item 2.5 — a run is a directory, and two runs are two directories. The
+    # old default dropped every run for a target into the same folder, so a
+    # second run appended to the first one's world.jsonl: the ledger — the
+    # only place truth lives (§3, invariant 4) — mixed two runs' rows, and no
+    # view could tell them apart. Now each run names its own directory:
+    # ``--run-id`` names it explicitly, the default derives a unique one from
+    # the target and the clock, and a destination that already holds a log is
+    # refused unless ``--fresh`` says "append deliberately".
+    if args.run_id and args.output_dir:
+        print(
+            "--run-id names the run directory and cannot be combined with "
+            "--output-dir (which already names it)",
+            file=sys.stderr,
+        )
+        return 2
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    elif args.run_id:
+        output_dir = DEFAULT_OUTPUT_ROOT / safe_component(args.run_id)
+    else:
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        output_dir = DEFAULT_OUTPUT_ROOT / (
+            f"{safe_component(profile.target)}-{stamp}-{uuid.uuid4().hex[:6]}"
+        )
+    if (output_dir / "world.jsonl").exists() and not args.fresh:
+        print(
+            f"refusing to run: {output_dir} already holds a world.jsonl — "
+            "two runs in one ledger cannot be told apart; pass --run-id (a "
+            "new directory), --output-dir (a different place), or --fresh "
+            "(append to this one deliberately)",
+            file=sys.stderr,
+        )
+        return 2
 
     agent_result: dict | None = None
     if args.graph_agent:

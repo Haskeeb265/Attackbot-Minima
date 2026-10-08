@@ -36,10 +36,17 @@ from ...kernel.technique import (
     PURPOSE_CONFIRM,
     Hypothesis,
     ProbeSpec,
+    Surface,
 )
-from ..common import with_parameter
+from ..common import header_request, with_parameter, with_url_parameter
 
 NAME = "xss_reflected"
+
+#: The positions the *browser* execution probes can aim at today (item 3.2):
+#: a navigation is a URL-shaped injection, so a header/url surface's canary
+#: runs but its browser half waits for browser-transport header support — a
+#: named open follow-up, never a probe injecting somewhere the canary did not.
+BROWSER_WHERE = ("query", "body", "path")
 
 #: The canary.  Every character in it is there for a reason: the word is a
 #: distinctive *mark* (used to notice a target that transformed our bytes rather
@@ -112,10 +119,7 @@ def canary_spec(hypothesis: Hypothesis) -> ProbeSpec:
         id=f"{NAME}:canary",
         kind=KIND_HTTP,
         host=surface.host,
-        detail={
-            "url": with_parameter(surface.url, surface.param, CANARY),
-            "method": "GET",
-        },
+        detail=_aim(surface, CANARY),
         oracle=ORACLE_REFLECTION,
         canary=CANARY,
         mark=MARK,
@@ -128,6 +132,30 @@ def canary_spec(hypothesis: Hypothesis) -> ProbeSpec:
         },
         produces="reflection",
     )
+
+
+def _aim(surface: Surface, value: str) -> dict:
+    """The canary's request detail, shaped by where the parameter lives.
+
+    Item 3.2: ``header`` rides a request header named after the parameter,
+    ``url`` is substituted into the path's ``{param}`` / ``:param`` template
+    placeholder (loud ``ValueError`` when the URL spells none — a declaration
+    the probe cannot aim at is a refused probe, not a quiet miss). Every other
+    position keeps the classic query-parameter shape.
+    """
+    if surface.where == "header":
+        url, headers, content = header_request(surface, surface.param, value)
+        _ = content  # always empty: a header probe carries no body
+        return {"url": url, "method": "GET", "headers": headers}
+    if surface.where == "url":
+        return {
+            "url": with_url_parameter(surface.url, surface.param, value),
+            "method": "GET",
+        }
+    return {
+        "url": with_parameter(surface.url, surface.param, value),
+        "method": "GET",
+    }
 
 
 def execution_spec(hypothesis: Hypothesis, context: str) -> ProbeSpec:
@@ -163,8 +191,15 @@ def probes(hypothesis: Hypothesis) -> list[ProbeSpec]:
     """Every probe for *hypothesis*: the canary, then one confirmation probe per
     executable context."""
     specs = [canary_spec(hypothesis)]
-    for context in sorted(SCRIPT_EXECUTABLE_CONTEXTS):
-        specs.append(execution_spec(hypothesis, context))
+    # Item 3.2: the execution probes aim by *navigating a URL*, which is a
+    # query-shaped injection — the browser cannot yet carry a header or rewrite
+    # a path template. On a header/url surface the canary still runs (a
+    # reflection is a lead, never a finding), and the browser half waits for
+    # browser-transport support: recorded as a named open follow-up, not a
+    # probe that injects somewhere the canary did not.
+    if hypothesis.surface.where in BROWSER_WHERE:
+        for context in sorted(SCRIPT_EXECUTABLE_CONTEXTS):
+            specs.append(execution_spec(hypothesis, context))
     return specs
 
 

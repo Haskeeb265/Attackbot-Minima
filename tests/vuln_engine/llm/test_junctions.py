@@ -138,7 +138,8 @@ def test_a_valid_answer_is_logged_with_its_input_and_digest(tmp_path) -> None:
     assert opinion.validated
     rows = log.events(EVENT_LLM_JUNCTION)
     assert len(rows) == 1
-    assert rows[0]["digest"] == opinion_digest({"q": 1})
+    # Item 2.2: the logged digest is the keyed one (version + junction + input).
+    assert rows[0]["digest"] == opinion_digest({"q": 1}, junction="rank")
     assert rows[0]["junction_input"] == {"q": 1}
     assert rows[0]["answer"] == {"priors": {"xss_reflected": 0.5}}
 

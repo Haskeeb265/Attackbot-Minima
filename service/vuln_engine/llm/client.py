@@ -76,6 +76,19 @@ DEFAULT_MODEL = "openai/gpt-oss-20b"
 #: The world-log row type every junction call is recorded as.
 EVENT_LLM_JUNCTION = "llm.junction"
 
+#: Item 2.2: the digest *keyspace* version. The cache key is a content address,
+#: but the content a prompt describes can change without the *input* changing —
+#: a retuned prompt template, a moved model — and a stale cached opinion for an
+#: unrelated prompt is the failure mode. Every dimension that can change what
+#: the model is asked (the junction's own prompt-shape generation, the model) is
+#: mixed in here under its own key; bump the generation when a junction's
+#: prompt behavior changes in a way that should invalidate cached rows.
+JUNCTION_VERSION = "j1"
+#: The two digest variants: the *keyed* one mixes the version dimensions in,
+#: the legacy one hashes only the input (kept for reading pre-versioning rows).
+DIGEST_KEYED = "keyed"
+DIGEST_LEGACY = "input-only"
+
 #: Health reasons that mean "this is design, not breakage".
 NO_KEY_REASON = f"{ENV_KEY} not set: the junction runs degraded (deterministic), by design"
 
@@ -87,16 +100,33 @@ class LLMJunction(Protocol):
     def name(self) -> str: ...
 
 
-def opinion_digest(input: Mapping[str, Any]) -> str:
-    """A stable content digest of a junction's *input*.
+def opinion_digest(input: Mapping[str, Any], *, junction: str = "") -> str:
+    """A stable content digest of a junction's *input* (the cache key).
 
-    The cache key. Content-addressed rather than counted so a replay finds the
-    opinion for *this* question regardless of how many other calls the
-    original run made — and so a different question never reuses an answer it
-    did not ask for. Canonical-JSON (sorted keys) so dict order cannot change
-    the digest.
+    Content-addressed rather than counted so a replay finds the opinion for
+    *this* question regardless of how many other calls the original run made —
+    and so a different question never reuses an answer it did not ask for.
+    Canonical-JSON (sorted keys) so dict order cannot change the digest.
+
+    When *junction* is named, the digest mixes the keyspace version and the
+    junction name in (:func:`JUNCTION_VERSION`), so changing the version bumps
+    every junction's cached rows off the old key — item 2.2. The two-argument
+    form is what ``LLMClient.ask`` watches; the single-argument form keeps the
+    pre-versioning spelling for anything that reads old rows.
     """
-    canonical = json.dumps(input, sort_keys=True, separators=(",", ":"), default=str)
+    if not junction:
+        return _canonical_sha256(input)
+    return _canonical_sha256(
+        {
+            "junction_version": JUNCTION_VERSION,
+            "junction": junction,
+            "input": input,
+        }
+    )
+
+
+def _canonical_sha256(value: Any) -> str:
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -137,6 +167,16 @@ class Opinion:
     model: str = ""
     #: ``live`` (asked just now), ``cached`` (replayed from the log), ``degraded``.
     source: str = "live"
+    #: Item 4.2 — what the call cost, stamped on live answers and restored from
+    #: the log row on a cached replay. Zeros on the degraded path: a call the
+    #: model never answered bought nothing.
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    #: Wall-clock seconds the call took, measured around the transport.
+    latency: float = 0.0
+    #: From :data:`MODEL_PRICES` — a static triage table, a policy statement
+    #: pinned by test, not a pricing feed. ``0.0`` for an unlisted model.
+    cost_usd: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -149,12 +189,44 @@ class Opinion:
             "reason": self.reason,
             "model": self.model,
             "source": self.source,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "latency": self.latency,
+            "cost_usd": self.cost_usd,
         }
 
 
 #: The callable that performs one model call. Injectable so tests never need a
-#: key or a socket; the default performs a plain POST, no SDK.
-ModelCaller = Callable[[str, str], str]
+#: key or a socket; the default performs a plain POST, no SDK. A caller may
+#: return either the answer text alone (the original contract, usage unknown)
+#: or a ``(text, usage)`` pair whose second element is the provider's ``usage``
+#: block — the default caller returns the pair when the API reports one.
+ModelCaller = Callable[[str, str], "str | tuple[str, dict[str, Any]]"]
+
+#: Item 4.2 — USD per **million** tokens ``(input, output)`` by model-name
+#: prefix. A static triage map, the same kind of policy statement the holding
+#: pen's ``SEVERITY_WEIGHTS`` is: pinned by test, editable only on purpose.
+#: Matching is prefix-based because providers spell variants
+#: (``model-2026-xx``, ``model-preview``) under one price.
+MODEL_PRICES: dict[str, tuple[float, float]] = {
+    "gpt-oss-20b": (0.075, 0.15),
+    "gpt-oss-120b": (0.15, 0.60),
+}
+
+
+def junction_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """The USD cost of one call under :data:`MODEL_PRICES`, ``0.0`` if unlisted."""
+    # Providers spell variants ``provider/model-2026-xx`` under one price, so
+    # the match runs on the model name with any ``provider/`` prefix stripped.
+    bare = model.split("/", 1)[1] if "/" in model else model
+    for name, (input_price, output_price) in MODEL_PRICES.items():
+        if bare.startswith(name):
+            return round(
+                (prompt_tokens * input_price + completion_tokens * output_price)
+                / 1_000_000,
+                6,
+            )
+    return 0.0
 
 
 def _default_caller(
@@ -167,7 +239,7 @@ def _default_caller(
     """Build the plain-POST caller.  OpenAI-shaped because the recon side's
     ``enrich.py`` already speaks that shape and one idiom is one review."""
 
-    def call(prompt: str, system: str) -> str:
+    def call(prompt: str, system: str) -> "str | tuple[str, dict[str, Any]]":
         import time  # call time: the degraded path must not need it either
         import requests  # imported at call time: the degraded path must not need it
 
@@ -221,7 +293,7 @@ def _default_caller(
                     salvaged = str(provider_error.get("failed_generation") or "")
                     if salvaged.strip():
                         content = salvaged
-                        return content
+                        return content, {}
                 response.raise_for_status()
             if response.status_code in (429, 413) and attempt < 2:
                 retry_after = response.headers.get("retry-after", "")
@@ -237,10 +309,11 @@ def _default_caller(
             body = response.json()
             content = str(body["choices"][0]["message"]["content"] or "")
             if content.strip() or attempt == 2:
-                return content
+                usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+                return content, usage
             time.sleep(delay)
             delay *= 2
-        return content
+        return content, {}
 
     return call
 
@@ -276,7 +349,10 @@ class LLMClient:
             self._max_completion_tokens = max_completion_tokens
         self._caller = caller
         if self._caller is not None:
-            self._health = Health(available=True, model="injected")
+            # An injected caller is a real model channel in tests and in the
+            # harness; its stamps should name the model they describe, not the
+            # fact that it was injected (item 4.2's cost table keys on it).
+            self._health = Health(available=True, model=self._model)
         elif self._api_key:
             self._health = Health(available=True, model=self._model)
         else:
@@ -320,7 +396,7 @@ class LLMClient:
         consulted before the network is. That row is what makes a replay
         reproduce the model's influence with the key removed.
         """
-        digest = opinion_digest(input)
+        digest = opinion_digest(input, junction=junction)
         if world is not None:
             cached = self._cached(world, junction, digest)
             if cached is not None:
@@ -337,7 +413,18 @@ class LLMClient:
             )
 
         try:
-            text = self._perform(prompt, system)
+            # Item 4.2: the wall clock around the transport is the latency fact;
+            # a degraded or cached answer carries no live measurement.
+            import time
+
+            started = time.monotonic()
+            result = self._perform(prompt, system)
+            latency = time.monotonic() - started
+            text, usage = (
+                result if isinstance(result, tuple) else (result, {})
+            )
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
             answer = _unwrap_tool_envelope(_extract_json(text))
             validation = validate(answer)
             opinion = Opinion(
@@ -348,6 +435,12 @@ class LLMClient:
                 validated=True,
                 model=self._health.model,
                 source="live",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency=round(latency, 6),
+                cost_usd=junction_cost(
+                    self._health.model, prompt_tokens, completion_tokens
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - advisory failure must not stop the run
             if world is not None:
@@ -384,10 +477,14 @@ class LLMClient:
                 validated=True,
                 reason="",
                 model=opinion.model,
+                prompt_tokens=opinion.prompt_tokens,
+                completion_tokens=opinion.completion_tokens,
+                latency=opinion.latency,
+                cost_usd=opinion.cost_usd,
             )
         return opinion
 
-    def _perform(self, prompt: str, system: str) -> str:
+    def _perform(self, prompt: str, system: str) -> "str | tuple[str, dict[str, Any]]":
         if self._caller is not None:
             return self._caller(prompt, system)
         if not self._api_url:
@@ -423,6 +520,12 @@ class LLMClient:
                 validated=bool(row.get("validated")),
                 model=str(row.get("model", "")),
                 source="cached",
+                # Item 4.2: the cost facts are facts about the original call,
+                # restored from the row — a replay did not pay again.
+                prompt_tokens=int(row.get("prompt_tokens") or 0),
+                completion_tokens=int(row.get("completion_tokens") or 0),
+                latency=float(row.get("latency") or 0.0),
+                cost_usd=float(row.get("cost_usd") or 0.0),
             )
         return None
 
@@ -468,16 +571,21 @@ __all__ = [
     "DEFAULT_MAX_COMPLETION_TOKENS",
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
+    "DIGEST_KEYED",
+    "DIGEST_LEGACY",
     "ENV_KEY",
     "ENV_MAX_COMPLETION_TOKENS",
     "ENV_MODEL",
     "ENV_URL",
     "EVENT_LLM_JUNCTION",
     "Health",
+    "JUNCTION_VERSION",
     "LLMClient",
     "LLMJunction",
+    "MODEL_PRICES",
     "ModelCaller",
     "NO_KEY_REASON",
     "Opinion",
+    "junction_cost",
     "opinion_digest",
 ]

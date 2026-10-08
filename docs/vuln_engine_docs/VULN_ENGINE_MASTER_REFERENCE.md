@@ -1,16 +1,14 @@
 # The Vuln Engine — Master Reference
 
 > **Status:** current-state reference, written against the code on branch
-> `attackbot/feature/vuln-engine` (revision current as of 2026-10-07, after the
-> hardening batch (T1–T9: the `safe_component` name→path allowlist across the
-> CLIs and UI, the seven-class eligibility bridge, the UI write-side POST guard
-> and loopback-only default, the counted inventory pins, the service/cloud graph
-> kinds, and the documented `--elicit` opt-in) **and the gap-closure batch**
-> (`sqli.extraction.v1` wiring the previously-dead `data_extracted` oracle, the
-> `blocked_on_session_b` counter and its CLI line, the `holding_pen_summary`
-> view with its promoted/demoted exclusion and its report section, replay's
-> recomputation of the deterministic abduced round, and the guided demo's
-> CSRF-header fix) —
+> `attackbot/feature/vuln-engine` (revision current as of 2026-10-08, after the
+> hardening batch (T1–T9), the gap-closure batch, gap-closure batch 2
+> (Appendix F), **and gap-closure batch 3** (Appendix G: browser subresource
+> gating, oob_fetch blind-SSRF candidates, the stored-XSS two-gate route, the
+> timing-retry throttle exclusion, the versioned junction digest, the exposed
+> UI's bearer token, the fail-closed scope and run-separation CLI gates,
+> operator-string validation, the recon-side parameter locations, the
+> header/url probe support, and the LLM cost stamps) —
 > on top of Capability Closure (`service/vuln_engine/elicit/`), the timing
 > verifier's dose-response discriminator, and the authorization verifier's
 > content comparison). Every path, constant and field named below was read from
@@ -55,6 +53,7 @@
 26. [Appendix D — External-review gap resolution](#appendix-d--external-review-gap-resolution-2026-10)
 27. [Appendix E — Gap-closure batch](#appendix-e--gap-closure-batch-2026-10-07)
 28. [Appendix F — Gap-closure batch 2](#appendix-f--gap-closure-batch-2-2026-10-08)
+29. [Appendix G — Gap-closure batch 3](#appendix-g--gap-closure-batch-3-2026-10-08)
 
 ---
 
@@ -94,8 +93,8 @@ implementation that answered its three correct findings:
    compares session B's body against session A's, so a generic `2xx` envelope is
    no longer a finding.
 
-The engine's and UI's suites together are at **813 passed, 2 skipped**, `mypy`
-clean across 137 source files (see §21).
+The engine's and UI's suites together are at **950 passed, 2 skipped**, `mypy`
+clean across 152 source files (see §21).
 
 ### The single most important distinction
 
@@ -163,6 +162,10 @@ Every packet that leaves the engine passes through `policy/gate.py`
 (`PolicyGate`). Techniques hold no transports, verifiers go back through the
 gate for their fresh measurements, and the model has no tools at all. The
 import graph enforces this: nothing outside `policy/` imports a transport.
+The 1.1 browser subresource gate lives in the same chokepoint, refusing a
+loaded page's outbound subresource fetches through the transport that owns the
+page rather than through another network path — the gate says who is allowed,
+the transport intercepts and aborts.
 
 ```mermaid
 flowchart LR
@@ -2052,6 +2055,13 @@ Shared pure helpers — not a home for technique logic.
   `with_parameter`: returns `(url, headers, content)` carrying
   `{param: value}` (plus companions) as a JSON body. The URL is the surface's,
   verbatim.
+- **`header_request(surface, param, value)` (item 3.2)** — `(url, headers,
+  content)` with the payload riding a request header named after the parameter,
+  for a `where="header"` surface.
+- **`with_url_parameter(url, param, value)` (item 3.2)** — a `where="url"`
+  surface's parameter substituted into the path's `{param}` / `:param`
+  placeholder, percent-encoded like every payload on a wire; raises when the URL
+  spells no placeholder for the param (a loud refusal, not a silent miss).
 
 ### 12.2 `xss_reflected`
 
@@ -2507,6 +2517,7 @@ Seven verifiers, one per confirmation shape a finding may rest on. The
 |---|---|---|
 | `browser.run` | `BrowserVerifier` | execution |
 | `xss_stored.execute` | `StoredXssVerifier` | execution |
+| `xss_reflected.execute` | `StoredXssVerifier` | execution |
 | `oob.read` | `OobVerifier` | oob |
 | `timing.differential` | `TimingVerifier` | differential |
 | `authorization.differential` | `AuthorizationVerifier` | differential |
@@ -2818,14 +2829,19 @@ Distinct from the recon side's `LLM_API_KEY` on purpose: a key an operator set
 for recon classification should not silently become a key the exploit engine
 spends against targets.
 
-**`opinion_digest(input)`** — SHA-256 of canonical JSON (sorted keys); the cache
-key. Content-addressed, so a replay finds the opinion for *this* question
-regardless of how many other calls the original run made.
+**`opinion_digest(input, *, junction)`** — keyed SHA-256 of `{"junction_version",
+"junction", "input"}` (2.2); the cache key. Content-addressed, so a replay
+finds the opinion for *this* question, with *this* junction, regardless of how
+many other calls the original run made.
 
 **`Health`** — `available`, `reason`, `model`.
 
 **`Opinion`** — `junction`, `digest`, `answer`, `validation`, `validated`,
-`degraded`, `reason`, `model`, `source` (`live`/`cached`/`degraded`).
+`degraded`, `reason`, `model`, `source` (`live`/`cached`/`degraded`), plus item
+4.2's stamps: `prompt_tokens`, `completion_tokens`, `latency`, `cost_usd`.
+
+**`MODEL_PRICES`** — static USD-per-million-token table the view sums; a policy
+statement pinned by test, not a pricing feed.
 
 **`LLMClient.ask(...)`:**
 
@@ -3517,8 +3533,15 @@ Design rules:
   the header on every POST (`app.js`), pinned by the UI suite's
   `post_unguarded` tests.
 - **Loopback by default.** `main()` refuses any `--host` outside loopback
-  unless `--expose` is passed (exit 2, before a socket is opened): the UI
-  starts jobs with this machine's authority, so sharing it is opt-in.
+unless `--expose` is passed (exit 2, before a socket is opened): the UI
+starts jobs with this machine's authority, so sharing it is opt-in.
+
+**`--auth-token`** — required alongside `--expose`: every request must carry
+`Authorization: Bearer <token>`; the 200-level bearer check fires on both GET
+and POST, before the CSRF guard and before the body is read. An exposed UI
+without a token is refused at startup (before any socket is opened). The 2.3
+loopback check (`--host 0.0.0.0 --expose` without `--auth-token` returns 2)
+and the 401-bearer contract are pinned by the UI suite.
 - **Degrade, never 500** — a missing artifact is an honest empty payload with a
   reason.
 - **Bounded by default** — log tails, graph slices, job ring-buffers.
@@ -4324,15 +4347,82 @@ added 3 tests to `tests/ui/test_ui_server.py` (63 total, was 60). **Batch total:
 +60 tests.** Final verification (2026-10-08, compose fixture up):
 `pytest tests/vuln_engine tests/ui` → **875 passed, 2 skipped, 0 failed**
 (the skips are OOB-collaborator-gated); `mypy service/vuln_engine
-run_engine.py run_twogate.py service/ui` → clean, **150 source files**.
+run_engine.py run_twogate.py service/ui` → clean, **152 source files**.
 
 **Deliberately left open.** Vuln-class breadth was out of scope for the whole
-batch — the seven classes and eight techniques stand as they were. The
-`header`/`url` surfaces are now refused loudly, but the probe support that
-would let techniques aim at them is still open (§22.10 #4); the recon-side
-location extraction that would supply such surfaces is likewise unchanged.
-P7 picked option (c) of the phase-7 menu; `--re-verify <candidate_id>` (a),
+batch — the seven classes and eight techniques stand as they were. The recon
+side now records more than one parameter location, but live graphs still carry
+one until a live harvest writes a second (§22.10 #4); the browser half cannot
+yet carry a header or rewrite a path template, so a header/url XSS surface is
+still a lead rather than a finding (§22.10 and the verifier nit). The
+`header`/`url` surfaces are no longer refused — they are probeable through the
+`xss_reflected` canary and the two new builders, and the seed gate now accepts
+all five positions — but the probe grammars that would confirm them are still
+out of scope. P7 picked option (c) of the phase-7 menu; `--re-verify <candidate_id>` (a),
 `--hint FILE` (d) and the §1 precision edits (e) remain unbuilt. The holding
 pen's severity weights are a static triage map in `world/views.py`
 (`SEVERITY_WEIGHTS`) — a policy statement pinned by test, not a scoring model;
 editing it edits an operator's reading of the backlog.
+
+---
+
+## Appendix G — Gap-closure batch 3 (2026-10-08)
+
+Twelve items, same shape as Appendix E/F: the gap named, what closed it, where
+the proof lives. Every item was verified before moving on — `pytest
+tests/vuln_engine tests/ui` green and `mypy service/vuln_engine run_engine.py
+run_twogate.py service/ui` clean after each — and the final counts are at the
+bottom. No item added a vuln class; the corpus's seven classes and eight
+techniques are unchanged.
+
+| Item | The gap | What closed it | Tests |
+|---|---|---|---|
+| 1.1 | A page the browser effect loads could send its own subresource requests (scripts, iframes, XHR) beyond the gate's per-request decision — one authorization, many packets | `policy/subresource_gate.py` (`SubresourceGate`): the PolicyGate builds one scoped to the navigation host and logs each refusal (`transport.subresource_blocked`); the Playwright driver intercepts via `page.route`, the CDP driver via `Fetch.enable` + paused-request handling | `policy/test_subresource_gate.py` (10), `policy/test_browser_subresource_wiring.py` (3) |
+| 1.2 | `oob_fetch` treated a completed, echo-less exchange as a null answer — a blind-SSRF hit that the target never echoes was invisible | the interpreter emits a hypothesis-grade candidate (`EVIDENCE_HYPOTHESIS`) when the exchange completed but no echo arrived; the confirm spec (`oob.read`) is unchanged, so grading and independence are untouched | two tests in `techniques/test_oob_fetch.py` (15 total) |
+| 1.3 | `xss_stored` had no two-gate route: a surface only the prober touched could not reach the stored-XSS verifier | `xss.stored.v1` routine (`CONFIRM_STORED_EXECUTE`, `ORACLE_SCRIPT_EXECUTED`, `CAP_PERSISTENT_STORAGE`, http1+browser transports); `ConfirmationSpec` carries `marker_expression` + `read_back`; the runner delegates to the classic `StoredXssVerifier` | `twogate/test_stored_route.py` (7, incl. an end-to-end TwoGateLoop proof) |
+| 2.1 | A timing sample that cost a 429/503 retry is throttle-shaped, not target-shaped — the retry's own delay can pose as a response-time separation | `transports/http1.py` tracks retries (`throttled` property); `timing_verifier._measure` drops a throttled sample's population as inconclusive rather than averaging the skew in | `verification/test_timing_throttle.py` (2) |
+| 2.2 | `opinion_digest` hashed only the input, so two junctions asked the same question shared one cache entry | keyed digest `opinion_digest(input, junction=...)` over `{junction_version, junction, input}` (§15.1); `LLMClient.ask` passes the junction | `llm/test_digest_versioning.py` (7); one expectation updated in `llm/test_junctions.py` |
+| 2.3 | `--expose` bound the job-starting UI beyond loopback with no authentication | `service/ui/auth.py` (`extract_bearer`/`authorized`, constant-time compare); every GET/POST checks the bearer first (401 before the CSRF guard and the body); `main()` refuses `--expose` without `--auth-token` before any socket opens | 2 tests in `tests/ui/test_ui_server.py` (65 total) |
+| 2.4 | `main()` fell back to the fixture app when `-t` was forgotten, and an operator surface outside declared scope was carried into a run whose every probe to it the gate would refuse | no target/`--program`/`--fixture` → exit 2; unscoped operator surfaces → exit 2 naming them and the scope reason, unless `--allow-unscoped` (the gate still refuses those requests; the flag waives only the startup check) | `test_cli_scope_fail_closed.py` (4 of 9) |
+| 2.5 | Two runs for one target shared one `world.jsonl` — two runs' rows in one ledger, indistinguishable | every run names its own directory: `--run-id` explicit, default `{target}-{UTC stamp}-{hex}`; a destination already holding a log is refused unless `--fresh` says append deliberately | `test_cli_scope_fail_closed.py` (5 of 9) |
+| 2.6 | Operator strings that ride protocol boundaries were unchecked: a cookie became a raw `Cookie` header, so CR/LF was header injection against our own transport | `operator_string_problems(args)` at parse time: cookies need `NAME=VALUE`, no CR/LF/NUL, latin-1 (a header value must be); collaborator URLs and `--output-dir` refuse control characters | `test_cli_operator_strings.py` (8) |
+| 3.1 | `url_endpoint/extract.py` wrote `location: "query"` for every parameter, so live graphs carried one location no matter what was observed | the bundle crawler records the position its own strings spell — `query` for `?a=1`, `path` for `/u/{id}` — and its observations merge into `parameters.jsonl` (deduped on `(url, parameter, location)`, append-only); the graph side already read the field verbatim | 7 tests in `tests/recon/test_jscrawl.py` (19 total) |
+| 3.2 | A `header`/`url` surface was refused at seed validation because no grammar could aim at it (batch 2 left the probe support open) | `techniques/common.py` gains `header_request` (payload rides a request header) and `with_url_parameter` (`{param}`/`:param` placeholder substitution, loud `ValueError` with no placeholder); the `xss_reflected` manifest declares all five positions in `gate_where`, its canary aims by position, and its browser execution probes stay on the three positions a navigation can reach | `techniques/test_where_header_url.py` (13); `test_seed_where_gate.py` updated to the widened registry (8 total) |
+| 4.2 | The model channel was an unpriced black box: no tokens, latency or cost anywhere in the ledger or the report | `Opinion` carries `prompt_tokens`/`completion_tokens`/`latency`/`cost_usd`; the row carries them; a cached replay restores them (a replay did not pay again); the degraded path stamps zeros; `views.llm_cost_summary` aggregates onto `RunReport.llm_cost` | `llm/test_cost_instrumentation.py` (11) |
+
+**Invariants held.** 1.1 extends the chokepoint, it does not bypass it: the
+gate says who may fetch, the transport intercepts and aborts, and every refusal
+is a log row. 1.2 adds a lead, never a finding — the hypothesis-grade
+candidate still needs the unchanged `oob.read` verifier in a different class.
+1.3 delegates to the existing classic verifier through the shared spec, so one
+experiment keeps one measurement and the parity pin holds. 2.1 removes
+samples from a population; it grades nothing up. 2.2 tightens a cache key. 2.3
+and 2.6 add refusals before any socket or wire. 2.4 refuses at startup; the
+flag waives only the startup check, never the gate. 2.5 is filesystem
+bookkeeping so the ledger's one-run-one-segment reading survives contact with
+a second run. 3.1 records what was observed; the bridge side was already
+honest about unknown locations. 3.2 widens a manifest's declared grammar and
+keeps the browser probes off positions they cannot aim at — a header/url
+reflection stays a lead. 4.2 stamps facts and sums them in a pure view; a
+keyless run's cost is exactly zero, and the report says so.
+
+**Verified test count, counted from the item test files** (collect-only, not
+guessed): 1.1 — 13; 1.2 — +2 (`techniques/test_oob_fetch.py`, 15 total); 1.3 —
+7; 2.1 — 2; 2.2 — 7 new plus one expectation updated in `llm/test_junctions.py`;
+2.3 — +2 (`tests/ui/test_ui_server.py`, 65 total); 2.4 — 4; 2.5 — 5; 2.6 — 8;
+3.1 — +7 (`tests/recon/test_jscrawl.py`, 19 total); 3.2 — 13 new plus
+`test_seed_where_gate.py` rewritten to the widened registry (8 total); 4.2 — 11.
+Final verification (2026-10-08): `pytest tests/vuln_engine tests/ui` → **950
+passed, 2 skipped, 0 failed** (the skips are OOB-collaborator-gated); `mypy
+service/vuln_engine run_engine.py run_twogate.py service/ui` → clean, **152
+source files**.
+
+**Deliberately left open.** The browser half cannot yet carry a header or
+rewrite a path template, so a header/url XSS surface is a lead, never a
+finding — the execution grammar that would confirm one is the named follow-up.
+`MODEL_PRICES` is a static triage table pinned by test, not a pricing feed;
+editing it edits an operator's reading of the spend, the same policy-statement
+caveat `SEVERITY_WEIGHTS` carries. The default per-run directory naming means
+the UI's run list shows one entry per *run* rather than per *target* — an
+intended consequence of 2.5, not a regression. Vuln-class breadth remains out
+of scope: the seven classes and eight techniques stand as they were.

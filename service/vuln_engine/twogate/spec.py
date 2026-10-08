@@ -302,6 +302,10 @@ class ConfirmationSpec:
     length_delta: int = 0
     canary: str = ""
     marker: str = ""
+    #: The JavaScript expression a browser oracle evaluates for the marker.
+    marker_expression: str = ""
+    #: where a stored routine reads its store back (the proof page).
+    read_back: str = ""
     companions: dict[str, str] = field(default_factory=dict)
     origin: str = "verifier.agent"
 
@@ -326,6 +330,8 @@ class ConfirmationSpec:
             "length_delta": self.length_delta,
             "canary": self.canary,
             "marker": self.marker,
+            "marker_expression": self.marker_expression,
+            "read_back": self.read_back,
             "companions": dict(self.companions),
             "origin": self.origin,
         }

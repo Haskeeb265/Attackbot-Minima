@@ -17,8 +17,12 @@ from __future__ import annotations
 
 from urllib.parse import unquote
 
-from service.vuln_engine.kernel.evidence import EVIDENCE_REFLECTION
-from service.vuln_engine.kernel.observation import OBS_REFLECTION, Observation
+from service.vuln_engine.kernel.evidence import EVIDENCE_HYPOTHESIS, EVIDENCE_REFLECTION
+from service.vuln_engine.kernel.observation import (
+    OBS_HTTP_RESPONSE,
+    OBS_REFLECTION,
+    Observation,
+)
 from service.vuln_engine.kernel.technique import (
     CAP_INFLUENCE_REMOTE_FETCH,
     KIND_HTTP,
@@ -147,6 +151,58 @@ def test_a_transformed_echo_is_not_an_echo() -> None:
     probe = probe_grammar.probe_id(_hypothesis())
     transformed = _echo(probe, reflected=False, transformed=True)
     assert interpret_mod.candidates(_hypothesis(), [transformed]) == []
+
+
+# --------------------------------------------------------------------------- #
+# the blind-SSRF shape (item 1.2): no echo, exchange completed
+# --------------------------------------------------------------------------- #
+
+
+def _sent_response(probe: str, *, ok: bool = True) -> Observation:
+    return Observation(
+        kind=OBS_HTTP_RESPONSE,
+        probe=probe,
+        at=6.0,
+        payload={"status": 200 if ok else 500, "bytes": 120, "ok": ok},
+    )
+
+
+def test_no_echo_but_exchange_ok_still_proposes_a_hypothesis_candidate() -> None:
+    """The blind-SSRF shape: the target fetched the URL and reflected nothing.
+
+    Before item 1.2 this produced zero candidates, so OobVerifier was never
+    invoked and a confirmed-blind fetch was unreachable by construction. Now
+    the proposer emits a hypothesis-grade lead whose confirmation spec is still
+    the honest one: OobVerifier must prove the fetch from the collaborator's
+    interaction record, not from this candidate's words.
+    """
+    probe = probe_grammar.probe_id(_hypothesis())
+    candidates = interpret_mod.candidates(_hypothesis(), [_sent_response(probe)])
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.proposer_grade == EVIDENCE_HYPOTHESIS
+    assert candidate.evidence is not None
+    assert not candidate.evidence.sufficient_for_finding
+    # Same confirmation spec as the echo path: the collaborator's record is
+    # still the only proof, whatever the proposer saw in the target's response.
+    assert candidate.confirm["kind"] == "oob.read"
+    assert candidate.confirm["probe"] == probe
+    assert candidate.confirm["path"] == probe_grammar.collaborator_path(probe)
+    assert candidate.confirm["token"] == probe_grammar.echo_token(probe)
+    # The summary stays honest: "consistent with", not "the fetch happened".
+    assert "consistent with" in candidate.summary
+    assert "collaborator" in candidate.summary
+
+
+def test_no_echo_and_failed_exchange_is_no_candidate() -> None:
+    """A transport failure is not a blind fetch: refuse silently instead."""
+    probe = probe_grammar.probe_id(_hypothesis())
+    assert interpret_mod.candidates(_hypothesis(), [_sent_response(probe, ok=False)]) == []
+
+
+def test_sent_response_from_another_probe_is_not_this_surface_s_evidence() -> None:
+    probe = probe_grammar.probe_id(_hypothesis())
+    assert interpret_mod.candidates(_hypothesis(), [_sent_response("oob_fetch:other:param")]) == []
 
 
 def test_the_technique_matches_the_hypothesis_module() -> None:

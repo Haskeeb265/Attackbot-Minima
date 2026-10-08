@@ -115,6 +115,10 @@ class Http1Effect:
     backoff_ceiling: float = DEFAULT_BACKOFF_CEILING
     client: Any = None
     _owned_client: bool = False
+    #: True when the *previous* perform() honored a Retry-After wait (429/503).
+    #: A timing measurement that reads elapsed off an exchange must be able to
+    #: exclude throttled samples — see ``throttled`` under perform().
+    _throttle_retries: list[int] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.client is None:
@@ -145,6 +149,7 @@ class Http1Effect:
         content: bytes | None = None,
         params: dict[str, str] | None = None,
         at: float = 0.0,
+        count_retries: bool = True,
     ) -> RawHttpExchange:
         """Send one request and return the exchange, success or failure.
 
@@ -167,6 +172,7 @@ class Http1Effect:
         back is of a target answering, not a target refusing.
         """
         started = time.monotonic()
+        self._throttle_retries.append(0)
         try:
             response = self.client.request(
                 method,
@@ -187,6 +193,7 @@ class Http1Effect:
                     self.backoff_ceiling,
                 )
                 time.sleep(delay)
+                self._throttle_retries[-1] = attempt + 1
                 response = self.client.request(
                     method,
                     url,
@@ -216,6 +223,19 @@ class Http1Effect:
             error="response truncated at the byte cap" if truncated else "",
             transport=NAME,
         )
+
+    @property
+    def throttled(self) -> bool:
+        """True when the last perform() retried after a throttle (429/503).
+
+        Backoff sleeps sit inside the exchange's measured ``elapsed``, so a
+        timing-difference instrument that reads elapsed off a throttled request
+        would report the target's own rate limiting as a finding. Callers that
+        measure elapsed read this and exclude (or discard) the sample; the
+        default effect also records the count when asked, so the raw exchange
+        can carry it as data.
+        """
+        return bool(self._throttle_retries and self._throttle_retries[-1] > 0)
 
     def close(self) -> None:
         """Close the client, but only the one this effect owns."""

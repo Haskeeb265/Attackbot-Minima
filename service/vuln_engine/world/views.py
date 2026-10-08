@@ -89,6 +89,12 @@ class LogView(Protocol):
 #: (the import graph is one-way: ``policy`` → ``world``), hence the marker.
 SESSION_B_REFUSAL_MARKER = "no second session is wired"
 
+#: The row type ``llm/client.py`` writes for every junction call (item 4.2).
+#: ``views`` cannot import ``llm`` (the import graph is one-way:
+#: ``llm`` → ``world``), hence the literal — pinned by test to
+#: :data:`llm.client.EVENT_LLM_JUNCTION`.
+LLM_JUNCTION_EVENT = "llm.junction"
+
 #: Technique names whose session-B refusal is a *capability check* — a
 #: measurement of a precondition — rather than a candidate's own experiment.
 #: These are the two-gate prober and the six elicitors; everything else (a
@@ -561,6 +567,33 @@ def holding_pen_summary(log: LogView, *, pen: "HoldingPen | None" = None) -> dic
     }
 
 
+def llm_cost_summary(log: LogView) -> dict:
+    """What the model channel cost this window (item 4.2).
+
+    A pure derivation over the ``llm.junction`` rows: call counts, token
+    totals, the worst single-call latency, and the summed cost. The cost on
+    each row is a fact the client stamped at call time (from the static
+    ``MODEL_PRICES`` table); this view only adds — it prices nothing itself.
+    A keyless run has no such rows, so the summary is all zeros: the model's
+    cost of a deterministic engine is exactly nothing, and the report says so.
+    """
+    rows = log.events(LLM_JUNCTION_EVENT)
+    return {
+        "calls": len(rows),
+        "degraded": sum(1 for row in rows if row.get("degraded")),
+        "prompt_tokens": sum(int(row.get("prompt_tokens") or 0) for row in rows),
+        "completion_tokens": sum(
+            int(row.get("completion_tokens") or 0) for row in rows
+        ),
+        "worst_latency": max(
+            (float(row.get("latency") or 0.0) for row in rows), default=0.0
+        ),
+        "cost_usd": round(
+            sum(float(row.get("cost_usd") or 0.0) for row in rows), 6
+        ),
+    }
+
+
 def receipts_by_arm(log: LogView) -> dict[str, dict[str, int]]:
     """``{arm: {outcome: count}}`` — the receipts ledger's view of the log.
 
@@ -635,6 +668,7 @@ def summary(log: LogView) -> dict:
         "coverage": coverage(log),
         "abduction": abduction_summary(log),
         "findings_deduplicated": findings_deduplicated(log),
+        "llm_cost": llm_cost_summary(log),
     }
 
 
@@ -642,6 +676,7 @@ __all__ = [
     "CAPABILITY_CHECK_TECHNIQUES",
     "Finding",
     "GRADE_PROSE",
+    "LLM_JUNCTION_EVENT",
     "PROVABILITY_WEIGHT_HELD",
     "PROVABILITY_WEIGHT_PROVABLE",
     "SEVERITY_WEIGHTS",
@@ -652,6 +687,7 @@ __all__ = [
     "blocked_on_session_b",
     "blocked_on_session_b_split",
     "candidates",
+    "llm_cost_summary",
     "coverage",
     "findings",
     "findings_deduplicated",

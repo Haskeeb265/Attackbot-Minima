@@ -24,11 +24,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 from ..kernel.evidence import EVIDENCE_HYPOTHESIS, FINDING_GRADES
+from ..kernel.technique import CONFIRM_STORED_EXECUTE
 from ..kernel.technique import Surface
 from .routines import (
     CAP_ACCESS_DIFFERS_BY_SESSION,
     CAP_DELAYED_RESPONSE,
     CAP_INFLUENCE_REMOTE_FETCH,
+    CAP_PERSISTENT_STORAGE,
     CAP_PUBLIC_PARAM,
     CAP_REFLECTS_INPUT,
     Routine,
@@ -72,6 +74,14 @@ CAPABILITY_ROUTES: dict[str, tuple[tuple[str, str, str, str], ...]] = {
         # surface — a distinct label (plus the distinct confirm kind and oracle
         # that was already there) makes both proofs independently reachable.
         ("sqli-extraction", "differential.extraction", "sqli", "union-extraction"),
+    ),
+    CAP_PERSISTENT_STORAGE: (
+        # Item 1.3: the measured storage fact finally has a consumer. The
+        # confirm kind is the classic stored verifier's own two-step spec, so
+        # the proof chain (re-inject through the gate, then a browser proves
+        # execution on the read-back page) is the existing
+        # ``verification/stored_xss_runner.py`` — nothing is re-implemented.
+        ("xss_stored", CONFIRM_STORED_EXECUTE, "xss", "stored-breakout"),
     ),
 }
 
@@ -239,6 +249,11 @@ class VerifierAgent:
             length_delta=routine.length_delta,
             canary=routine.canary,
             marker=routine.marker,
+            marker_expression=routine.marker_expression,
+            # A stored confirmation is a two-step experiment: the read-back
+            # page — not the submit URL — is where the proof is read, exactly
+            # the classic candidate's ``confirm["read_back"]``.
+            read_back=surface.read_back or surface.url,
             companions=dict(surface.companions or {}),
         )
 

@@ -233,16 +233,47 @@ def run_jscrawl_stage(
     records = [finding.to_dict() for finding in findings]
     write_jsonl(output_dir / JSCRAWL_FILE, records)
     write_lines(output_dir / JSCRAWL_ENDPOINTS_FILE, sorted({str(r["url"]) for r in records}))
+
+    # Item 3.1: the bundle crawl's parameter observations join the extract
+    # stage's ``parameters.jsonl``, each row carrying the location the bundle's
+    # own strings spell out (``query`` for ``?a=1``, ``path`` for ``/u/{id}``).
+    # The graph side reads that field verbatim — this is the recon-side half of
+    # the location fix; before it, live graphs carried one location no matter
+    # what had been observed. Deduplicated on ``(url, parameter, location)``,
+    # the same pair-plus-position unit the extract stage uses, and merged
+    # append-only: rows already written by the extract stage are never edited.
+    parameters_path = output_dir / PARAMETERS_JSONL_FILE
+    rows: list[dict[str, object]] = []
+    if parameters_path.exists():
+        for line in parameters_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(json.loads(line))
+    seen: set[tuple[object, object, object]] = {
+        (row.get("url"), row.get("parameter"), row.get("location", "query"))
+        for row in rows
+    }
+    merged = 0
+    for finding in findings:
+        for row in finding.parameter_observations():
+            key = (row["url"], row["parameter"], row["location"])
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+            merged += 1
+    write_jsonl(parameters_path, rows)
+
     report = {
         "stage": "jscrawl",
         "ok": True,
         "enabled": True,
         "seconds": round(time.monotonic() - started, 2),
-        "counts": counts,
+        "counts": {**counts, "js_parameter_rows_merged": merged},
         "outputs": {
             "js_endpoints": (output_dir / JSCRAWL_FILE).as_posix(),
             "js_endpoints_txt": (output_dir / JSCRAWL_ENDPOINTS_FILE).as_posix(),
             "jscrawl_report": (output_dir / JSCRAWL_REPORT_FILE).as_posix(),
+            "parameters_jsonl": parameters_path.as_posix(),
         },
     }
     _write_json(output_dir / JSCRAWL_REPORT_FILE, report)

@@ -29,6 +29,7 @@ the proposer's reasoning.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import json
 import os
 import shutil
@@ -41,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from ..kernel.exchange import RawBrowserRun
+from ..policy.subresource_gate import host_of
 
 NAME = "browser"
 
@@ -156,8 +158,17 @@ def _run_playwright(
     timeout: float,
     settle: float,
     cookies: str = "",
+    subresource_gate: Any = None,
 ) -> RawBrowserRun:
-    """Load *url* in Playwright's Chromium and read the three facts."""
+    """Load *url* in Playwright's Chromium and read the three facts.
+
+    When *subresource_gate* is provided the drivers intercept every subresource
+    request a page makes — scripts, iframes, XHR, fonts, redirects — and abort
+    any that leaves the allowed host set, recording (blocking ahead of the
+    socket, which is where the enforced part of the chokepoint invariant
+    lives). Playwright expresses this natively via ``page.route``: an aborted
+    route never reaches the wire.
+    """
     from playwright.sync_api import sync_playwright
 
     started = time.monotonic()
@@ -171,6 +182,19 @@ def _run_playwright(
                 context_kwargs["extra_http_headers"] = {"Cookie": cookies}
             context = browser.new_context(**context_kwargs)
             page = context.new_page()
+            if subresource_gate is not None:
+                def _gate_route(route: Any) -> None:
+                    outcome = getattr(subresource_gate, "decide", lambda _u: True)(
+                        route.request.url
+                    )
+                    if outcome is False:
+                        route.abort("blockedbyvulnengine")
+                        return
+                    route.continue_()
+
+                # Invalid: dynamic route handlers receive one call per resource;
+                # the "**/*" pattern covers every URL the page touches.
+                page.route("**/*", _gate_route)
             page.add_init_script(_MUTATION_INIT)
             page.on("dialog", _playwright_dialog(dialogs))
             page.on("pageerror", lambda error: console_errors.append(str(error)))
@@ -391,8 +415,16 @@ def _run_cdp(
     timeout: float,
     settle: float,
     cookies: str = "",
+    subresource_gate: Any = None,
 ) -> RawBrowserRun:
-    """Load *url* in the system Chrome and read the three facts over CDP."""
+    """Load *url* in the system Chrome and read the three facts over CDP.
+
+    Same subresource contract as the playwright driver: with ``Fetch.enable``
+    plus ``Network.enable``, every request the page raises surfaces as a
+    ``Fetch.requestPaused`` event; a URL the gate refuses is answered with
+    ``Fetch.failRequest`` (``Aborted``) so the socket is never opened, and
+    everything else continues with ``Fetch.continueRequest``.
+    """
     started = time.monotonic()
     if not executable:
         return RawBrowserRun(url=url, driver="cdp", ok=False, error="no chrome executable")
@@ -427,12 +459,25 @@ def _run_cdp(
             connection.send(
                 "Network.setExtraHTTPHeaders", {"headers": {"Cookie": cookies}}
             )
+        if subresource_gate is not None:
+            # Item 1.1: intercept every request the page (or any iframe) makes.
+            # A paused request the gate refuses is failed with "Aborted" before
+            # a socket opens — the enforced half of the chokepoint invariant —
+            # and the allowed ones continue. Network- and Fetch-level events
+            # both arrive in this same event loop, so nothing here blocks the
+            # inline-script timing the load path relies on.
+            connection.send(
+                "Fetch.enable",
+                {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]},
+            )
         connection.send("Page.addScriptToEvaluateOnNewDocument", {"source": _MUTATION_INIT})
         navigate = connection.send("Page.navigate", {"url": url})
         # The page's own inline script runs during parse, so dialogs and markers
         # are read after the load event rather than after navigate's reply.
         _await_load(connection, navigate, timeout)
         connection.drain(settle)
+        if subresource_gate is not None:
+            _handle_paused_subrequests(connection, subresource_gate)
 
         dialogs = tuple(
             (str(event["params"].get("type", "")), str(event["params"].get("message", "")))
@@ -488,6 +533,35 @@ def _await_load(connection: _CdpConnection, navigate_id: int, timeout: float) ->
             replied = True
         if any(event.get("method") == "Page.loadEventFired" for event in connection.events):
             loaded = True
+
+
+def _handle_paused_subrequests(
+    connection: _CdpConnection, gate: Any
+) -> None:
+    """Answer every ``Fetch.requestPaused`` event the page produced.
+
+    The gate decides on every request it is shown, navigation included: the
+    allowlist was built around the navigation origin, so the navigation itself
+    is allowed by construction, and everything else is allowed or failed
+    (``Fetch.failRequest`` with ``Aborted`` — no socket opens) by the same
+    decision. Companion hosts the caller declared ride in the gate itself.
+    """
+    for event in list(connection.events):
+        if event.get("method") != "Fetch.requestPaused":
+            continue
+        request_id = str(event.get("params", {}).get("requestId", ""))
+        request_url = str(event.get("params", {}).get("request", {}).get("url", ""))
+        if not request_id:
+            continue
+        if gate.decide(request_url):
+            connection.send(
+                "Fetch.continueRequest", {"requestId": request_id}
+            )
+        else:
+            connection.send(
+                "Fetch.failRequest",
+                {"requestId": request_id, "reason": "Aborted"},
+            )
 
 
 def _reply(connection: _CdpConnection, message_id: int, timeout: float = 5.0) -> dict | None:
@@ -608,12 +682,42 @@ class BrowserEffect:
     # the one operation
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # subresource policy (chokepoint invariant, item 1.1)
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def subresource_gate(
+        navigation_url: str,
+        *,
+        companions: "Sequence[str] | None" = None,
+        log=None,
+    ) -> Any:
+        """An allowlist for every subrequest the page is about to make.
+
+        Returns a :class:`SubresourceGate` scoped to the navigation host plus
+        the declared companions (the OOB collaborator is the usual one). The
+        transport consults ``gate.decide(request_url)`` for each subrequest and
+        aborts the default path when it answers no; the allowlist — not the
+        individual probe — is what keeps a page from deniating traffic to a
+        host nobody authorized, while per-probe refusals stay attacker-visible
+        in the log rather than attacker-authorizable here.
+        """
+        from ..policy.subresource_gate import SubresourceGate
+
+        return SubresourceGate(
+            host_of(navigation_url),
+            allowed_companions=tuple(companions or ()),
+            log=log,
+        )
+
     def run(
         self,
         url: str,
         *,
         markers: dict[str, str] | None = None,
         at: float = 0.0,
+        subresource_gate: Any = None,
     ) -> RawBrowserRun:
         """Load *url*, count mutations and dialogs, and answer each *marker*.
 
@@ -640,6 +744,7 @@ class BrowserEffect:
                 timeout=self.timeout,
                 settle=self.settle,
                 cookies=self.cookies,
+                subresource_gate=subresource_gate,
             )
         return _run_cdp(
             url=url,
@@ -649,6 +754,7 @@ class BrowserEffect:
             timeout=self.timeout,
             settle=self.settle,
             cookies=self.cookies,
+            subresource_gate=subresource_gate,
         )
 
     def close(self) -> None:

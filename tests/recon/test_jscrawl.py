@@ -9,6 +9,7 @@ so the pipeline summary cannot confuse them with the extract stage's numbers.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from service.recon_pipeline.pipelines.url_endpoint import jscrawl
@@ -205,3 +206,157 @@ class TestStage:
         )
         assert report["enabled"] is False
         assert not (output / url_main.JSCRAWL_FILE).exists()
+
+
+# --------------------------------------------------------------------------- #
+# item 3.1 — locations are recorded, not assumed
+# --------------------------------------------------------------------------- #
+
+
+class TestParameterLocations:
+    def test_query_and_path_are_distinguished_at_extraction(self) -> None:
+        # The same bundle reads `page` from the query and `id` from the path:
+        # the flat name list threw this away, the location map keeps it.
+        locations = jscrawl.extract_parameter_locations(
+            ["/api/users/{id}/orders", "/items?page=2"],
+            'const t = "/users/:userId/items/:itemId";',
+        )
+        assert locations["page"] == {"query"}
+        assert locations["id"] == {"path"}
+        assert locations["userId"] == {"path"}
+
+    def test_extract_parameters_still_returns_the_flat_sorted_list(self) -> None:
+        params = jscrawl.extract_parameters(
+            ["/api/users/{id}/orders"],
+            'const t = "/users/:userId/items/:itemId?page=2";',
+        )
+        assert params == ["id", "itemId", "page", "userId"]
+
+    def test_a_name_read_both_ways_carries_both_locations(self) -> None:
+        locations = jscrawl.extract_parameter_locations(
+            ["/api/q?id=7"],
+            'const route = "/users/{id}";',
+        )
+        assert locations["id"] == {"query", "path"}
+
+    def test_observations_carry_location_and_no_value(self) -> None:
+        finding = jscrawl.CrawlFinding(
+            url="https://app.example.com/api/users/42/orders?page=2",
+            host="app.example.com",
+            path="/api/users/42/orders",
+            bundle="https://app.example.com/app.js",
+            parameters=["page"],
+            parameter_locations={"page": ["query"]},
+        )
+        rows = finding.parameter_observations()
+        assert rows == [
+            {
+                "parameter": "page",
+                "url": "https://app.example.com/api/users/42/orders?page=2",
+                "host": "app.example.com",
+                "location": "query",
+                "kind": "js",
+                "discovered_by": ["url_endpoint:jscrawl"],
+            }
+        ]
+
+    def test_crawl_attaches_locations_per_finding(self) -> None:
+        served = {
+            "https://app.example.com/app.js": (
+                200,
+                'fetch("/api/users/{id}/orders"); fetch("/api/items?page=2");',
+            ),
+        }
+
+        def fetcher(url: str) -> tuple[int | None, str]:
+            return served.get(url, (None, ""))
+
+        findings, _ = jscrawl.crawl(
+            ["https://app.example.com/app.js"], fetcher=fetcher, scope=_engine()
+        )
+        by_path = {f.path: f for f in findings}
+        assert by_path["/api/users/{id}/orders"].parameter_locations == {
+            "id": ["path"]
+        }
+        assert by_path["/api/items"].parameter_locations == {"page": ["query"]}
+
+
+class TestParameterMerge:
+    def test_js_observations_join_parameters_jsonl_with_locations(
+        self, tmp_path: Any
+    ) -> None:
+        from service.recon_pipeline.pipelines.url_endpoint import main as url_main
+
+        output = tmp_path / "output"
+        output.mkdir()
+        (output / url_main.JAVASCRIPT_FILE).write_text(
+            "https://app.example.com/app.js\n", encoding="utf-8"
+        )
+        # What the extract stage already wrote: a query observation for `page`.
+        (output / url_main.PARAMETERS_JSONL_FILE).write_text(
+            '{"parameter": "page", "url": "https://app.example.com/api/items?page=2",'
+            ' "host": "app.example.com", "location": "query", "kind": "html",'
+            ' "discovered_by": ["url_endpoint:passive"]}\n',
+            encoding="utf-8",
+        )
+        served = {
+            "https://app.example.com/app.js": (
+                200,
+                'fetch("/api/users/{id}/orders"); fetch("/api/items?page=2");',
+            ),
+        }
+        report = url_main.run_jscrawl_stage(
+            output_dir=output,
+            scope=_engine(),
+            fetcher=lambda url: served.get(url, (None, "")),
+        )
+        # The path observation is new; the query one was already there.
+        assert report["counts"]["js_parameter_rows_merged"] == 1
+        rows = [
+            json.loads(line)
+            for line in (output / url_main.PARAMETERS_JSONL_FILE)
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        pairs = {(r["parameter"], r["location"]) for r in rows}
+        assert pairs == {("page", "query"), ("id", "path")}
+        # The extract stage's row is untouched, not relabeled.
+        original = next(r for r in rows if r["discovered_by"] == ["url_endpoint:passive"])
+        assert original["kind"] == "html"
+
+    def test_stage_creates_parameters_jsonl_when_extract_ran_first_not(
+        self, tmp_path: Any
+    ) -> None:
+        from service.recon_pipeline.pipelines.url_endpoint import main as url_main
+
+        output = tmp_path / "output"
+        output.mkdir()
+        (output / url_main.JAVASCRIPT_FILE).write_text(
+            "https://app.example.com/app.js\n", encoding="utf-8"
+        )
+        served = {
+            "https://app.example.com/app.js": (200, 'fetch("/api/items?page=2");'),
+        }
+        url_main.run_jscrawl_stage(
+            output_dir=output,
+            scope=_engine(),
+            fetcher=lambda url: served.get(url, (None, "")),
+        )
+        rows = [
+            json.loads(line)
+            for line in (output / url_main.PARAMETERS_JSONL_FILE)
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        assert rows == [
+            {
+                "parameter": "page",
+                "url": "https://app.example.com/api/items?page=2",
+                "host": "app.example.com",
+                "location": "query",
+                "kind": "js",
+                "discovered_by": ["url_endpoint:jscrawl"],
+            }
+        ]

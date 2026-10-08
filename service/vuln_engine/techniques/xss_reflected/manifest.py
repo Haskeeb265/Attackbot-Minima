@@ -33,6 +33,12 @@ MANIFEST = TechniqueManifest(
         "by a browser recording that a script actually ran."
     ),
     preconditions=(CAP_PUBLIC_PARAM,),
+    # Item 3.2: this technique's canary can aim at all five positions — the
+    # classic three through ``with_parameter``, ``header`` through
+    # ``header_request`` and ``url`` through ``with_url_parameter``. Declaring
+    # it here is what widens the loud where-gate's accepted set: the set is
+    # derived from what registered techniques accept, never transcribed.
+    gate_where=("query", "body", "path", "header", "url"),
     postconditions=(CAP_SCRIPT_EXECUTION,),
     produces=(EVIDENCE_REFLECTION, EVIDENCE_SEMANTIC),
     verification_needs=EVIDENCE_EXECUTION,

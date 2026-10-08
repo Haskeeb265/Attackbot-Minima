@@ -71,7 +71,7 @@ class ScriptedBrowser:
     driver: str = "scripted"
     runs: list[str] = field(default_factory=list)
 
-    def run(self, url: str, *, markers: dict[str, str] | None = None, at: float = 0.0) -> RawBrowserRun:
+    def run(self, url: str, *, markers: dict[str, str] | None = None, at: float = 0.0, subresource_gate=None) -> RawBrowserRun:
         self.runs.append(url)
         if not self.ok:
             # A browser that did not run answers nothing — it does not answer yes.

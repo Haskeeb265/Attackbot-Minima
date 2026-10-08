@@ -57,6 +57,11 @@ from service.ui import programs as programs_mod
 from service.ui import recon as recon_view
 from service.ui import trace as trace_view
 from service.ui.artifacts import ArtifactError, ROOT, safe_resolve
+from service.ui.auth import (
+    AUTH_ERROR,
+    AUTH_STATUS,
+    authorized as token_authorized,
+)
 from service.ui.jobs import MANAGER
 
 HOST_DEFAULT = "127.0.0.1"
@@ -100,6 +105,10 @@ class UiHandler(BaseHTTPRequestHandler):
     """One request. Every /api route maps to a view function over the artifacts."""
 
     server_version = "AttackbotUI/1.0"
+
+    # Item 2.3: the expected bearer token, set once by ``main`` at startup ("
+    # empty on loopback mode — the check short-circuits to "allowed").
+    auth_token = ""
 
     # ------------------------------------------------------------------ #
     # plumbing
@@ -165,7 +174,19 @@ class UiHandler(BaseHTTPRequestHandler):
     # routing
     # ------------------------------------------------------------------ #
 
+    def _authorized(self) -> bool:
+        """The exposed-mode bearer check; always true on loopback mode."""
+        expected = getattr(self.server, "auth_token", None)
+        if expected is None:
+            return True
+        if token_authorized(self, str(expected)):
+            return True
+        self._json({"error": AUTH_ERROR}, AUTH_STATUS)
+        return False
+
     def do_GET(self) -> None:
+        if not self._authorized():
+            return
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
@@ -213,6 +234,11 @@ class UiHandler(BaseHTTPRequestHandler):
             self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
 
     def do_POST(self) -> None:
+        # Auth fires with the CSRF guard, before the body is read: an exposed
+        # UI without a valid token is refused on its headers alone, no side
+        # effects.
+        if not self._authorized():
+            return
         # The CSRF guard fires before the body is even read: a browser-sent
         # cross-origin POST (a form auto-submitting, a no-preflight fetch)
         # cannot carry this header, so the request is refused on its headers
@@ -427,7 +453,16 @@ def main(argv: list[str] | None = None) -> int:
         "--expose",
         action="store_true",
         help="allow binding beyond loopback (e.g. --host 0.0.0.0); the UI "
-        "starts jobs with this machine's authority, so sharing it is opt-in",
+        "        starts jobs with this machine's authority, so sharing it is opt-in",
+    )
+    parser.add_argument(
+        "--auth-token",
+        default="",
+        metavar="TOKEN",
+        help=(
+            "required with --expose: every request must carry "
+            "Authorization: Bearer <token>; loopback mode needs none"
+        ),
     )
     parser.add_argument("--verbose", action="store_true", help="log every request")
     args = parser.parse_args(argv)
@@ -439,8 +474,22 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    # Item 2.3: --expose without a token is refused before any socket opens --
+    # the same fail-before-bind pattern the loopback check above uses. The UI
+    # starts jobs with the host's authority; an unauthenticated exposed UI is
+    # a remote code execution as a service.
+    if args.expose and not args.auth_token:
+        print(
+            "refusing to expose the UI without --auth-token: binding beyond "
+            "loopback hands this machine's job-starting authority to whoever "
+            "can route to the port",
+            file=sys.stderr,
+        )
+        return 2
 
+    UiHandler.auth_token = args.auth_token
     server = ThreadingHTTPServer((args.host, args.port), UiHandler)
+    server.auth_token = args.auth_token  # type: ignore[attr-defined]
     server.verbose = args.verbose  # type: ignore[attr-defined]
     print(f"Attackbot UI: http://{args.host}:{args.port}  (Ctrl+C to stop)")
     try:

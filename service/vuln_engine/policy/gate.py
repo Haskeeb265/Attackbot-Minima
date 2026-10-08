@@ -43,6 +43,7 @@ from ..world.log import (
     EVENT_INTERNAL,
     WorldLog,
 )
+from .subresource_gate import EVENT_SUBRESOURCE_BLOCKED
 
 #: Effect kinds a technique may ask for.
 KIND_HTTP_REQUEST = "http.request"
@@ -64,6 +65,11 @@ KIND_OPERATIONS: dict[str, str] = {
     KIND_HTTP_REQUEST: "url_validation",
     KIND_BROWSER_RUN: "url_validation",
 }
+
+#: Modifier allowed in the browser transport's run(): every browser.run effect
+#: this gate executes gets a subresource allowlist built around the decided
+#: host. Named here so the contract between gate and transport is greppable.
+SUBRESOURCE_GATE_DETAIL_KEY = "subresource_gate"
 
 #: Consecutive transport-level failures (a host not answering at all) after
 #: which the gate stops sending to that host for the rest of the run. The
@@ -350,7 +356,30 @@ class PolicyGate:
                 detail["headers"] = headers
             result = self._http.perform(**detail)
         elif request.kind == KIND_BROWSER_RUN:
-            result = self._browser.run(**{**request.detail, "at": now})
+            # Item 1.1: the gate's decision covers this navigation URL, and the
+            # subresource gate extends the same authorization across everything
+            # the loaded page goes on to request (scripts, iframes, XHR, fonts,
+            # redirects). Deciding inside the gate — rather than in the
+            # transport — keeps one policy owner, and the transport stays
+            # "mechanism, no opinions": it intercepts and aborts, the gate
+            # says who is allowed.
+            from .subresource_gate import SubresourceGate
+
+            def _sub_log(kind: str, row: dict) -> None:
+                self._log.append(
+                    kind,
+                    at=self._clock(),
+                    host=str(row.get("host", "")),
+                    url=str(row.get("url", "")),
+                    reason=str(row.get("reason", "")),
+                    technique=request.technique,
+                    probe=request.probe,
+                )
+
+            sub_gate = SubresourceGate(request.host, log=_sub_log)
+            result = self._browser.run(
+                **{**request.detail, "at": now, "subresource_gate": sub_gate}
+            )
         else:  # pragma: no cover - _validate rejects any other target kind
             raise ValueError(f"no effect for kind {request.kind!r}")
         self._log.append(

@@ -161,9 +161,21 @@ class FakeBrowserEffect:
     driver: str = "fake"
     runs: list[dict] = field(default_factory=list)
 
-    def run(self, url: str, *, markers: dict[str, str] | None = None, at: float = 0.0) -> RawBrowserRun:
+    def run(
+        self,
+        url: str,
+        *,
+        markers: dict[str, str] | None = None,
+        at: float = 0.0,
+        subresource_gate=None,
+    ) -> RawBrowserRun:
         wanted = dict(markers or {})
-        self.runs.append({"url": url, "markers": wanted})
+        if subresource_gate is not None:
+            # The real transport aborts out-of-allowlist subrequests; the fake
+            # records the gate it was handed so tests can assert it is wired.
+            self.runs.append({"url": url, "markers": wanted, "subresource_gate": subresource_gate})
+        else:
+            self.runs.append({"url": url, "markers": wanted})
         return RawBrowserRun(
             url=url,
             driver=self.driver,

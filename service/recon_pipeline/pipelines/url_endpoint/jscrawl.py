@@ -112,30 +112,41 @@ def extract_paths(bundle: str) -> list[str]:
     return found
 
 
-def extract_parameters(paths: list[str], bundle: str) -> list[str]:
-    """Parameter names the bundle reads: from paths and from template strings."""
-    names: list[str] = []
-    seen: set[str] = set()
+def extract_parameter_locations(
+    paths: list[str], bundle: str
+) -> dict[str, set[str]]:
+    """``{name: {location, ...}}`` — where each name was actually observed.
 
-    def add(name: str) -> None:
-        if name and name not in seen:
-            seen.add(name)
-            names.append(name)
+    Batch 3, item 3.1. The two regexes know something the flat name list threw
+    away: ``?a=1&b=2`` in a URL-shaped string means the app reads ``a`` from the
+    *query*, while ``/users/{id}`` / ``/users/:id`` means it reads ``id`` from
+    the *path*. Recording that at extraction time is what lets the engine aim a
+    probe at the position the parameter actually sits in, instead of assuming
+    every harvested name is a query parameter.
+    """
+    locations: dict[str, set[str]] = {}
+
+    def add(name: str, location: str) -> None:
+        if name:
+            locations.setdefault(name, set()).add(location)
 
     for path in paths:
         for name in _PARAM_NAMES_RE.findall(path):
-            add(name)
-        # A path that kept its template segments (``/users/{id}/orders``) is
-        # telling us the parameter directly.
+            add(name, "query")
         for name in _TEMPLATE_PARAM_RE.findall(path):
-            add(name)
+            add(name, "path")
     for match in re.finditer(r"""["'`]([^"'`]*(?:\{|:)[a-zA-Z_][a-zA-Z0-9_]*[^"'`]*)["'`]""", bundle):
         for name in _TEMPLATE_PARAM_RE.findall(match.group(1)):
-            add(name)
+            add(name, "path")
         # Template strings also carry query params: "/items?page=2".
         for name in _PARAM_NAMES_RE.findall(match.group(1)):
-            add(name)
-    return sorted(names)
+            add(name, "query")
+    return locations
+
+
+def extract_parameters(paths: list[str], bundle: str) -> list[str]:
+    """Parameter names the bundle reads: from paths and from template strings."""
+    return sorted(extract_parameter_locations(paths, bundle))
 
 
 def resolve_reference(base_url: str, reference: str) -> str | None:
@@ -172,6 +183,10 @@ class CrawlFinding:
     path: str
     bundle: str
     parameters: list[str] = field(default_factory=list)
+    #: ``{name: [location, ...]}`` — the positions this endpoint reads each
+    #: parameter in, as the bundle's own strings spell them (item 3.1). Empty
+    #: for a finding with no parameters.
+    parameter_locations: dict[str, list[str]] = field(default_factory=dict)
     via_source_map: bool = False
 
     def to_dict(self) -> dict[str, object]:
@@ -181,8 +196,35 @@ class CrawlFinding:
             "path": self.path,
             "bundle": self.bundle,
             **({"parameters": self.parameters} if self.parameters else {}),
+            **(
+                {"parameter_locations": self.parameter_locations}
+                if self.parameter_locations
+                else {}
+            ),
             **({"via_source_map": True} if self.via_source_map else {}),
         }
+
+    def parameter_observations(self) -> list[dict[str, object]]:
+        """``parameters.jsonl``-shaped rows: one per ``(parameter, location)``.
+
+        The same shape and the same discipline as the extract stage's rows —
+        name, url, host, location, no value (a bundle string is somebody's real
+        token often enough) — with ``discovered_by`` naming this stage.
+        """
+        rows: list[dict[str, object]] = []
+        for name in self.parameters:
+            for location in sorted(self.parameter_locations.get(name, {"query"})):
+                rows.append(
+                    {
+                        "parameter": name,
+                        "url": self.url,
+                        "host": self.host,
+                        "location": location,
+                        "kind": "js",
+                        "discovered_by": ["url_endpoint:jscrawl"],
+                    }
+                )
+        return rows
 
 
 def _host_of(url: str) -> str:
@@ -198,6 +240,21 @@ def _params_for(path: str, bundle_params: list[str]) -> list[str]:
     """Parameters this *path* itself carries, else none — never the bundle-wide set."""
     own = [name for name in bundle_params if name in path]
     return own
+
+
+def _locations_in(path: str, name: str) -> set[str]:
+    """The positions *this path string* reads *name* in — query and/or path.
+
+    Used before the bundle-wide map: a finding's own URL is the strongest
+    evidence of where its parameter sits, and the bundle-wide fallback only
+    answers for names the bundle reads from strings this path lost.
+    """
+    found: set[str] = set()
+    if re.search(rf"[?&]{re.escape(name)}=", path):
+        found.add("query")
+    if re.search(rf"(?::|{{){re.escape(name)}}}?(?![a-zA-Z0-9_])", path):
+        found.add("path")
+    return found
 
 
 def crawl(
@@ -255,17 +312,26 @@ def crawl(
 
         paths = extract_paths(text)
         bundle_params = extract_parameters(paths, text)
+        bundle_locations = extract_parameter_locations(paths, text)
         for path in paths:
             absolute = resolve_reference(bundle_url, path)
             if absolute is None:
                 continue
+            finding_params = _params_for(path, bundle_params)
             findings.append(
                 CrawlFinding(
                     url=absolute,
                     host=_host_of(absolute),
                     path=_path_of(absolute),
                     bundle=bundle_url,
-                    parameters=_params_for(path, bundle_params),
+                    parameters=finding_params,
+                    parameter_locations={
+                        name: sorted(
+                            _locations_in(path, name)
+                            or bundle_locations.get(name, {"query"})
+                        )
+                        for name in finding_params
+                    },
                 )
             )
             counts["js_endpoints"] += 1

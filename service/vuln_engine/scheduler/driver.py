@@ -181,6 +181,11 @@ class RunReport:
     #: (``views.findings_deduplicated``), the losers' ids carried in
     #: ``duplicate_ids``. The raw ``findings`` list above stays untouched.
     findings_deduplicated: list[dict] = field(default_factory=list)
+    #: What the model channel cost (``views.llm_cost_summary``, item 4.2): call
+    #: counts, token totals, worst latency and summed cost over this run's
+    #: ``llm.junction`` rows. All zeros on a keyless run — the deterministic
+    #: engine's model spend is exactly nothing, and the report says so.
+    llm_cost: dict = field(default_factory=dict)
     log_path: str = ""
 
     def to_dict(self) -> dict:
@@ -205,6 +210,7 @@ class RunReport:
             "coverage": self.coverage,
             "abduction": self.abduction,
             "findings_deduplicated": self.findings_deduplicated,
+            "llm_cost": self.llm_cost,
             "log": self.log_path,
         }
 
@@ -378,6 +384,7 @@ class Engine:
             coverage=views.coverage(this_run),
             abduction=views.abduction_summary(this_run),
             findings_deduplicated=views.findings_deduplicated(this_run),
+            llm_cost=views.llm_cost_summary(this_run),
             log_path=self.log.path.as_posix() if self.log.path else "",
         )
 

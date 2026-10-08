@@ -430,20 +430,25 @@ def test_a_conclusive_hypothesis_receipt_skips_only_its_own_question(
 # --------------------------------------------------------------------------- #
 
 
-def test_a_reflection_nothing_can_confirm_is_a_lead_not_a_finding(build_gate, build_engine) -> None:
+def test_a_reflection_nothing_can_confirm_is_a_lead_not_a_finding(build_gate, build_engine, fake_collaborator) -> None:
     def in_a_js_string(url: str) -> RawHttpExchange:
         body = f"<script>var q = '{CANARY}';</script>".encode()
         return RawHttpExchange(url=url, status=200, body=body, headers={})
 
+    fake_collaborator.arrives = False  # keep the blind-fetch lead out of this test
     gate = build_gate(http=FakeHttpEffect(respond=in_a_js_string))
     report = build_engine(gate=gate).run()
-    assert report.counts["candidates"] == 1
+    # Two hypotheses produce a lead here: the reflected canary in a js string
+    # (this test's subject) and the blind-fetch submission on /fetch, which
+    # item 1.2 turned into an honest hypothesis-grade candidate (it used to be
+    # silence). Neither can be confirmed in this build, so neither becomes a
+    # finding — the count the test is about is zero findings, one verifier
+    # refusal naming the missing verifier.
     assert report.counts["findings"] == 0
-    assert report.counts["leads"] == 1
-    assert len(report.leads) == 1
-    assert "no verifier answers this candidate's confirmation spec" in (
-        views.verdicts(gate.log)[0]["reason"]
-    )
+    xss_leads = [row for row in views.verdicts(gate.log) if row["candidate"].startswith("xss_reflected")]
+    assert len(xss_leads) == 1
+    assert "no verifier answers this candidate's confirmation spec" in xss_leads[0]["reason"]
+    assert report.report_lines == []
     assert report.report_lines == []
 
 
