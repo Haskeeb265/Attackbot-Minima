@@ -23,7 +23,7 @@ below is the intended design — file an update to whichever is wrong.
 | understand what the whole system is meant to become | [`recon_docs/recon.md`](recon_docs/recon.md) + [`recon_docs/recon_v2.md`](recon_docs/recon_v2.md) |
 | know what is built versus planned | the status section in [`recon_docs/IMPLEMENTATION_PLAN.md`](recon_docs/IMPLEMENTATION_PLAN.md) and [`recon_docs/IMPLEMENTATION_PLAN_V2.md`](recon_docs/IMPLEMENTATION_PLAN_V2.md) |
 | work on the scraper or the `bounty_*` schema | [`scraper_docs/schema.md`](scraper_docs/schema.md) |
-| understand how recon's graph becomes the vuln engine's probe targets | [`vuln_engine_docs/README.md`](vuln_engine_docs/README.md) §7 — the graph→`Surface` path, what each registered technique gates on, the measured 1-of-8 capability gap, and what recon must supply to close it |
+| understand how recon's graph becomes the vuln engine's probe targets | [`vuln_engine_docs/VULN_ENGINE_MASTER_REFERENCE.md`](vuln_engine_docs/VULN_ENGINE_MASTER_REFERENCE.md) §17 — the graph→`Surface` path, what each registered technique gates on, the measured capability gap, and the roadmap (§24) for what recon must supply to close it |
 | get an orientation pass over the codebase | [`codebase/`](codebase) — stack, structure, architecture, conventions, integrations, testing, concerns, platform |
 
 ## The document sets
@@ -69,21 +69,15 @@ v1 pair first.
 
 ### `vuln_engine_docs/` — the vulnerability engine
 
-Phases 1–3 (one finding provably · noise-budgeted scheduling · the advisory
-boundary) are built, wired and verified; see `progress.md` for the running
-record. The current-state reading order:
+Exactly three documents (consolidated 2026-10-20; all previously separate
+current-state, phase-checklist, progress-log and R&D files were absorbed and
+are preserved in git history):
 
 | Document | Role |
 |---|---|
-| [`README.md`](vuln_engine_docs/README.md) | **the single document for the engine** — what it is, the five invariants, the module map, the technique contract and the eight registered techniques, the life of one arm, the policy gate, the graph→seed bridge (§7, including the measured 1-of-8 capability gap), OWASP coverage, the five LLM junctions, status, and how to run it |
-| [`phase1_checklist.md`](vuln_engine_docs/phase1_checklist.md) · [`phase2_checklist.md`](vuln_engine_docs/phase2_checklist.md) · [`phase3_checklist.md`](vuln_engine_docs/phase3_checklist.md) | per-phase build checklists, each with a STATUS block recording its exit criteria and the deliberate deviations — a dated build record, kept separate from current-state documentation |
-| `progress.md` | the running build log: what was built, proved, and left open, in order |
-
-Fifteen earlier documents — the architecture, principles, orientation and
-long-form explainer, the graph→seed bridge, OWASP coverage, the numbered
-decision record, the abductive-loop PRD, the target-assumptions audit and the
-dated R&D passes — were consolidated into `vuln_engine_docs/README.md`. Their
-content is preserved in git history at `6209547` and the commits before it.
+| [`VULN_ENGINE_MASTER_REFERENCE.md`](vuln_engine_docs/VULN_ENGINE_MASTER_REFERENCE.md) | **the single current-state reference** — every module, constant, flag and flow, the decision record (§23) and the roadmap (§24) |
+| [`VULN_ENGINE_ONBOARDING_DEPTH.md`](vuln_engine_docs/VULN_ENGINE_ONBOARDING_DEPTH.md) | the teaching deep-dive — high level to low level, for onboarding a new engineer |
+| [`VULN_ENGINE_RND.md`](vuln_engine_docs/VULN_ENGINE_RND.md) | the consolidated R&D record — dynamic preconditions, the two-gate resolution, CVE/CAPEC ingestion, the external-review triage |
 
 Note the discipline the engine holds itself to: a capability *claim* produces a
 lead, and only an independent verifier in a different evidence class produces a

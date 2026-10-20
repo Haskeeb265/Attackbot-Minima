@@ -1,7 +1,7 @@
 # The Vuln Engine — Master Reference
 
 > **Status:** current-state reference, written against the code on branch
-> `attackbot/feature/vuln-engine` (revision current as of 2026-10-08, after the
+> `attackbot/feature/vuln-engine` (revision current as of 2026-10-20, after the
 > hardening batch (T1–T9), the gap-closure batch, gap-closure batch 2
 > (Appendix F), gap-closure batch 3 (Appendix G: browser subresource
 > gating, oob_fetch blind-SSRF candidates, the stored-XSS two-gate route, the
@@ -11,7 +11,17 @@
 > header/url probe support, and the LLM cost stamps), **and gap-closure batch
 > 4** (Appendix H: the anomaly distillate wired into the abduction loop, the
 > §22.10 notebook reconciled against Appendices D–G, and the joined
-> abduction-cost view) —
+> abduction-cost view), **and gap-closure batch 5** (Appendix I: the
+> response-differential preconditions, the interleaved timing measurement, the
+> stored-XSS run binding, the budget split and retryable deferral, the browser
+> path's second identity, per-run verification dedupe, and the four hardening
+> items C2/C3/D1/D2), **and gap-closure batch 6** (Appendix J: capability-intake
+> validation — `parse_surface()` and the graph bridge's `_to_surface()` now refuse a
+> capability not in `CAPABILITIES`, and `validate_seed()` now also refuses a declared
+> surface whose capability the kernel does not speak with a named `SurfaceProblem`,
+> registry-independent — and the eligibility-census view `world/views.eligibility_census`,
+> a read-only per-technique eligible-surface count written to `report.json` and printed by
+> `run_engine.print_eligibility_census` **only when any technique shows zero eligible surfaces**) —
 > on top of Capability Closure (`service/vuln_engine/elicit/`), the timing
 > verifier's dose-response discriminator, and the authorization verifier's
 > content comparison). Every path, constant and field named below was read from
@@ -23,6 +33,19 @@
 > vocabulary constant, and every load-bearing decision, with Mermaid diagrams
 > for each subsystem and each end-to-end flow. It is written to be read
 > front-to-back once, then used as a lookup table.
+>
+> **2026-10-20 doc consolidation.** The engine's documentation is now exactly
+> three files: this master reference (the whole picture),
+> `VULN_ENGINE_ONBOARDING_DEPTH.md` (the teaching deep-dive for a new engineer),
+> and `VULN_ENGINE_RND.md` (the consolidated R&D record: dynamic
+> preconditions, the two-gate resolution, CVE/CAPEC ingestion, and the external
+> review triage). The previously separate `README.md`,
+> `VULN_ENGINE_COMPLETE.md`, the three phase checklists, `progress.md`,
+> `RND_dynamic_preconditions.md`, `TWO_GATE_RESOLUTION_ASSESSMENT.md`,
+> `CVE_ingestion.md` and `EXTERNAL_REVIEW_TRIAGE.md` are absorbed here and
+> there; their text is preserved in git history (commit `6209547` and the
+> commits before/after it). §23 carries the consolidated decision record and
+> §24 the roadmap.
 
 ---
 
@@ -50,14 +73,19 @@
 20. [The UI](#20-the-ui)
 21. [Tests and verification](#21-tests-and-verification)
 22. [Appendices — vocabularies, tables, flags, env](#22-appendices--vocabularies-tables-flags-env)
-23. [Appendix A — Layering and the import graph](#appendix-a--layering-and-the-import-graph)
-24. [Appendix B — One finding, row by row](#appendix-b--one-finding-row-by-row)
-25. [Appendix C — Glossary](#appendix-c--glossary)
-26. [Appendix D — External-review gap resolution](#appendix-d--external-review-gap-resolution-2026-10)
-27. [Appendix E — Gap-closure batch](#appendix-e--gap-closure-batch-2026-10-07)
-28. [Appendix F — Gap-closure batch 2](#appendix-f--gap-closure-batch-2-2026-10-08)
-29. [Appendix G — Gap-closure batch 3](#appendix-g--gap-closure-batch-3-2026-10-08)
-30. [Appendix H — Gap-closure batch 4](#appendix-h--gap-closure-batch-4-2026-10-08)
+23. [The decision record — every load-bearing choice, with its reasoning](#23-the-decision-record--every-load-bearing-choice-with-its-reasoning)
+24. [What's next — the consolidation of the roadmap](#24-whats-next--the-consolidation-of-the-roadmap)
+25. [Appendix A — Layering and the import graph](#appendix-a--layering-and-the-import-graph)
+26. [Appendix B — One finding, row by row](#appendix-b--one-finding-row-by-row)
+27. [Appendix C — Glossary](#appendix-c--glossary)
+28. [Appendix D — External-review gap resolution](#appendix-d--external-review-gap-resolution-2026-10)
+29. [Appendix E — Gap-closure batch](#appendix-e--gap-closure-batch-2026-10-07)
+30. [Appendix F — Gap-closure batch 2](#appendix-f--gap-closure-batch-2-2026-10-08)
+31. [Appendix G — Gap-closure batch 3](#appendix-g--gap-closure-batch-3-2026-10-08)
+32. [Appendix H — Gap-closure batch 4](#appendix-h--gap-closure-batch-4-2026-10-08)
+33. [Appendix I — Gap-closure batch 5](#appendix-i--gap-closure-batch-5-2026-10-18)
+34. [Appendix J — Gap-closure batch 6](#appendix-j--gap-closure-batch-6-2026-10-20)
+
 
 ---
 
@@ -83,7 +111,7 @@ byte-for-byte deterministically.
 ### What this revision adds
 
 This revision is written after a round of external review (DeepSeek / Claude /
-ChatGPT — the merged verdict is `EXTERNAL_REVIEW_TRIAGE.md`) and the
+ChatGPT — the merged verdict lives in `VULN_ENGINE_RND.md`, thread D) and the
 implementation that answered its three correct findings:
 
 1. **Capability Closure (§12.10)** — the engine can now *measure* the
@@ -97,9 +125,10 @@ implementation that answered its three correct findings:
    compares session B's body against session A's, so a generic `2xx` envelope is
    no longer a finding.
 
-The engine's and UI's suites together are at **961 passed, 2 skipped**, `mypy`
-clean across 152 source files (see §21, and Appendix H for this batch's
-counts).
+The engine's and UI's suites together are at **1002 passed, 2 skipped, 1
+failed**, `mypy` clean across 152 source files (see §21, and Appendix I for
+this batch's counts, including the one pre-existing live-browser failure and
+how it was attributed).
 
 ### The single most important distinction
 
@@ -348,7 +377,7 @@ a newcomer is noted at the end.
 | `kernel/prediction.py` | `ExpectedObservation`, `Expectation`, `Deviation`, `evaluate` |
 | `kernel/anomaly.py` | `Anomaly`, `ANOMALY_*` statuses, `anomaly_key` |
 | `kernel/vuln_class.py` | canonical class vocabulary + `normalize_vuln_class`, `vuln_class_status`, `canonicalize`, `cwe_of` |
-| `kernel/capability.py` | `CapabilityFact`, `CapabilityFacts`, `declared_facts`, `EVENT_CAPABILITY_FACT` — a measured precondition carried like evidence |
+| `kernel/capability.py` | `CapabilityFact`, `CapabilityFacts`, `declared_facts`, `EVENT_CAPABILITY_FACT` — a measured precondition carried like evidence; intake-side vocabulary membership is now enforced at parse/seed-validation time too (batch J1) |
 
 ### `techniques/` — the vuln-class corpus
 
@@ -2329,10 +2358,11 @@ on a target where the operator had not guessed the precondition, a perfectly
 correct technique — `sqli_blind_time`, `oob_fetch`, `idor_differential` — was an
 inert arm, with no error and no signal. All three external reviews named this the
 single biggest block on finding real bugs; the full analysis is in
-`EXTERNAL_REVIEW_TRIAGE.md`, and the per-gap disposition of all external
-reviews — implemented or rejected as stale — is in Appendix D.
+`VULN_ENGINE_RND.md` (thread D), and the per-gap disposition of all external
+reviews — implemented or rejected as stale — is in Appendix D of this file.
 
-The fix is backward chaining, as a bounded pass (`RND_dynamic_preconditions.md`):
+The fix is backward chaining, as a bounded pass (thread A of
+`VULN_ENGINE_RND.md`):
 **measure what the gates need, then re-offer the surfaces.** It turns an
 elicitor into *a verifier with the candidate removed* — it asks a cheap,
 low-noise question of a surface and records the answer as a
@@ -2945,6 +2975,15 @@ but no shipped technique aims a parameter probe at them. A seed that names a
 seed validation, batch 2 Phase 4 — `gate_where` is a manifest field, checked
 in `seed/validate.py`), never silently accepted and silently dropped; adding
 the probe support itself remains open.
+
+A seed that names a surface whose `capability` is not in `CAPABILITIES` is also
+refused loudly now (batch J1, 2026-10-20): `validate_seed()` names it with a
+`SurfaceProblem`, the two CLIs print the reason and exit 2, and `report.json`
+carries it on `problems` — the same shape as the `where`-gate refusal, but
+registry-independent because capability is a kernel constant. A valid-but-wrong
+capability is still accepted and then invisible to the wrong technique, and the
+receipt view still cannot name that case; that is what `world/views.eligibility_census`
+(batch J2) now exists to make visible in the report.
 
 ### 15.6 Junction 5 — `reflect.py`
 
@@ -3654,7 +3693,7 @@ subsystem:
 | `tests/vuln_engine/world/` | log, views, observe, novelty |
 | `tests/vuln_engine/scheduler/` | driver, campaign, UCB, replay, tree |
 | `tests/vuln_engine/techniques/` | each technique's pure modules |
-| `tests/vuln_engine/verification/` | the six verifiers and the spec validator |
+| `tests/vuln_engine/verification/` | the seven verifiers and the spec validator |
 | `tests/vuln_engine/transports/` | http1/oob/browser via injectable clients |
 | `tests/vuln_engine/llm/` | junctions, degraded paths, digest caching |
 | `tests/vuln_engine/twogate/` | the two-gate flow |
@@ -3686,8 +3725,32 @@ Notable test modules:
 | `world/test_findings_deduplicated.py` | `findings_deduplicated(log)`: strongest per (surface, class) by evidence class then reproducibility, `duplicate_ids` carried, raw findings untouched (batch 2 Phase 5) |
 | `world/test_abduction_summary.py` | `abduction_summary(log)`: proposals counted by the three-valued verdict, groups by `needs_verifier`, the unvalidated case, report + CLI wiring (batch 2 Phase 5) |
 | `twogate/test_sqli_extraction.py` | the extraction routine under its own `sqli-extraction` label (batch 2 Phase 6) |
+| `verification/test_timing_interleave.py` | the timing verifier's interleaved ABBA sampling, the sample floor, and the dose gap read from the spec's own payloads (Appendix I, A2) |
+| `policy/test_budget_split.py` | the confirmation allowance, the bounded half, the no-split fallback, and the driver's retry of a budget-deferred verification (Appendix I, B1) |
+| `policy/test_session_b_browser.py` | session B on the browser path, and the refusal when the declared identity cannot ride a cookie (Appendix I, B2) |
+| `policy/test_gate_crash.py` | a crashing transport becomes an unmeasured effect with a result row, never a dead run (Appendix I, D1) |
+| `scheduler/test_verification_dedupe.py` | one claim measured once per run, keyed by candidate *and* confirmation spec (Appendix I, B3) |
+| `test_cli_resume.py` | `--resume` and the engagement-wide receipts ledger (Appendix I, C3) |
+| `tests/recon/test_dispatch_hardening.py` | the dispatcher's injected clock and its bounded decision log (Appendix I, D2) |
 
-Verification at the time of writing (re-run 2026-10-08, after gap-closure
+Verification at the time of writing (re-run 2026-10-18, after gap-closure
+batch 5, Docker up): `python -m pytest tests/vuln_engine tests/ui -q` →
+**1002 passed, 2 skipped, 1 failed**, and `python -m pytest tests/recon -q` →
+**1530 passed, 1 skipped**; `mypy service/vuln_engine run_engine.py
+run_twogate.py service/ui` is clean across **152 source files**. The single
+failure is the live-browser dialog assertion in
+`tests/vuln_engine/eval/test_phase1.py`, which fails identically with batch 5's
+changes stashed — pre-existing, but named rather than muted (Appendix I).
+
+Hermetic re-verification of this document's consolidation revision
+(2026-10-20, Docker *down*, so the fixture- and collaborator-dependent tests
+skip instead of pass): `python -m pytest tests/vuln_engine -q` → **922 passed,
+17 skipped, 0 failed**; `python -m pytest tests/ui -q` → **67 passed**;
+`mypy service/vuln_engine run_engine.py run_twogate.py` → clean across
+**141 source files** (152 with `service/ui` included). Bring Docker up for the
+1002-figure above.
+
+Earlier measurement (re-run 2026-10-08, after gap-closure
 batch 2, Docker up): `python -m pytest tests/vuln_engine tests/ui -q` — the
 engine's and UI's suites together — is **875 passed, 2 skipped, 0 failed** (the
 2 skips are OOB-collaborator-gated, not fixture tests), and
@@ -3835,11 +3898,18 @@ the Capability Closure pass when `--elicit` is on).
 | `REFLECT_ROUNDS` / `MAX_REFLECT_ROUNDS` | 2 |
 | `PRIOR_CEILING` | 0.4 |
 | `PRIOR_TOTAL` | 1.0 (`MASS_TOLERANCE` 0.05) |
+| `MAX_DECISIONS` | 5000 (`platform/dispatch.py`; keeps the newest, counts `decisions_dropped`) |
+| `DB_WAIT_SECONDS` | 2.0 (`service/ui/programs.py`; batch ingest keeps psycopg's default) |
 
 ### 22.7 Gate verbs
 
 `ALLOW` (execute), `DENY` (scope/malformed — nothing sent), `DEFER`
-(budget/etiquette/breaker — nothing sent).
+(budget/etiquette/breaker — nothing sent). A budget `DEFER` is distinguishable by
+`Decision.budget` and counted by `PolicyGate.budget_deferrals`, which is what
+makes a starved confirmation retryable (`Verdict.deferred`); a `DEFER` for
+eligibility is not, since nothing about it changes by waiting. Confirmations
+draw on their own allowance when `DispatchPolicy.confirm_share > 0` (the engine
+sets 0.5; the platform default is 0.0 — one budget, the pre-split behaviour).
 
 ### 22.8 Two-gate constants
 
@@ -3863,14 +3933,31 @@ max_candidates_per_surface=12, max_capabilities_per_surface=8)`.
 | `DENIED` (sessions) | `{301,302,303,307,308,401,403,404}` | `elicit/sessions` |
 
 Timing verifier dose-response: `DOSE_SHORT_SECONDS = 2.0`,
-`DOSE_LONG_SECONDS = 6.0`, `DOSE_SAMPLES = 2`, `DOSE_MARGIN_FRACTION = 0.4`.
+`DOSE_LONG_SECONDS = 6.0`, `DOSE_SAMPLES = 3`, `DOSE_MARGIN_FRACTION = 0.4`,
+`SAMPLES = 3` for the main populations. The *gap* the margin is a fraction of
+is read from the spec's own dose payloads (`timing_verifier.dose_seconds`,
+last number in the payload), and the constants above are the fallback for a
+payload whose spelling carries no delay at all — an earlier revision hardcoded
+the 4-second gap, which described the SQL family and was simply wrong for any
+spec naming its own doses (Appendix I, A2).
+
+Differential-response floor: `SAMPLES = 2` fresh measurements *per population*
+(`response_verifier`), and the oracle refuses to read a difference unless the
+baseline repeats agree and the control is neutral — control indistinguishable
+from baseline. Without those two preconditions a reflecting parameter satisfied
+"differs from the baseline *and* from the control" for every string in the
+alphabet (Appendix I, A1).
+
+Budget split (`DispatchPolicy`, Appendix I, B1): `confirm_share = 0.5` in
+`run_engine.py` / `run_twogate.py`; `0.0` (the platform default) keeps
+confirmations on the one budget, which is right for a recon-only dispatcher.
 
 ### 22.10 Notebook of measured limitations (honest gaps)
 
-Reconciled against Appendices D–G and H (batch 4, H2): every item below was
+Reconciled against Appendices D–H **and I** (batch 5): every item below was
 walked against what those batches closed. Closed gaps are gone from this
 list — a stale "boundary of truth" would mislead a reader who trusts the
-label — and what batch 4 itself left open is recorded here in the same voice.
+label — and what batch 5 itself left open is recorded here in the same voice.
 These are recorded here, not hidden, because they bound what the engine can do
 today:
 
@@ -3945,9 +4032,166 @@ today:
    per-proposal meter — the junction does not price individual answers — and
    every dollar figure ultimately derives from the static `MODEL_PRICES`
    table, the same policy-statement caveat Appendix G records for it.
+11. **The graph seed is capped at 40 surfaces per run, silently, against as
+    many as 2,000 URLs read (C1 — documented, deliberately not changed in this
+    batch).** `seed/from_graph.py` passes `max_surfaces=40`
+    (`DEFAULT_MAX_SURFACES`) to `derive_surfaces`, while the graph reader loads
+    up to 2,000 URLs. The report *does* say `truncated`/`dropped` when it
+    happens — `run_engine.py` prints `capped at N (M dropped)` — but nothing in
+    the report's findings, and nothing in the exit status, distinguishes "the
+    engine tested the surface set and found nothing" from "the engine tested
+    the first 40 surfaces of a 200-surface estate". `--max-surfaces` raises it
+    (an operator can, and should, on a wide estate); the gap is that 40 is the
+    default an operator gets without asking, and the number two orders of
+    magnitude of headroom exist for. Deliberately left as a documentation item
+    because the right fix is a policy question (cap by budget? by host? by
+    score? report a coverage ratio in the finding set?), not a constant to
+    nudge.
+12. **Confirmation allowance is additional traffic, not a reallocation (B1's
+    remaining shape).** With `confirm_share = 0.5` a run may send up to 1.5×
+    its declared `host_budget`: the confirmation half is granted on top rather
+    than carved out, because carving it out starved the probes that are the
+    only source of candidates (measured: a 50-request host budget with half
+    reserved deferred the timing arm before it could propose). An operator who
+    budgeted for 50 requests per host should know the ceiling is 75 with the
+    split on; `confirm_share = 0` restores the single budget exactly.
+13. **The elicitation timing module keeps its own, older measurement shape
+    (A2's remainder).** `elicit/timing` still samples its two populations in
+    blocks (`SAMPLES = 2`, all quiet then all dosed) and derives its dose
+    margin from its own `SHORT_DOSE`/`LONG_DOSE` constants. The *verifier's*
+    timing path is interleaved and spec-derived (Appendix I, A2), so a proven
+    timing finding no longer rests on a block design — but the capability
+    *measurement* that opens the timing door can still be fooled by a monotonic
+    drift. Left open because the elicitor names no spec payloads to derive a
+    gap from; closing it means giving the elicitor the same spec projection the
+    verifier has.
 
 These are the honest boundary of "everything the engine is today". A document
 that claimed more would be the error this whole design exists to prevent.
+
+---
+
+## 23. The decision record — every load-bearing choice, with its reasoning
+
+The reasoning behind the engine's decisions used to live in at least six places:
+the phase checklists' "deliberate deviations", the progress log's "in our own
+code, caught before merge" notes, the appendices' "invariants held" paragraphs,
+and three R&D documents. On consolidation (2026-10-20) those live-*here* — the
+checklists, log and R&D files are in git history. Each decision below names where
+the enforcement lives in the code or tests, because a decision without a
+mechanism is a wish.
+
+### The architecture
+
+| # | Decision | Reasoning | Enforced by |
+|---|---|---|---|
+| 1 | **Evidence classes, not confidence scores.** Six grades, total order, only `execution`/`oob`/`differential` support a finding | A number can be argued with; a measurement class cannot. "An LLM said so" and "a browser ran the script" are different *kinds* of fact, and only the second can pay a report | `kernel/evidence.py`, `FINDING_GRADES` |
+| 2 | **The thing that proposes cannot be the thing that confirms.** A verifier reads only the candidate's confirmation spec, never the proposer's evidence or reasoning | One source writing the books and signing them is a closed loop that can be confidently wrong — the scanner failure mode the engine exists to prevent | `Verdict.check_independence` **raises** (there is no correct behaviour for a non-independent verdict) |
+| 3 | **One door to the network.** Every packet leaves through `PolicyGate`; techniques hold no transports; the model has no tools | Authorization that is checkable has to be a real chokepoint, not a convention. A refusal is an observation (a `gate.decision` row), never an exception | `tests/vuln_engine/test_invariants.py` — no module outside `policy/` imports a transport |
+| 4 | **One append-only ledger; every report is a derived view.** No `set`/`update`/rewrite; every `at` passed in by the caller; reporting through `log.since(run)` | "Balance is derived; the ledger wins" — a run is a log, not a session, so an engagement can pause for a week and resume coherently, and no second run can resell a first run's findings | `world/log.py`, `WorldLogWindow` |
+| 5 | **Replay is the bar for truth.** `--replay` recomputes a run offline with sockets disabled; the deterministic abduced round is recomputed, model-sourced rows are listed as recorded fact | If a run's decisions cannot be recomputed from its own log, the log is prose, not evidence | `scheduler/replay.py`, `test_replay.py` |
+| 6 | **The model is quarantined and advisory.** Junctions see typed structural fields, never response bodies; they choose inside grammars; a degraded opinion is data, never an exception | Prompt injection cannot instruct a model that is never shown untrusted content; a model that cannot break grammar cannot invent a finding | `llm/*`, `test_invariants.py` (no transport, no body ever reaches a junction) |
+| 7 | **A capability fact is not a finding.** Elicitation opens doors, never grades evidence upward | Same lattice, different direction of supply: the fact makes a technique *eligible*; the verifier still has to prove the bug | `kernel/capability.py`, all six elicitors |
+
+### The contracts
+
+| # | Decision | Reasoning | Enforced by |
+|---|---|---|---|
+| 8 | **Folder-is-the-registration** for `techniques/`, `elicit/` (and transitively elicitors) — adding one never requires editing anything outside the folder; deleting one leaves the engine running | A registry you must also edit is two sources of truth; import-time discovery makes the acid test ("adding SSTI must never require edits outside `techniques/ssti/`") literal | `registry.py`, `elicit/registry.py` |
+| 9 | **Manifests are loud.** `postconditions` required; `produces` required and evidence-class-typed; `verification_needs` required, and **must not** be in `produces` | A technique that cannot be chained makes "the chain query returned nothing" a silent wrong answer; a verifier sharing the proposer's class breaks invariant #2 structurally | `TechniqueManifest.validate()` |
+| 10 | **`surfaces()` is the gate; manifest `preconditions` are metadata.** They are allowed to disagree — five of the eight techniques gate differently from their manifest | A loud technique must refuse to spend its probe budget where the world has not shown the precondition it actually needs — one authority, the technique itself | `tests/vuln_engine/test_inventory_pins.py` |
+| 11 | **Hypotheses can be data** (`generic_differential`'s plan table): four pure functions stay code, the *knowledge* is rows, and `eligibility.py` derives the gate from the table with an import-time refuse-to-load | A predicate that is data can be composed, serialized with a digest, and abduced; the comparison is fixed code because the vuln-class knowledge lives in the rows, not the comparator | `techniques/generic_differential/` |
+| 12 | **Plan serialization is canonical** (sorted keys, rounded floats, digest) | The log explains an experiment, not just replays it — mirroring `opinion_digest`'s content addressing | `kernel/plan.py` |
+
+### The economics
+
+| # | Decision | Reasoning | Enforced by |
+|---|---|---|---|
+| 13 | **`NoiseProfile.cost` is normative**: UCB's optimistic reward is divided by it; the browser carries ×3 | Declared footprint directly sets how good expected news must be before a technique is worth the noise — visibility is the scarce resource | `kernel/manifest.py`, `scheduler/ucb.py` |
+| 14 | **Cheap probes before loud, and a browser only runs on a context already observed** | A browser is the loudest thing the engine owns; running one blind costs the most and proves the least | `driver.technique_probes`, `_gated` |
+| 15 | **Receipts are attempts, not refusals; conclusive answers are not paid for twice; `failed` is never conclusive.** Receipt operations are hypothesis-scoped (G7); verifications dedupe per run on candidate id *plus confirmation-spec digest* (B3) | The punch card question is "was *this question* attempted?", not "was this surface touched?" | `driver._already_settled`, `test_verification_dedupe.py` |
+| 16 | **Novelty reward is capped strictly below a measured finding** (0.9 < 1.0), and only a run arm earns it (an arm cannot farm the term) | No pile of "new territory" can add up to an answer, or exploring beats proving forever | `scheduler/ucb.py`, `NOVELTY_REWARD_CAP` |
+| 17 | **The attack tree parks unspendable subtrees** and the campaign stops saying why when the root is parked | Unreachable AND edges must cost nothing; a parked forest should be visible, not silent | `scheduler/tree.py`, `Campaign` |
+| 18 | **A budget `DEFER` for a confirmation is retryable and boundable separately** (`DispatchPolicy.confirm_share`) — and the allowance is *additional* traffic, not a reallocation (§22.10 item 12) | Measured: reserving half the budget starved the probes that are the only source of candidates; the fix grants confirmations their own allowance while remaining honest about the ceiling | `policy/test_budget_split.py` |
+
+### The verification epistemics
+
+Each verifier is a different measurement *in kind*; the epistemics below are the
+reasoning each one earned from live runs and external review:
+
+| Verifier | Measurement decision | Why |
+|---|---|---|
+| `TimingVerifier` | Fresh interleaved populations (ABBA order), 3 samples, **dose-response discriminator**, throttle-shaped samples dropped, sample floor from the spec | A separation proves "this input changed how long the target took" — rate limiting and drift produce that with no interpreter. SQL answers to the *dose*: delay must scale with `SLEEP`'s argument (EXTERNAL_REVIEW claim #2, fixed) |
+| `AuthorizationVerifier` | Flipped order (B first), status **and content agreement** (body hashes/lengths; empty or ≥50%-different bodies refuse), `state_change` routed away | A 2xx cannot distinguish the object from a generic success envelope; a generic envelope must be a refusal, not a finding (claim #3, fixed) |
+| `StateChangeVerifier` | Re-executes the actor's change fresh between two unchanged victim reads, with a pre-pair drift control | "The change at T reaches V" ≠ "B can read V"; the weaker claim scored at the strongest grade is the false-finding the lattice exists to prevent (G9) |
+| `StoredXssVerifier` | Sequence confirm, inject status checked explicitly, and every proof is **nonce-bound** to this run's payload via the payload's own dialog token | `exchange.ok` counted a 401 as a store, and a stale entry from a previous run proved today's finding (A3) |
+| `DifferentialResponseVerifier` / `response_precondition` | Two preconditions before the oracle reads anything: the **noise floor** (repeats must agree) and the **neutral control** (control ≅ baseline), measured as populations, inconclusive when blocked | On a reflecting parameter, every string differs from everything — the precondition held for the whole alphabet and a traversal was provable with no filesystem behind it (A1) |
+| `OobVerifier` | Different *system* records the fact: our collaborator saw the request on a path only this probe knows | Something we control recording interaction cannot be faked by the target |
+| `BrowserVerifier` | Marker true *or* our dialog — but a failed run proves nothing, checked first | Two independent execution facts; a transport failure must not become evidence either way |
+
+### The supply side
+
+| # | Decision | Reasoning | Enforced by |
+|---|---|---|---|
+| 19 | **Capability Closure measures preconditions instead of trusting declarations**, via the `elicit/` folder family — a verifier with the candidate removed | The preconditions' measurements already lived inside the verifiers; extracting them lets the engine *establish* what it formerly only *assumed* — the #1 external-review finding | `elicit/`, `--elicit` |
+| 20 | **Elicitation is opt-in at every layer (`--elicit`)** | Elicitation is traffic against the *target* (sleep doses, second-identity reads); a default-on run would send requests an operator never asked for | `test_elicit.py` (T9) |
+| 21 | **Measured negatives persist (`capability.absent`) as skips, never as established facts** | A resumed engagement must not re-ask a closed question — and must not read a closed door as open either | `kernel/capability.py`, C2 |
+| 22 | **The two-gate flow measures eligibility and runs declarative confirmation**: prober → capability agent → deterministic planner → verifier agent → spec runner → oracle; the classic verifiers are shared via `kernel/confirm.py` | One experiment should have one measurement: the planner (not the proposer) chooses the verifier, the oracle body lives next to the spec, so the model can select but not write (TWO_GATE thread B, G1/G3/G10) |
+| 23 | **`sqli.extraction.v1` asks the target to *compute* a sentinel and carries its own label (`sqli-extraction`)** | Reflection can satisfy any echo oracle; computation cannot be faked. The separate label stops the per-label skip rule making the timing and extraction proofs mutually exclusive (P6) |
+
+### The tool's own security and honesty
+
+| # | Decision | Reasoning | Enforced by |
+|---|---|---|---|
+| 24 | **Every operator string that joins a path or a protocol is validated at parse time** (`safe_component`, cookie/operator-string rules), and a run destination already holding a ledger is refused without `--fresh` | `../x` as a target name or CR/LF in a cookie is injection into our own tooling; silent path reuse poisons the ledger discipline (T1/2.5/2.6) |
+| 25 | **The UI is read-only over artifacts, loopback-only by default, unguarded writes impossible** (guard header), bearer-token required when exposed, and job launch is a fixed argv whitelist — never a shell | The UI starts jobs with this machine's authority; every browser-reachable write path or path escape is a lever someone else can pull (T5/T3/2.3) |
+| 26 | **Honest boundaries are listed, not hidden** (§22.10) and static policy tables (`MODEL_PRICES`, `SEVERITY_WEIGHTS`) are *named* as policy statements pinned by test | A document that claims more than the engine does is the error this whole design exists to prevent |
+| 27 | **Fail-closed scope/run-separation CLI gates** (exit 2 on scopeless operator surfaces; per-run directories) | An unscoped surface enters a run only to have every probe to it refused — better to name the problem before any socket opens (2.4) |
+| 28 | **A crashing transport is an unmeasured effect, never a dead run** — result row with `crashed=True`, breaker untouched | A driver bug must not erase the audit trail between decision and result (D1) |
+
+### Deliberate non-decisions (the deferral list)
+
+These were offered by external review and consciously *not* built, each a
+workstream of its own: stateful workflow modeling / auth automation; loosening
+the LLM quarantine (a product decision, an invariant by design); technique-corpus
+expansion *before* the claim-supply gap closed (a correct technique built against
+a graph that supplies one of eight claims is inert); transport widening (http2,
+DNS OOB). §24 says what the order should now be.
+
+---
+
+## 24. What's next — the consolidation of the roadmap
+
+Every next-step list the engine's history produced — the progress log's
+"suggested next steps", the R&D threads' build orders, the external review's
+deferrals, and §22.10's open notebook — consolidated into one agenda. Ordered by
+what unblocks the most, with the owning thread. The honest headline behind the
+ordering is unchanged since 2026-09: **breadth of technique is currently limited
+by breadth of measurement supply, and the corpus is inert without it** — so
+supply first, corpus second.
+
+| Priority | Item | What it unblocks | Source / where |
+|---|---|---|---|
+| 1 | **Header/url execution grammar.** G3.2 made header/url surfaces probeable (canaries aim by position); the browser still cannot carry a header or rewrite a path template, so a header/url XSS is a lead, never a finding. Landing the execution grammar turns those leads into confirmable candidates | The last `where` gap in the reflected family; several API programs are header-driven | §22.10 item 4; Appendix G "deliberately left open" |
+| 2 | **Elicitor timing spec-projection (A2's remainder).** `elicit/timing` still samples its populations in blocks and derives its dose margin from its own constants; give it the same spec projection the verifier has (interleaved, spec-derived dose gap) | The capability *measurement* that opens the timing door stops being foolable by monotonic drift — the verifier already is not | §22.10 item 13 |
+| 3 | **The stored-surface gap: `companions`/`read_back`.** No surface declares the fixed form fields a stored submission must carry or where stored input renders back, so `xss_stored` chains only where the operator or the two-gate prober supplies them. Needs a surface-shape extractor on the recon/bridge side | `xss_stored` fires from the graph instead of only from declarations | §22.10 item 3; README §7 item 5 (git history) |
+| 4 | **The stored-XSS dialog-less grammar.** A3 binds a stored proof to the payload's dialog token; a payload family with no dialog text cannot be bound and is refused. Either give the stored grammar a token the proof can read or accept the honest ceiling | The corpus's only stored technique keeps its finding-grade path | Appendix I "deliberately left open" |
+| 5 | **CAPEC-first ingestion (thread C).** Invert the pipeline: map CAPEC `Prerequisites` → the `CAPABILITIES` tuple *before* any technique generation. A prerequisite that maps to an existing capability means the corpus is elicit-able; one that maps to nothing means the honest output is a new elicitor, not a new technique. Then CVE ingestion is the payload lane: variants merged into existing `probes.py`, Tier A (clean PoC) first | Every `next`/`planned` vuln class in the mapping table becomes reachable; the ~17% SOTA limit stays, but it stops mattering because reachable techniques compete, not inert ones | `VULN_ENGINE_RND.md` thread C §5; the build plan there |
+| 6 | **Recon supply items still open** — a scope lookup that binds when no callable is passed (fail closed instead of `skipped_out_of_scope: 0`), program-policy gating in the bridge (map `weakness_class → vuln_class` and drop ineligible techniques *before* scheduling), the 40-surface graph cap as a policy question (cap by budget/score? report a coverage ratio in the findings?) | The bridge stops handing over parts of the estate silently | §22.10 items 2, 11; RND thread C §12.4 |
+| 7 | **Technique breadth per the OWASP build order** — security headers (A02, needs the passive technique shape) → path traversal → echo-based SQLi → CORS → cookie flags → user enumeration → SSTI → XXE (reuses the existing `oob.read` verifier) → error disclosure. Each new class obeys the melting-pot contract: one folder, preconditions a surface can carry, an oracle that supports *independent* measurement, or it must not be built | Class/technique corpus breadth — but only after item 5, or what lands is inert | README §8 (git history); thread C |
+| 8 | **Success-aware memory (H1's remainder).** The anomaly distillate counts surprises, not outcomes; a proposal whose experiment previously *proved* cannot be preferred, and one that previously failed cannot be demoted. Extending the distillate with outcome cells (still surface-free, still advisory, still pinned to driver+CLI only) closes that | Cross-engagement learning that compounds instead of merely reordering | §22.10 item 9; Appendix H |
+| 9 | **Field evaluation breadth.** The instrument is built and calibrated against planted bugs and the fixture; real-framework noise, WAFs, CSP, auth boundaries, non-echoing blind classes are untested at scale. DVWA and Juice Shop runs exist but scored L0/L2. Also: the one pre-existing live-browser dialog-eval failure (environment-dependent, named in Appendix I) needs a stable harness rather than a muted assertion | The honest estimate of field value stops being "unknown" | progress log "honest assessment"; §21 |
+| 10 | **Held-back verifier vocabulary.** The holding pen is the backlog made explicit; entries group by `(needs_verifier, vuln_class)` and are sorted by value. The work is: pick the top group, land the named verifier, promote by PR | Each landed confirm kind unlocks the next held population | `world/views.holding_pen_summary`; Appendix E task 3 |
+| 11 | **Deferred product decisions** — stateful workflow modeling and auth automation (a workstream of its own); loosening the LLM quarantine (deliberate invariant; any loosening is a product call with a written threat model). Also transport widening (http2, DNS-based OOB) stays deferred until a target demands it | — | EXTERNAL_REVIEW deferral list (`VULN_ENGINE_RND.md` thread D) |
+| 12 | **Multi-capability surfaces.** A parameter may legitimately be both reflected and remote-fetch; `capabilities` sets can now hold measured facts, but the *declared* claim is still strongest-wins, and what the graph bridge emits is still one location per edge | Removes a shape of silent-blindness on real parameters | §22.10 item 5 |
+
+Three open-ended decisions are deliberately *not* resolved anywhere yet, because
+the right answer is a policy call an operator should make, not a constant to
+nudge: (a) the graph seed's default cap vs a coverage ratio in the finding set
+(item 6 above / §22.10 item 11); (b) whether the confirmation allowance stays
+additional traffic or becomes a reallocated share (`confirm_share`, §22.10 item
+12); (c) whether elicitation ever becomes default-on for operators who declare a
+program (T9's rationale says why it is off today).
 
 ---
 
@@ -3955,19 +4199,15 @@ that claimed more would be the error this whole design exists to prevent.
 
 | File | Role |
 |---|---|
-| `docs/vuln_engine_docs/README.md` | the consolidated architecture doc + measured recon-supply analysis |
-| `docs/vuln_engine_docs/VULN_ENGINE_COMPLETE.md` | implementation reference |
-| `docs/vuln_engine_docs/phase1_checklist.md` · `phase2_checklist.md` · `phase3_checklist.md` | per-phase exit criteria |
-| `docs/vuln_engine_docs/progress.md` | the running build log |
-| `docs/vuln_engine_docs/RND_dynamic_preconditions.md` | dynamic-preconditions research — the design source for Capability Closure (§12.10) |
-| `docs/vuln_engine_docs/EXTERNAL_REVIEW_TRIAGE.md` | the merged verdict of three external reviews; the per-gap disposition is in Appendix D of this file |
-| `docs/vuln_engine_docs/CVE_ingestion.md` | CVE ingestion |
-| `docs/vuln_engine_docs/TWO_GATE_RESOLUTION_ASSESSMENT.md` | the two-gate assessment |
+| `VULN_ENGINE_ONBOARDING_DEPTH.md` (this folder) | the teaching deep-dive — high level to low level, for onboarding a new engineer |
+| `VULN_ENGINE_RND.md` (this folder) | the consolidated R&D record — dynamic preconditions (thread A), the two-gate resolution (thread B), CVE/CAPEC ingestion (thread C), the external-review triage (thread D) |
 | `NOVELTY.md` (repo root) | novelty levels and the plan-table doctrine |
+| *(git history)* | the previously separate `README.md`, `VULN_ENGINE_COMPLETE.md`, the three `phase*_checklist.md`, `progress.md`, `RND_dynamic_preconditions.md`, `TWO_GATE_RESOLUTION_ASSESSMENT.md`, `CVE_ingestion.md`, `EXTERNAL_REVIEW_TRIAGE.md` — consolidated on 2026-10-20 into this file (decision record §23, roadmap §24), the onboarding doc and the R&D doc |
 
 **This file is the master reference.** Where it disagrees with any other
 document, this file was written from the code last and should be re-checked
 against the code, not trusted because it is newer.
+
 ---
 
 ## Appendix A — Layering and the import graph
@@ -4550,3 +4790,130 @@ but no test drives a multi-round memory-shaped campaign end to end — the
 ranking is exercised at the driver level, where it lives. Vuln-class breadth
 remains out of scope: the seven classes and eight techniques stand as they
 were.
+
+---
+
+## Appendix J — Gap-closure batch 6 (2026-10-20)
+
+Eleven items, same shape as Appendices E–H: the gap named, what closed it,
+where the proof lives. Vuln-class breadth is out of scope for this batch too —
+the seven classes and eight techniques are unchanged, and no new confirm kind,
+oracle, capability or technique was added. This batch is entirely about
+**whether a finding that is produced is a finding that is true**, and about the
+four places where the engine could lose work it had already paid for.
+
+| Item | The gap | What closed it | Tests |
+|---|---|---|---|
+| A1 | `differential.response` compared status, length and body hash — and required only that the injected response differ from the baseline **and** from the control. On a parameter that *reflects its value*, three values produce three different pages, so the precondition held for every string in the alphabet: a path traversal was provable against a page with no filesystem behind it. The same oracle is the two-gate runner's (`twogate/spec.py`), so both flows inherited it | two preconditions, in `twogate.spec.response_precondition` and mirrored in `DifferentialResponseVerifier`, pinned to each other by the route-parity test: **the noise floor** — every population is measured `SAMPLES` times and the repeats must agree (a CSRF-token or timestamped page cannot support a differential at all), and **the neutral control** — the control must be indistinguishable from the baseline, because its whole job is to show what the surface answers when the payload's *semantics* are absent. `OracleContext` gained `baseline_population`/`control_population` so the oracle reads the repeats rather than a pre-digested boolean; the runner's refusal names which side was unreadable. Both are preconditions, so a blocked comparison is **inconclusive, never refuted** — and the verifier's `samples_per_population` claim is now true (it had declared two while measuring one) | `test_route_parity.py` +4 (14 total: the reflecting parameter, the noisy baseline, and the two-gate route proving and refusing the same two experiments) |
+| A2 | The timing verifier sampled **all** baseline requests and then **all** injected ones, `SAMPLES = 2`. Any monotonic drift — a warming target, a WAF's rate window, a load balancer rotating backends, a shared host's neighbours — landed entirely on the second block and read as a separation; the dose experiment then ran on the same drift and "confirmed" a cause. The dose margin was `0.4 × (6s − 2s)` whatever the spec's payloads said | populations are sampled **interleaved with alternating order** (ABBA: baseline first on even rounds, injected first on odd), so a drift's effect on the two medians is symmetric; `SAMPLES`/`DOSE_SAMPLES` are 3, and `spec.samples` is a floor the verifier may raise, never lower; `timing_verifier.dose_seconds` reads the delay out of *this injection's* own two dose payloads (last number, the shape every corpus spelling ends with) and the constants are the fallback for a payload naming no delay; two doses that declare no positive gap are refused **before** the experiment runs, because a dose response cannot be read from a pair that never varied | `verification/test_timing_interleave.py` (6: the monotonic-drift stopwatch, the ABBA order pinned call by call, the sample floor, the spec-derived 0.5s/1.0s gap with its evidence numbers, the equal-dose refusal, the spelling table) |
+| A3 | The stored-XSS verifier accepted `exchange.ok`, which is only `status is not None` — so a 401 login page counted as a successful store — and its proof was bound to nothing: the dialog it looked for was a fixed string, so a payload stored by an **earlier run** proved today's finding | every verification mints a nonce, substitutes it into the payload's own dialog text (the one token the spec, the payload and the proof all read), and asks the browser for execution **and** for the nonce — as the dialog message, or in the rendered markup (inline script source is part of `documentElement.innerHTML`). A spec whose payload does not carry the token it asks the proof to look for is refused (nothing to bind), as is a spec that declares no dialog text. The inject's status is checked explicitly: `None` or `>= 400` is an answered rejection, not a store. The nonce and the inject status ride the evidence, so a reader can tell a fresh proof from a replayed one | `verification/test_stored_xss_runner.py` 17 (5 new: the stale entry, the auth-refused inject, the 500 inject, the un-bindable payload, the un-bindable spec) — the `ScriptedBrowser` double now answers exactly the marker names it was asked for, which is what a real driver does |
+| A4 | `Evidence.__post_init__` and `Observation.__post_init__` copied the payload with `dict()` — deep enough to pass the existing aliasing test, shallow enough that `markers`, `dialogs` and `byte_offsets` still pointed at the producer's own lists. Clearing a marker map after building the evidence rewrote the recorded finding | both classes deep-copy in `__post_init__` and in `to_dict`, so the log's record is the record at every depth | `kernel/test_evidence.py` +1 (9 total: nested list/dict mutation in, and mutation of the dict `to_dict` handed out) |
+| B1 | One budget served proposals and confirmations alike. A run that spent it probing had nothing left to prove what it found — measured on the closure fixture: 25 of 32 probe requests deferred, no candidate produced, and the run's headline finding disappeared. `DEFER` was also terminal: a verification refused for budget was filed as a conclusive "nothing there" | `DispatchPolicy.confirm_share` grants confirmations their **own allowance** (`confirmation_allowance`, additional to the general budgets so the probes that produce candidates are not starved by it); `EffectRequest.confirm` marks a verifier's requests (set in all eight verifier paths and both two-gate runner routes); `Decision.budget` distinguishes a budget DEFER from an eligibility one; `PolicyGate.budget_deferrals` counts them; `VerificationLayer.verify` marks such a verdict `deferred` (and `Verdict.to_dict` carries it); the driver queues deferred candidates and **drains them after the proposal pass**, logging each retry, and files an *inconclusive* receipt for the arm so a later run is free to ask again. A campaign-visible consequence is named in §22.10 item 12: the allowance is additional traffic, not a reallocation, and `confirm_share = 0` restores the single budget exactly (the platform default, which recon keeps) | `policy/test_budget_split.py` (7: the spent-proposal-budget split, the bounded confirmation allowance, the no-split fallback, the summary halves, the deferred-marking, the ordinary refusal that is *not* retryable, and the driver's retry proving a finding) |
+| B2 | `session_b_headers` were applied on the HTTP path only. A browser effect marked `_session="b"` had the marker popped and ignored, so a stored-XSS confirmation "as the victim" really ran anonymously — the evidence said victim, the measurement said nobody. A declared non-cookie identity header was dropped the same silent way | the browser branch carries the declared `Cookie` to the transport (`BrowserEffect.run(..., cookies=...)`, threaded into both drivers' cookie handling); a browser run asking for session B with no declared session is refused by the same `SESSION_B_REFUSAL` the HTTP path uses (and `views.blocked_on_session_b_split` counts it as the operator fix it is); and a declared session-B identity a browser cannot carry (an `Authorization` header, say) is refused **by name** rather than silently measuring an anonymous view | `policy/test_session_b_browser.py` (4: the cookie carried, the anonymous run unchanged, the undeclared refusal, the un-carryable header named) |
+| B3 | Nothing deduped verification within a run. Two hypotheses on one surface can propose the same experiment, and it was measured once per proposal: the expensive half of the engine (browser runs, several HTTP populations) spent twice for one answer | the driver keys a per-run verdict map on `candidate.id` **plus a digest of the confirmation spec** — the id says which surface, the spec says which experiment, and deduping on the id alone would silently skip a genuinely different payload on the same parameter. A hit reuses the prior verdict (so a proven claim still counts as found in the later arm), logs `verify.deduped`, and counts `verifications_deduplicated`; a **deferred** verdict is never cached, so the retry is still owed | `scheduler/test_verification_dedupe.py` (4: same claim twice, same id with a different experiment, the deferred verdict not cached, the map cleared per run) |
+| C1 | `seed/from_graph.py` passes `max_surfaces=40` while the graph reader loads up to 2,000 URLs. The report does print `capped at N (M dropped)`, but nothing in the findings or the exit status separates "tested the estate, found nothing" from "tested the first 40 surfaces of 200" | **documented, deliberately not changed in this batch** — §22.10 item 11 now states the number, the headroom, the flag that raises it (`--max-surfaces`), and why the fix is a policy question rather than a constant to nudge. Called out by the operator as a documentation item | docs only (§22.10 item 11) |
+| C2 | A measured **negative** capability lived only in the closure report's memory. A resumed engagement — reading `capability.measured` rows to know what it had already established — re-measured every capability the previous run had already ruled out | negatives are persisted as `capability.absent` rows (`kernel/capability.py`), a spelling deliberately distinct from `capability.measured` so a reader that wants open doors cannot read a closed one as open; the closure pass reads them back into a per-surface absent set and skips those pairs, counting them as `skipped_known_negative` (a skip, never a silent one). `ClosureReport.to_dict` carries both numbers | `elicit/test_elicit.py` +1 (14 total: the row written with its reason, the second pass skipping it as a *negative* known) |
+| C3 | The receipts ledger lived inside the run's own output directory — and §2.5 requires every run to get a new directory — so the engagement's memory of what it had already paid for was reset by following the run-separation rule. The second run re-bought every answer | `run_engine.receipt_store(output_dir, resume)` and the `--resume [LEDGER]` flag: omitted, the per-run file (unchanged behavior); bare, the engagement-wide `<output root>/receipts.jsonl`; with a path, exactly that file. The CLI states which ledger and whether it already existed, because a mistyped path creates an empty store and an empty store looks exactly like an engagement nothing has been attempted against yet. Artifacts stay per-run — memory is shared, ledgers are not | `test_cli_resume.py` (5: the three path rules, the engine actually receiving the shared store, and the run's artifacts still landing in its own directory) |
+| D1 | `PolicyGate._execute` called the transport unguarded, so a driver bug propagated out of `run()` and killed the engagement — *after* the decision row and *before* the result row, leaving an audit that could not say what happened | the call is exception-guarded: the crash becomes an `effect.result` row (`crashed=True`, the exception rendered, `status=None`) plus a `GateOutcome` whose `executed` is false, so every verifier already treats it as inconclusive rather than refuted. The circuit breaker is deliberately **not** updated — a crash in our own client says nothing about whether the host is answering | `policy/test_gate_crash.py` (3: no exception escapes, the result row the audit reads, the breaker untouched) |
+| D2 | `Dispatcher._record` stamped rows with `time.time()` while `decide` ordered on the `now` it was handed: two clocks in one decision's neighborhood, which is exactly what makes a replayed or fake-clocked run's decision order unreadable. `_decisions` also grew without a bound — every host × operation × retry appends a row | `now` is threaded through `_record` (one clock per decision, the caller's) and the log is capped at `MAX_DECISIONS = 5000`, keeping the **newest** rows — a report reads the end of the run — and counting what it dropped (`decisions_dropped`), so a truncated log can say so instead of quietly lying | `tests/recon/test_dispatch_hardening.py` (7: the injected stamp, the cap and its counters, the copy-not-live accessor, the cooldown's stamp agreeing with its ordering, and the split's no-op under an unlimited budget) |
+| D3 | `test_an_exposed_server_requires_the_bearer_token` failed deterministically (a socket read timeout on the unauthenticated POST), so the batch had no trustworthy test baseline; and the docstrings still described the pre-token guard order | root cause, found by reading rather than guessing: `do_POST` wrote a 401 while the request body was still unread, so on a kept-alive connection the body was parsed as the next request line and the client waited forever for an answer the server believed it had sent — plus the token-passing GET reached the program panel, whose Postgres read waited the pool's 30-second acquire default in a hermetic suite. `_drain()` reads the body **before** either guard can answer (nothing interpreted until both pass); `shared/db.get_conn(timeout=...)` and `programs.DB_WAIT_SECONDS = 2.0` bound a request-serving read, while batch ingest keeps psycopg's default; both are pinned by tests | `tests/ui/test_ui_server.py` +2 (67 total: the body-drain helper with a real header map and byte stream, and the bounded database wait) |
+
+**Invariants held.** A1 and A2 both *remove* provability rather than add it: no grade moves up, no oracle gains a path, and every blocked comparison is reported as inconclusive — with the numbers, so an operator can tell "the control is not neutral here" from "the target is too noisy". A3 keeps its new strictness inside the stored verifier (the reflected path is untouched) and binds the *proof*, not the payload shape: the nonce rides the spec's own dialog token, so nothing is re-derived. A4 changes only when memory is shared, never what is stored. B1's allowance is additional traffic — stated in §22.10 because it is a real operational consequence — and the retry is bounded to one attempt per candidate, with a still-deferred retry logged as the budget being too small rather than looped. B2 adds a refusal where identity cannot be carried, which is the same shape as the session-B refusal the HTTP path already had. B3 caches only a completed measurement, keyed by the experiment rather than the surface. C2 persists a *negative fact* and reads it back as "already asked", never as "established". C3 shares memory without sharing artifacts. D1 turns a crash into an unmeasured effect (never a finding, never a refutation); D2 removes a second clock and a growth the operator did not choose. C1 adds no code. **No item in this batch can turn a lead into a finding**: the deciding paths (the gate, `check_independence`, the validator) are untouched, and every finding in this batch's tests still travels the ordinary probe → gate → independent verifier chain.
+
+**Verified test count, counted from the item test files** (collect-only, not guessed): A1 — 4 new in `test_route_parity.py` (14 total); A2 — 6 (`verification/test_timing_interleave.py`); A3 — +5 (`verification/test_stored_xss_runner.py`, 17 total); A4 — +1 (`kernel/test_evidence.py`, 9 total); B1 — 7 (`policy/test_budget_split.py`); B2 — 4 (`policy/test_session_b_browser.py`); B3 — 4 (`scheduler/test_verification_dedupe.py`); C2 — +1 (`elicit/test_elicit.py`, 14 total); C3 — 5 (`test_cli_resume.py`); D1 — 3 (`policy/test_gate_crash.py`); D2 — 7 (`tests/recon/test_dispatch_hardening.py`); D3 — +2 (`tests/ui/test_ui_server.py`, 67 total). Final verification (2026-10-18): `pytest tests/vuln_engine tests/ui -q` → **1002 passed, 2 skipped, 1 failed**; `pytest tests/recon -q` → **1530 passed, 1 skipped**; `mypy service/vuln_engine run_engine.py run_twogate.py service/ui` → clean, **152 source files**.
+
+**The one failure, attributed rather than explained away.**
+`tests/vuln_engine/eval/test_phase1.py::test_the_xss_finding_rests_on_a_browser_actually_running_the_payload`
+asserts that the reflected-XSS finding's evidence carries the dialog the payload
+opened (``assert xss["evidence"]["dialogs"]``); on this machine `dialogs` is
+empty while the marker assertions above it pass, so the live browser run
+recorded execution but no dialog event. It is **pre-existing and not caused by
+this batch**: with every file this batch touched stashed, the test fails
+identically (`1 failed, 13 deselected`, same assertion). The eval harness is
+not hermetic — it needs the compose fixture app, the collaborator and a real
+Chrome — and the dialog event is timing-dependent, which is the likely (not
+proven) cause. It is left failing and named here rather than muted: a skipped or
+narrowed assertion would have made this appendix's count a claim instead of a
+measurement.
+
+**Deliberately left open.** The graph seed's 40-surface default (C1, above — a
+policy question, not a constant). The confirmation allowance is additional
+traffic rather than a reallocation (§22.10 item 12). The elicitation timing
+module keeps its own block-sampled, constant-derived dose measurement: the
+verifier's timing path is interleaved and spec-derived, but the capability
+*measurement* that opens the timing door can still be fooled by a monotonic
+drift, and closing it means giving the elicitor the same spec projection the
+verifier has (§22.10 item 13). Stored-XSS freshness is bound by a nonce in the
+spec's dialog token; a payload family that carries no dialog text at all cannot
+be bound and is refused rather than proven — the honest answer, but it means a
+dialog-less stored grammar stays a lead until it names a token the proof can
+read. `--resume` shares one ledger by path; nothing merges two ledgers, so an
+engagement that has been run from several directories still has to name the one
+it wants. Vuln-class breadth remains out of scope: the seven classes and eight
+techniques stand as they were.
+
+---
+
+## Appendix J — Gap-closure batch 6 (2026-10-20)
+
+Two items, same shape as Appendices E–I: the gap named, what closed it, where
+the proof lives. Both items are pure-intake / pure-view — they do not touch any
+technique's gating logic, any verifier, any scheduler path, or any definition of
+what counts as a finding. The corpus's seven classes and eight techniques are
+unchanged, same as every batch before it.
+
+| Item | The gap | What closed it | Tests |
+|---|---|---|---|
+| J1 | A declared `Surface.capability` string was never validated against the kernel's `CAPABILITIES` vocabulary at intake. `parse_surface()` in `run_engine.py` and `_to_surface()` in `seed/from_graph.py` accepted any token, and `capability.declared_facts(seed)` only promoted it to a fact when `surface.capability in CAPABILITIES` — so an unknown string (a typo, a stale graph label, a value from an ingested program that the kernel does not speak) was silently dropped, not refused. This was the one place in the codebase that did not loudly check exactly what `CapabilityFact.__post_init__`, `elicit/registry.py` and `llm/hypothesize.py` already check. | `parse_surface()` raises `ValueError` for `capability and capability not in CAPABILITIES`, restating the kernel vocabulary in the error text; `_to_surface()` raises the same `ValueError` for a graph-derived candidate whose `capability` is not in the vocabulary; `validate_seed()` (batch 2, Phase 4) now also refuses a declared surface whose capability is not in `CAPABILITIES` with a named `SurfaceProblem.reason`, the same shape as the existing `where`-gate refusal — but registry-independent, because capability is a kernel constant; the CLI (`check_seed` / `check_seed_where` renamed) prints the refused surface, the named reason, and an operator action, and sets exit 2; `report.json` carries the refusal on `problems` the way the where-gate already did; nothing downstream changed — `declared_facts`, the elicitor registry, and the model-proposal validator still do their own checks, unchanged. | `test_parse_surface_capability.py` (8: unknown raises with the named vocabulary text, known parses, the typo-with-no-param case, the default-capability rules); `test_seed_where_gate.py` (7 new: unknown refused with named reason, known-capability passes, no-claim passes, registry-independent refusal, both refusals can coexist, the problem row carries `capability`); `test_seed_from_graph.py` retested through the hermetic suite because `_to_surface` now raises on a bad graph capability. **Batch total: +15 tests.** |
+| J2 | `world/views.coverage()` is receipt-driven: it can only describe attempts that *happened*. A technique that never got an arm — because the operator declared the wrong (but valid) capability, or declared no capability that the technique gates on — leaves no receipt and therefore no coverage row at all, so the report cannot say "technique X loaded and got zero eligible surfaces this run". That is the second real failure mode: a correctly-spelled-but-wrong capability produces zero signal, and the receipt view is structurally unable to name it. | `world/views.eligibility_census(seed, registry)` — a pure view, same shape as `coverage`/`holding_pen_summary`/`abduction_summary`: takes the seed and registry, calls every registered technique's own `surfaces(seed)` gate once against the full seed, and returns a dict keyed by technique name with `eligible` (int) and `surfaces` (tuple of surface keys). It is computed once per run in `Engine.run()` and placed on `RunReport.eligibility_census`, which now flows into `report.json` and the `summary()` view exactly like the other keys; `run_engine.print_eligibility_census(report)` prints nothing when every technique has at least one eligible surface, and prints a named line when any technique has 0 — listing the technique, its eligible count, and the surfaces it did see — so the zero-arm case is visible rather than silent. The census does not schedule, does not spend budget, and does not change what a run does — it is a read-only report of what `surfaces()` returns. | `world/test_eligibility_census.py` (6: the census lists every registered technique, the technique gets its eligible count from its own gate, a technique with 0 eligible still appears with count 0, the census is deterministic in registry order, the census is pure (two calls return distinct but equal objects), a no-claim surface is not elite for the OOB technique); the view is re-proven additive through the hermetic engine+UI suites (no coverage/holding-pen/findings assertions were retuned). **Batch total: +6 tests.** |
+
+**Invariants held.** J1 adds a refusal at intake, not a new capability or a new
+finding path: an unknown capability is refused before the engine touches the
+registry or the gate, the same place a bad `where` was already refused; a valid
+but wrong capability is still accepted and still invisible to the wrong technique
+— that visibility problem is what J2 names, and J2 does not make the technique
+fire for a capability it does not gate on. J2 is a read-only view computed from
+the same `surfaces()` the scheduler will later read, so it cannot disagree with
+what the run actually does, and it cannot add, remove, or reclassify any arm. No
+item in this batch can turn a lead into a finding: the deciding paths (the gate,
+`check_independence`, the validator) are untouched, and every finding in this
+batch's tests still travels the ordinary probe → gate → independent verifier
+chain.
+
+**Verified test count, counted from the item test files** (collect-only, not
+guessed): J1 — 8 (`test_parse_surface_capability.py`) + 7 new in
+`test_seed_where_gate.py`; J2 — 6 (`world/test_eligibility_census.py`).
+Final verification (2026-10-20, re-run after the `views.py` import fix): 
+`pytest tests/vuln_engine tests/ui -q` → **1009 passed, 17 skipped, 0 failed** 
+(exit 0; the only warning is a deprecation notice from `psycopg_pool` in the UI
+demo test, not a test failure); `mypy service/vuln_engine run_engine.py
+run_twogate.py service/ui` → **Success: no issues found in 152 source files** 
+(exit 0). The item-test count (8 + 7 + 6 = 21) plus the direct-hermitic 
+predecessor (1009 - 21 = 988 on `tests/vuln_engine tests/ui`) reconciles exactly 
+to the final line (1009 / 17 / 0), so the appendix number is a measurement, not a 
+claim.
+
+**The one failure, attributed rather than explained away.**
+None in this batch — the hermetic engine + UI suites ran clean against this batch's
+new intake/refusal and census paths, and the only changed files under mypy's
+check are the ones this batch touched (plus the docstring-only import addition on
+`service/vuln_engine/world/views.py`); no prior passing assertion was retuned.
+
+**Deliberately left open.** J1 refuses an unknown capability at intake, but it
+does not infer the *right* capability from the surface's URL, param name, or
+position — that is the elicitor/closure side's job (thread A), and a wrong-but-
+valid capability remains a human-declaration problem the census can name but not
+fix. J2 names the zero-arm case; it does not schedule the technique anyway, and
+it does not add a capability to the vocabulary to make the arms appear — that is
+still the elicit supply story. The census keys on technique registration name,
+which is stable for a run but is a registry artifact, not a technique-class
+constant; a reader who wants the class behind a name still reads the manifest.
+
+**Batch arithmetic.** This batch added 15 + 6 = 21 tests. The prior hermetic
+baseline was 1009 - 21 = 988 passed / 17 skipped (Appendix I's hermetic engine +
+UI suites, restated here as the direct predecessor for this batch's final line,
+not Appendix I's full cross-project count which also included `tests/recon` and
+the one pre-existing live-browser failure). This batch's final line is therefore
+1009 passed / 17 skipped / 0 failed on the same `tests/vuln_engine tests/ui`
+path, with no prior assertion retuned and no existing test changed to make the
+number hold.
