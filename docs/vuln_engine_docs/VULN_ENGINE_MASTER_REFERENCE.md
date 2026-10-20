@@ -4069,6 +4069,20 @@ here, not hidden, because they bound what the engine can do today:
     gap from; closing it means giving the elicitor the same spec projection the
     verifier has.
 
+14. **A valid-but-wrong declared capability still passes intake and produces
+    zero arms with no refusal (the batch-6 residual).** This is the one residual
+    the Appendix J preamble claims is already recorded but the notebook had
+    previously omitted. The eligibility census (Appendix J2) names it: a surface
+    whose `capability` is in `CAPABILITIES` but is not what any technique gates on
+    is accepted at intake (J1) and then produces no arm, because the claim does not
+    match any technique's gating vocabulary. The census lists the affected
+    technique with a `0 eligible surfaces` line, but the census does *not* fix the
+    wrong declaration, does *not* infer the correct capability, and does *not* key
+    on vuln class — it keys on registry name. That is the honest boundary of J2: it
+    makes the silent-zero case visible rather than silent, but it is still a
+    declaration problem the engine cannot autoresolve, and the census remains a
+    read-only naming view, not a repair.
+
 These are the honest boundary of "everything the engine is today". A document
 that claimed more would be the error this whole design exists to prevent.
 
