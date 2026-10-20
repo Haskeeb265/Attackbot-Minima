@@ -1238,7 +1238,11 @@ python -m pytest tests/vuln_engine -q
    carry, and what would you have declared to turn it into an ALLOW? *(§7.)*
 3. Hand-declare a surface on the fixture with the wrong capability
    (`capability=script_execution`). How many arms run — and is there an error?
-   *(Silent zero arms; capability spellings; §5.)*
+   *(None; no error — `script_execution` is a valid vocabulary word, so intake
+   accepts it. The capability is simply not what any technique gates on, so the
+   eligibility census now shows it as a `<technique>: 0 eligible surfaces` line
+   in the report. That is the named-visualization case, not the intake-refusal
+   case. See §5 and Appendix J2 in the master reference.)*
 4. Change `TimingVerifier`'s margin in a scratch copy and prove a lead that
    previously refused. Then break `check_independence`'s grade equality and
    watch the test — not the run — fail. *(Epistemics live in code, not config.)*

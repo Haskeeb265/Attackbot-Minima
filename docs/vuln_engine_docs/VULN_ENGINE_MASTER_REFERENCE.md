@@ -3954,12 +3954,12 @@ confirmations on the one budget, which is right for a recon-only dispatcher.
 
 ### 22.10 Notebook of measured limitations (honest gaps)
 
-Reconciled against Appendices D–H **and I** (batch 5): every item below was
-walked against what those batches closed. Closed gaps are gone from this
-list — a stale "boundary of truth" would mislead a reader who trusts the
-label — and what batch 5 itself left open is recorded here in the same voice.
-These are recorded here, not hidden, because they bound what the engine can do
-today:
+Reconciled against Appendices D–H, **I** (batch 5), **and J** (batch 6, the
+current one): every item below was walked against what those batches closed.
+Closed gaps are gone from this list — a stale "boundary of truth" would
+mislead a reader who trusts the label — and what batch 5 and batch 6
+themselves left open is recorded here in the same voice. These are recorded
+here, not hidden, because they bound what the engine can do today:
 
 1. **Graph supplies one of eight capability claims.** Two of eight techniques
    can fire from the recon graph alone; the rest need a claim recon does not yet
@@ -4032,9 +4032,11 @@ today:
    per-proposal meter — the junction does not price individual answers — and
    every dollar figure ultimately derives from the static `MODEL_PRICES`
    table, the same policy-statement caveat Appendix G records for it.
+
 11. **The graph seed is capped at 40 surfaces per run, silently, against as
     many as 2,000 URLs read (C1 — documented, deliberately not changed in this
-    batch).** `seed/from_graph.py` passes `max_surfaces=40`
+    batch).**
+    `seed/from_graph.py` passes `max_surfaces=40`
     (`DEFAULT_MAX_SURFACES`) to `derive_surfaces`, while the graph reader loads
     up to 2,000 URLs. The report *does* say `truncated`/`dropped` when it
     happens — `run_engine.py` prints `capped at N (M dropped)` — but nothing in
@@ -4045,8 +4047,8 @@ today:
     default an operator gets without asking, and the number two orders of
     magnitude of headroom exist for. Deliberately left as a documentation item
     because the right fix is a policy question (cap by budget? by host? by
-    score? report a coverage ratio in the finding set?), not a constant to
-    nudge.
+    score? report a coverage ratio in the finding set?), not a constant to     nudge.
+
 12. **Confirmation allowance is additional traffic, not a reallocation (B1's
     remaining shape).** With `confirm_share = 0.5` a run may send up to 1.5×
     its declared `host_budget`: the confirmation half is granted on top rather
@@ -4055,6 +4057,7 @@ today:
     reserved deferred the timing arm before it could propose). An operator who
     budgeted for 50 requests per host should know the ceiling is 75 with the
     split on; `confirm_share = 0` restores the single budget exactly.
+
 13. **The elicitation timing module keeps its own, older measurement shape
     (A2's remainder).** `elicit/timing` still samples its two populations in
     blocks (`SAMPLES = 2`, all quiet then all dosed) and derives its dose
@@ -4789,70 +4792,7 @@ per-round engines receive the distillate the same way the single pass does,
 but no test drives a multi-round memory-shaped campaign end to end — the
 ranking is exercised at the driver level, where it lives. Vuln-class breadth
 remains out of scope: the seven classes and eight techniques stand as they
-were.
-
----
-
-## Appendix J — Gap-closure batch 6 (2026-10-20)
-
-Eleven items, same shape as Appendices E–H: the gap named, what closed it,
-where the proof lives. Vuln-class breadth is out of scope for this batch too —
-the seven classes and eight techniques are unchanged, and no new confirm kind,
-oracle, capability or technique was added. This batch is entirely about
-**whether a finding that is produced is a finding that is true**, and about the
-four places where the engine could lose work it had already paid for.
-
-| Item | The gap | What closed it | Tests |
-|---|---|---|---|
-| A1 | `differential.response` compared status, length and body hash — and required only that the injected response differ from the baseline **and** from the control. On a parameter that *reflects its value*, three values produce three different pages, so the precondition held for every string in the alphabet: a path traversal was provable against a page with no filesystem behind it. The same oracle is the two-gate runner's (`twogate/spec.py`), so both flows inherited it | two preconditions, in `twogate.spec.response_precondition` and mirrored in `DifferentialResponseVerifier`, pinned to each other by the route-parity test: **the noise floor** — every population is measured `SAMPLES` times and the repeats must agree (a CSRF-token or timestamped page cannot support a differential at all), and **the neutral control** — the control must be indistinguishable from the baseline, because its whole job is to show what the surface answers when the payload's *semantics* are absent. `OracleContext` gained `baseline_population`/`control_population` so the oracle reads the repeats rather than a pre-digested boolean; the runner's refusal names which side was unreadable. Both are preconditions, so a blocked comparison is **inconclusive, never refuted** — and the verifier's `samples_per_population` claim is now true (it had declared two while measuring one) | `test_route_parity.py` +4 (14 total: the reflecting parameter, the noisy baseline, and the two-gate route proving and refusing the same two experiments) |
-| A2 | The timing verifier sampled **all** baseline requests and then **all** injected ones, `SAMPLES = 2`. Any monotonic drift — a warming target, a WAF's rate window, a load balancer rotating backends, a shared host's neighbours — landed entirely on the second block and read as a separation; the dose experiment then ran on the same drift and "confirmed" a cause. The dose margin was `0.4 × (6s − 2s)` whatever the spec's payloads said | populations are sampled **interleaved with alternating order** (ABBA: baseline first on even rounds, injected first on odd), so a drift's effect on the two medians is symmetric; `SAMPLES`/`DOSE_SAMPLES` are 3, and `spec.samples` is a floor the verifier may raise, never lower; `timing_verifier.dose_seconds` reads the delay out of *this injection's* own two dose payloads (last number, the shape every corpus spelling ends with) and the constants are the fallback for a payload naming no delay; two doses that declare no positive gap are refused **before** the experiment runs, because a dose response cannot be read from a pair that never varied | `verification/test_timing_interleave.py` (6: the monotonic-drift stopwatch, the ABBA order pinned call by call, the sample floor, the spec-derived 0.5s/1.0s gap with its evidence numbers, the equal-dose refusal, the spelling table) |
-| A3 | The stored-XSS verifier accepted `exchange.ok`, which is only `status is not None` — so a 401 login page counted as a successful store — and its proof was bound to nothing: the dialog it looked for was a fixed string, so a payload stored by an **earlier run** proved today's finding | every verification mints a nonce, substitutes it into the payload's own dialog text (the one token the spec, the payload and the proof all read), and asks the browser for execution **and** for the nonce — as the dialog message, or in the rendered markup (inline script source is part of `documentElement.innerHTML`). A spec whose payload does not carry the token it asks the proof to look for is refused (nothing to bind), as is a spec that declares no dialog text. The inject's status is checked explicitly: `None` or `>= 400` is an answered rejection, not a store. The nonce and the inject status ride the evidence, so a reader can tell a fresh proof from a replayed one | `verification/test_stored_xss_runner.py` 17 (5 new: the stale entry, the auth-refused inject, the 500 inject, the un-bindable payload, the un-bindable spec) — the `ScriptedBrowser` double now answers exactly the marker names it was asked for, which is what a real driver does |
-| A4 | `Evidence.__post_init__` and `Observation.__post_init__` copied the payload with `dict()` — deep enough to pass the existing aliasing test, shallow enough that `markers`, `dialogs` and `byte_offsets` still pointed at the producer's own lists. Clearing a marker map after building the evidence rewrote the recorded finding | both classes deep-copy in `__post_init__` and in `to_dict`, so the log's record is the record at every depth | `kernel/test_evidence.py` +1 (9 total: nested list/dict mutation in, and mutation of the dict `to_dict` handed out) |
-| B1 | One budget served proposals and confirmations alike. A run that spent it probing had nothing left to prove what it found — measured on the closure fixture: 25 of 32 probe requests deferred, no candidate produced, and the run's headline finding disappeared. `DEFER` was also terminal: a verification refused for budget was filed as a conclusive "nothing there" | `DispatchPolicy.confirm_share` grants confirmations their **own allowance** (`confirmation_allowance`, additional to the general budgets so the probes that produce candidates are not starved by it); `EffectRequest.confirm` marks a verifier's requests (set in all eight verifier paths and both two-gate runner routes); `Decision.budget` distinguishes a budget DEFER from an eligibility one; `PolicyGate.budget_deferrals` counts them; `VerificationLayer.verify` marks such a verdict `deferred` (and `Verdict.to_dict` carries it); the driver queues deferred candidates and **drains them after the proposal pass**, logging each retry, and files an *inconclusive* receipt for the arm so a later run is free to ask again. A campaign-visible consequence is named in §22.10 item 12: the allowance is additional traffic, not a reallocation, and `confirm_share = 0` restores the single budget exactly (the platform default, which recon keeps) | `policy/test_budget_split.py` (7: the spent-proposal-budget split, the bounded confirmation allowance, the no-split fallback, the summary halves, the deferred-marking, the ordinary refusal that is *not* retryable, and the driver's retry proving a finding) |
-| B2 | `session_b_headers` were applied on the HTTP path only. A browser effect marked `_session="b"` had the marker popped and ignored, so a stored-XSS confirmation "as the victim" really ran anonymously — the evidence said victim, the measurement said nobody. A declared non-cookie identity header was dropped the same silent way | the browser branch carries the declared `Cookie` to the transport (`BrowserEffect.run(..., cookies=...)`, threaded into both drivers' cookie handling); a browser run asking for session B with no declared session is refused by the same `SESSION_B_REFUSAL` the HTTP path uses (and `views.blocked_on_session_b_split` counts it as the operator fix it is); and a declared session-B identity a browser cannot carry (an `Authorization` header, say) is refused **by name** rather than silently measuring an anonymous view | `policy/test_session_b_browser.py` (4: the cookie carried, the anonymous run unchanged, the undeclared refusal, the un-carryable header named) |
-| B3 | Nothing deduped verification within a run. Two hypotheses on one surface can propose the same experiment, and it was measured once per proposal: the expensive half of the engine (browser runs, several HTTP populations) spent twice for one answer | the driver keys a per-run verdict map on `candidate.id` **plus a digest of the confirmation spec** — the id says which surface, the spec says which experiment, and deduping on the id alone would silently skip a genuinely different payload on the same parameter. A hit reuses the prior verdict (so a proven claim still counts as found in the later arm), logs `verify.deduped`, and counts `verifications_deduplicated`; a **deferred** verdict is never cached, so the retry is still owed | `scheduler/test_verification_dedupe.py` (4: same claim twice, same id with a different experiment, the deferred verdict not cached, the map cleared per run) |
-| C1 | `seed/from_graph.py` passes `max_surfaces=40` while the graph reader loads up to 2,000 URLs. The report does print `capped at N (M dropped)`, but nothing in the findings or the exit status separates "tested the estate, found nothing" from "tested the first 40 surfaces of 200" | **documented, deliberately not changed in this batch** — §22.10 item 11 now states the number, the headroom, the flag that raises it (`--max-surfaces`), and why the fix is a policy question rather than a constant to nudge. Called out by the operator as a documentation item | docs only (§22.10 item 11) |
-| C2 | A measured **negative** capability lived only in the closure report's memory. A resumed engagement — reading `capability.measured` rows to know what it had already established — re-measured every capability the previous run had already ruled out | negatives are persisted as `capability.absent` rows (`kernel/capability.py`), a spelling deliberately distinct from `capability.measured` so a reader that wants open doors cannot read a closed one as open; the closure pass reads them back into a per-surface absent set and skips those pairs, counting them as `skipped_known_negative` (a skip, never a silent one). `ClosureReport.to_dict` carries both numbers | `elicit/test_elicit.py` +1 (14 total: the row written with its reason, the second pass skipping it as a *negative* known) |
-| C3 | The receipts ledger lived inside the run's own output directory — and §2.5 requires every run to get a new directory — so the engagement's memory of what it had already paid for was reset by following the run-separation rule. The second run re-bought every answer | `run_engine.receipt_store(output_dir, resume)` and the `--resume [LEDGER]` flag: omitted, the per-run file (unchanged behavior); bare, the engagement-wide `<output root>/receipts.jsonl`; with a path, exactly that file. The CLI states which ledger and whether it already existed, because a mistyped path creates an empty store and an empty store looks exactly like an engagement nothing has been attempted against yet. Artifacts stay per-run — memory is shared, ledgers are not | `test_cli_resume.py` (5: the three path rules, the engine actually receiving the shared store, and the run's artifacts still landing in its own directory) |
-| D1 | `PolicyGate._execute` called the transport unguarded, so a driver bug propagated out of `run()` and killed the engagement — *after* the decision row and *before* the result row, leaving an audit that could not say what happened | the call is exception-guarded: the crash becomes an `effect.result` row (`crashed=True`, the exception rendered, `status=None`) plus a `GateOutcome` whose `executed` is false, so every verifier already treats it as inconclusive rather than refuted. The circuit breaker is deliberately **not** updated — a crash in our own client says nothing about whether the host is answering | `policy/test_gate_crash.py` (3: no exception escapes, the result row the audit reads, the breaker untouched) |
-| D2 | `Dispatcher._record` stamped rows with `time.time()` while `decide` ordered on the `now` it was handed: two clocks in one decision's neighborhood, which is exactly what makes a replayed or fake-clocked run's decision order unreadable. `_decisions` also grew without a bound — every host × operation × retry appends a row | `now` is threaded through `_record` (one clock per decision, the caller's) and the log is capped at `MAX_DECISIONS = 5000`, keeping the **newest** rows — a report reads the end of the run — and counting what it dropped (`decisions_dropped`), so a truncated log can say so instead of quietly lying | `tests/recon/test_dispatch_hardening.py` (7: the injected stamp, the cap and its counters, the copy-not-live accessor, the cooldown's stamp agreeing with its ordering, and the split's no-op under an unlimited budget) |
-| D3 | `test_an_exposed_server_requires_the_bearer_token` failed deterministically (a socket read timeout on the unauthenticated POST), so the batch had no trustworthy test baseline; and the docstrings still described the pre-token guard order | root cause, found by reading rather than guessing: `do_POST` wrote a 401 while the request body was still unread, so on a kept-alive connection the body was parsed as the next request line and the client waited forever for an answer the server believed it had sent — plus the token-passing GET reached the program panel, whose Postgres read waited the pool's 30-second acquire default in a hermetic suite. `_drain()` reads the body **before** either guard can answer (nothing interpreted until both pass); `shared/db.get_conn(timeout=...)` and `programs.DB_WAIT_SECONDS = 2.0` bound a request-serving read, while batch ingest keeps psycopg's default; both are pinned by tests | `tests/ui/test_ui_server.py` +2 (67 total: the body-drain helper with a real header map and byte stream, and the bounded database wait) |
-
-**Invariants held.** A1 and A2 both *remove* provability rather than add it: no grade moves up, no oracle gains a path, and every blocked comparison is reported as inconclusive — with the numbers, so an operator can tell "the control is not neutral here" from "the target is too noisy". A3 keeps its new strictness inside the stored verifier (the reflected path is untouched) and binds the *proof*, not the payload shape: the nonce rides the spec's own dialog token, so nothing is re-derived. A4 changes only when memory is shared, never what is stored. B1's allowance is additional traffic — stated in §22.10 because it is a real operational consequence — and the retry is bounded to one attempt per candidate, with a still-deferred retry logged as the budget being too small rather than looped. B2 adds a refusal where identity cannot be carried, which is the same shape as the session-B refusal the HTTP path already had. B3 caches only a completed measurement, keyed by the experiment rather than the surface. C2 persists a *negative fact* and reads it back as "already asked", never as "established". C3 shares memory without sharing artifacts. D1 turns a crash into an unmeasured effect (never a finding, never a refutation); D2 removes a second clock and a growth the operator did not choose. C1 adds no code. **No item in this batch can turn a lead into a finding**: the deciding paths (the gate, `check_independence`, the validator) are untouched, and every finding in this batch's tests still travels the ordinary probe → gate → independent verifier chain.
-
-**Verified test count, counted from the item test files** (collect-only, not guessed): A1 — 4 new in `test_route_parity.py` (14 total); A2 — 6 (`verification/test_timing_interleave.py`); A3 — +5 (`verification/test_stored_xss_runner.py`, 17 total); A4 — +1 (`kernel/test_evidence.py`, 9 total); B1 — 7 (`policy/test_budget_split.py`); B2 — 4 (`policy/test_session_b_browser.py`); B3 — 4 (`scheduler/test_verification_dedupe.py`); C2 — +1 (`elicit/test_elicit.py`, 14 total); C3 — 5 (`test_cli_resume.py`); D1 — 3 (`policy/test_gate_crash.py`); D2 — 7 (`tests/recon/test_dispatch_hardening.py`); D3 — +2 (`tests/ui/test_ui_server.py`, 67 total). Final verification (2026-10-18): `pytest tests/vuln_engine tests/ui -q` → **1002 passed, 2 skipped, 1 failed**; `pytest tests/recon -q` → **1530 passed, 1 skipped**; `mypy service/vuln_engine run_engine.py run_twogate.py service/ui` → clean, **152 source files**.
-
-**The one failure, attributed rather than explained away.**
-`tests/vuln_engine/eval/test_phase1.py::test_the_xss_finding_rests_on_a_browser_actually_running_the_payload`
-asserts that the reflected-XSS finding's evidence carries the dialog the payload
-opened (``assert xss["evidence"]["dialogs"]``); on this machine `dialogs` is
-empty while the marker assertions above it pass, so the live browser run
-recorded execution but no dialog event. It is **pre-existing and not caused by
-this batch**: with every file this batch touched stashed, the test fails
-identically (`1 failed, 13 deselected`, same assertion). The eval harness is
-not hermetic — it needs the compose fixture app, the collaborator and a real
-Chrome — and the dialog event is timing-dependent, which is the likely (not
-proven) cause. It is left failing and named here rather than muted: a skipped or
-narrowed assertion would have made this appendix's count a claim instead of a
-measurement.
-
-**Deliberately left open.** The graph seed's 40-surface default (C1, above — a
-policy question, not a constant). The confirmation allowance is additional
-traffic rather than a reallocation (§22.10 item 12). The elicitation timing
-module keeps its own block-sampled, constant-derived dose measurement: the
-verifier's timing path is interleaved and spec-derived, but the capability
-*measurement* that opens the timing door can still be fooled by a monotonic
-drift, and closing it means giving the elicitor the same spec projection the
-verifier has (§22.10 item 13). Stored-XSS freshness is bound by a nonce in the
-spec's dialog token; a payload family that carries no dialog text at all cannot
-be bound and is refused rather than proven — the honest answer, but it means a
-dialog-less stored grammar stays a lead until it names a token the proof can
-read. `--resume` shares one ledger by path; nothing merges two ledgers, so an
-engagement that has been run from several directories still has to name the one
-it wants. Vuln-class breadth remains out of scope: the seven classes and eight
-techniques stand as they were.
-
----
+were.---
 
 ## Appendix J — Gap-closure batch 6 (2026-10-20)
 
@@ -4886,7 +4826,7 @@ guessed): J1 — 8 (`test_parse_surface_capability.py`) + 7 new in
 Final verification (2026-10-20, re-run after the `views.py` import fix): 
 `pytest tests/vuln_engine tests/ui -q` → **1009 passed, 17 skipped, 0 failed** 
 (exit 0; the only warning is a deprecation notice from `psycopg_pool` in the UI
-demo test, not a test failure); `mypy service/vuln_engine run_engine.py
+demo test, not a test failure); `mypy service/vuln_engine run_engine.py 
 run_twogate.py service/ui` → **Success: no issues found in 152 source files** 
 (exit 0). The item-test count (8 + 7 + 6 = 21) plus the direct-hermitic 
 predecessor (1009 - 21 = 988 on `tests/vuln_engine tests/ui`) reconciles exactly 
@@ -4917,3 +4857,4 @@ the one pre-existing live-browser failure). This batch's final line is therefore
 1009 passed / 17 skipped / 0 failed on the same `tests/vuln_engine tests/ui`
 path, with no prior assertion retuned and no existing test changed to make the
 number hold.
+
